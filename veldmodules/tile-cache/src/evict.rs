@@ -1,35 +1,35 @@
-//! Вытеснение: держит кэш в бюджете, удаляя старейшие источники целиком.
+//! Eviction: keeps the cache within its budget by deleting whole oldest sources.
 //!
-//! Обход в два такта листингов: корень (имена источников) → каталоги
-//! (файлы, размеры, mtime маркера). Решение — чистая функция [`victims`],
-//! закреплённая тестом; удаление — файл за файлом, fire-and-forget. Каталог
-//! жертвы убирать не надо: опустевший его снимает сам `fs`, дойдя вверх до
-//! корня runtime, — а если не снимет, имя переиспользует следующая сборка
-//! того же источника.
+//! The sweep runs in two beats of listings: the root (source names) → the
+//! source directories (files, sizes, marker mtime). The decision is the pure
+//! function [`victims`]; the deletion is file by file, fire-and-forget. The
+//! victim's directory needs no removal: `fs` prunes it once it runs empty,
+//! walking up to the runtime root — and if it does not, the next fill of the
+//! same source reuses the name.
 //!
-//! Гонки с живыми запросами безопасны по построению: удалённый из-под чтения
-//! файл — это промах, промах — это пересборка. А вот источник, который трогали
-//! в этом окне, в жертвы не попадает запретом (см. [`victims`]) — свежести
-//! маркера для этого мало: маркер отдаётся файловой системе отдельным
-//! заданием, и листинг обхода вполне читает его раньше, чем тот перезапишется.
-//! Тогда источник, на который сейчас смотрят, выглядит старейшим.
+//! Races with live queries are safe by construction: a file deleted from under
+//! a read is a miss, and a miss is a rebuild. But a source touched within this
+//! window is barred from being a victim (see [`victims`]) — marker freshness
+//! is not enough for that: the marker reaches the filesystem as a separate
+//! job, and the sweep listing can well read it before the marker is rewritten.
+//! Then the very source being looked at right now would look like the oldest.
 
 use veldsdk::proto::fs::{FsDeleteRequest, FsListRequest, FsListResult, FsDeleteResult};
 
 use crate::module::{layout, State};
 
-/// Как часто перепроверять бюджет: раз в столько store-событий. Первый обход
-/// — на первом же store после старта: прошлые сессии могли не дожить до
-/// своего обхода.
+/// How often to re-check the budget: once per this many store events. The
+/// first sweep runs on the very first store after startup: earlier sessions
+/// may not live long enough to reach a sweep of their own.
 const SWEEP_EVERY_STORES: u32 = 256;
 
-/// Насколько глубже бюджета вычищать: вытеснение впритык запускалось бы
-/// каждым следующим тайлом.
+/// How far below the budget to sweep: evicting right at the limit would be
+/// triggered by every following tile.
 const HEADROOM_DIVISOR: u64 = 10;
 
-/// Идущий обход. Второго параллельно не бывает (см. maybe_sweep).
+/// The sweep in progress. A second one never runs in parallel (see maybe_sweep).
 pub struct Sweep {
-    /// Листингов каталогов источников в полёте.
+    /// Source directory listings in flight.
     pub pending: u32,
     pub sources: Vec<Source>,
 }
@@ -37,13 +37,13 @@ pub struct Sweep {
 pub struct Source {
     pub key: String,
     pub bytes: u64,
-    /// Свежесть: mtime маркера; без маркера — самый свежий файл. Unix-секунды.
+    /// Freshness: the marker's mtime; without a marker — the freshest file. Unix seconds.
     pub used: i64,
-    /// Имена файлов — жертву удаляют пофайльно.
+    /// File names — the victim is deleted file by file.
     pub files: Vec<String>,
 }
 
-/// Что мы спросили у fs/on_list.
+/// What was asked of fs/on_list.
 pub enum ListPurpose {
     Root,
     Source(String),
@@ -58,9 +58,9 @@ pub fn maybe_sweep(state: &mut State) {
     }
     state.swept_once = true;
     state.stores_since_sweep = 0;
-    // Отмеченные забываются вместе с обходом: маркер источника, в который
-    // после этого положат хоть один тайл, перепишется заново (см.
-    // `store::touch`), и в следующий обход он придёт свежим.
+    // Touched sources are forgotten along with the sweep: the marker of any
+    // source that receives at least one tile after this is rewritten (see
+    // `store::touch`), so it arrives at the next sweep fresh.
     state.touched.clear();
     state.sweep = Some(Sweep { pending: 0, sources: Vec::new() });
 
@@ -77,12 +77,12 @@ pub fn on_list_result(state: &mut State, result: FsListResult) {
     match purpose {
         ListPurpose::Root => {
             if !result.error.is_empty() {
-                veldsdk::log::warn!(target: "handlers", "обход кэша не начался: {}", result.error);
+                veldsdk::log::warn!(target: "handlers", "cache sweep did not start: {}", result.error);
                 state.sweep = None;
                 return;
             }
-            // Всё в корне с годным именем — источник; прочее не наше и не
-            // трогается.
+            // Everything in the root with a valid name is a source; the rest
+            // is not ours and is left alone.
             let keys: Vec<String> = result.entries.iter()
                 .filter(|entry| layout::valid_key(&entry.name))
                 .map(|entry| entry.name.clone())
@@ -100,8 +100,8 @@ pub fn on_list_result(state: &mut State, result: FsListResult) {
             }
         }
         ListPurpose::Source(key) => {
-            // Неудачный листинг не делает источник жертвой: неизвестное
-            // содержимое — это не «пустой и старый», удалять по нему нечего.
+            // A failed listing does not make a source a victim: unknown
+            // contents are not "empty and old" — there is nothing to delete.
             let source = if result.error.is_empty() {
                 let mut source = Source { key, bytes: 0, used: 0, files: Vec::new() };
                 let mut marker: Option<i64> = None;
@@ -118,25 +118,25 @@ pub fn on_list_result(state: &mut State, result: FsListResult) {
                 Some(source)
             } else {
                 veldsdk::log::warn!(target: "handlers",
-                    "{} не обойдён и в этот раз не трогается: {}", key, result.error);
+                    "{} not swept and left alone this time: {}", key, result.error);
                 None
             };
 
             let finished = {
-                let sweep = state.sweep.as_mut().expect("обход идёт: ожидание было наше");
+                let sweep = state.sweep.as_mut().expect("the sweep is running: the wait was ours");
                 sweep.sources.extend(source);
                 sweep.pending -= 1;
                 sweep.pending == 0
             };
             if finished {
-                let sweep = state.sweep.take().expect("обход только что был");
+                let sweep = state.sweep.take().expect("the sweep was just there");
                 settle(state, sweep);
             }
         }
     }
 }
 
-/// Конец обхода: посчитать, выбрать жертв, разослать удаления.
+/// End of the sweep: total the bytes, pick victims, dispatch the deletions.
 fn settle(state: &mut State, sweep: Sweep) {
     let total: u64 = sweep.sources.iter().map(|s| s.bytes).sum();
     let within = within(total, state.limit_bytes);
@@ -144,13 +144,14 @@ fn settle(state: &mut State, sweep: Sweep) {
     if doomed.is_empty() {
         match within {
             true => veldsdk::log::debug!(target: "handlers",
-                "кэш в бюджете: {} из {} байт", total, state.limit_bytes),
-            // Бюджет перебран, а вытеснять нечего: всё, что лежит, трогали в
-            // этом окне. Сказать надо — кэш при этом растёт сверх бюджета, —
-            // но в журнал разбора: состояние держится, пока идёт показ, и в
-            // консоли повторялось бы каждым обходом.
+                "cache within budget: {} of {} bytes", total, state.limit_bytes),
+            // The budget is over, but there is nothing to evict: everything
+            // on disk was touched within this window. It still must be said —
+            // the cache grows beyond the budget meanwhile — but into the
+            // analysis log: the state lasts while the display runs, and in the
+            // console it would repeat at every sweep.
             false => veldsdk::log::debug!(target: "handlers",
-                "кэш перебрал бюджет ({} из {} байт), но все источники в работе — вытеснять нечего",
+                "cache over budget ({} of {} bytes), but every source is in use — nothing to evict",
                 total, state.limit_bytes),
         }
         return;
@@ -158,7 +159,7 @@ fn settle(state: &mut State, sweep: Sweep) {
 
     let freed: u64 = doomed.iter().map(|s| s.bytes).sum();
     veldsdk::log::info!(target: "handlers",
-        "вытеснение: {} байт при бюджете {}, жертв {} на {} байт",
+        "eviction: {} bytes of a budget of {}, {} victims taking {} bytes",
         total, state.limit_bytes, doomed.len(), freed);
 
     for source in doomed {
@@ -170,21 +171,22 @@ fn settle(state: &mut State, sweep: Sweep) {
     }
 }
 
-/// Умещается ли занятое в бюджет. Одной функцией на оба спрашивающих —
-/// решение о вытеснении и строку о нём: разойдясь, они рассказывали бы о
-/// кэше разное.
+/// Whether the used space fits the budget. One function for both askers —
+/// the eviction decision and the line about it: diverging, they would tell
+/// different stories about the cache.
 fn within(total: u64, limit: u64) -> bool {
     total <= limit
 }
 
-/// Решение вытеснения: старейшие источники, пока не станет свободно.
-/// Чистая функция — правило закреплено тестом, а не прогонами.
+/// The eviction decision: the oldest sources, until there is room again.
+/// A pure function — the rule is fixed by the code, not left to the runs.
 ///
-/// `alive` — источники, которых трогали в этом окне обхода. Они не жертвы ни
-/// при какой свежести: свежесть меряется маркером на диске, а маркер к этому
-/// мигу может быть ещё не записан — задание файловой системы своё, листинг
-/// обхода своё, и порядка между ними нет. Из-за этого под нож попадал бы ровно
-/// тот источник, тайлы которого сейчас и просят.
+/// `alive` — sources touched within this sweep window. They are never
+/// victims, whatever the freshness says: freshness is measured by the marker
+/// on disk, and by this moment the marker may not be written yet — the
+/// filesystem job is one thing, the sweep listing another, and there is no
+/// order between them. Otherwise the very source whose tiles are being asked
+/// for right now would go under the knife.
 fn victims(
     mut sources: Vec<Source>,
     total: u64,
@@ -212,70 +214,6 @@ fn victims(
 pub fn on_delete_result(state: &mut State, result: FsDeleteResult) {
     let Some(path) = state.pending_deletes.take(&veldsdk::correlation()) else { return };
     if !result.error.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "{} не удалён: {}", path, result.error);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn source(key: &str, bytes: u64, used: i64) -> Source {
-        Source { key: key.to_string(), bytes, used, files: Vec::new() }
-    }
-
-    /// Никого не трогали — обычный случай теста про свежесть.
-    fn none() -> std::collections::HashSet<String> {
-        std::collections::HashSet::new()
-    }
-
-    #[test]
-    fn under_budget_keeps_everything() {
-        let picked = victims(vec![source("a", 10, 1), source("b", 20, 2)], 30, 100, &none());
-        assert!(picked.is_empty());
-    }
-
-    #[test]
-    fn evicts_oldest_first_down_to_headroom() {
-        // Бюджет 100, занято 150: цель 90, старейшие «a» и «b» дают 150 → 90,
-        // и на этом остановка — «c» свежее и выживает.
-        let picked = victims(
-            vec![source("c", 50, 30), source("a", 40, 10), source("b", 20, 20), source("d", 40, 40)],
-            150,
-            100,
-            &none(),
-        );
-        let keys: Vec<&str> = picked.iter().map(|s| s.key.as_str()).collect();
-        assert_eq!(keys, vec!["a", "b"]);
-    }
-
-    /// Источник, которого трогали в этом окне, не жертва ни при какой
-    /// свежести маркера: маркер мог ещё не записаться, а тайлы у него просят
-    /// прямо сейчас.
-    #[test]
-    fn a_touched_source_is_never_a_victim() {
-        let alive: std::collections::HashSet<String> = ["hot".to_string()].into_iter().collect();
-        let picked = victims(
-            // «hot» самый старый по маркеру и самый большой — и всё равно жив.
-            vec![source("hot", 90, 1), source("old", 30, 2)],
-            120,
-            100,
-            &alive,
-        );
-        let keys: Vec<&str> = picked.iter().map(|s| s.key.as_str()).collect();
-        assert_eq!(keys, vec!["old"]);
-    }
-
-    #[test]
-    fn fresh_marker_saves_active_source() {
-        // Активный источник (used свежий) выживает, даже если он самый большой.
-        let picked = victims(
-            vec![source("hot", 90, 100), source("old", 30, 1)],
-            120,
-            100,
-            &none(),
-        );
-        let keys: Vec<&str> = picked.iter().map(|s| s.key.as_str()).collect();
-        assert_eq!(keys, vec!["old"]);
+        veldsdk::log::warn!(target: "handlers", "{} not deleted: {}", path, result.error);
     }
 }

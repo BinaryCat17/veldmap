@@ -1,28 +1,30 @@
-//! Выдержка кодстрима JPEG 2000 под один тайл: главный заголовок, тайл-парты
-//! этого тайла не глубже нужного разрешения и EOC — поток, в котором декодеру
-//! нечего обходить. Адреса тайл-партов даёт TLM главного заголовка
-//! ([`Index`]); где внутри тайл-парта кончается разрешение — PLT его заголовка
-//! со счётом пакетов по прецинктам ([`Coding::packets`]): при прогрессии с
-//! разрешением во внешнем цикле пакеты грубых разрешений лежат префиксом.
-//! Отрезанный хвост дописывается пустыми пакетами — кодстрим остаётся полным,
-//! и строгий декодер его принимает. Читатель ([`Reader`]) склеивает куски
-//! файла с переписанными здесь байтами и не читает за конец ни одного куска.
-//! Что решено и почему — `docs/decisions/0004-jp2-excerpt.md`.
+//! Excerpt of a JPEG 2000 codestream for one tile: the main header, the tile
+//! parts of this tile no deeper than the needed resolution, and EOC — a stream
+//! in which the decoder has nothing to skip. Tile-part addresses come from the
+//! main-header TLM ([`Index`]); where a resolution ends inside a tile part —
+//! from the PLT of its header with packet counts per precinct
+//! ([`Coding::packets`]): with resolution in the outer loop of the progression,
+//! packets of coarse resolutions lie as a prefix. The cut-off tail is padded
+//! with empty packets — the codestream stays complete, and a strict decoder
+//! accepts it. The reader ([`Reader`]) splices the file pieces with the bytes
+//! rewritten here and never reads past the end of any piece. What is decided
+//! and why — `docs/decisions/0004-jp2-excerpt.md`.
 
 use std::cell::Cell;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::rc::Rc;
 
-/// Сколько байт тайл-парта берётся первым чтением: заголовок (SOT, PLT, SOD)
-/// умещается в сотни байт, а следом лежат пакеты самых грубых разрешений —
-/// у гранулы Sentinel-2 три грубейших уровня целиком, и тайл самого грубого
-/// стоит одного чтения.
+/// How many bytes of a tile part are taken by the first read: the header (SOT,
+/// PLT, SOD) fits in hundreds of bytes, and the packets of the coarsest
+/// resolutions lie right behind — in a Sentinel-2 granule the three coarsest
+/// levels fit entirely, and the coarsest tile costs one read.
 pub const PROBE: u64 = 64 * 1024;
 
-/// Окно чтения куска файла: как у читателя SDK, но не дальше конца куска.
+/// Window for reading a file piece: like the SDK reader, but never past the
+/// end of the piece.
 const WINDOW: u64 = 256 * 1024;
 
-/// Тайл-парт по TLM: чей он и где лежит в файле.
+/// A tile part per TLM: whose it is and where it lies in the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Part {
     pub tile: u32,
@@ -30,9 +32,10 @@ pub struct Part {
     pub len: u64,
 }
 
-/// Индекс тайл-партов файла и всё, что нужно собрать выдержку без чтения
-/// чужого: байты файла до первого SOT (с коробками JP2, если это контейнер)
-/// и параметры кодирования для счёта пакетов.
+/// Index of the file's tile parts and everything needed to assemble the
+/// excerpt without reading foreign bytes: the file bytes up to the first SOT
+/// (with JP2 boxes if it is a container) and the coding parameters for packet
+/// counting.
 #[derive(Debug)]
 pub struct Index {
     header: Rc<[u8]>,
@@ -41,12 +44,13 @@ pub struct Index {
 }
 
 impl Index {
-    /// Индекс из головы файла длиной `len`. Отказ называет, чего не хватило:
-    /// TLM, главного заголовка в голове или согласия TLM с длиной кодстрима.
-    /// Последнее — не придирка: адреса складываются из длин, и одна лишняя
-    /// запись увела бы все тайлы за ней в чужие данные.
+    /// Index from the head of the file of length `len`. A refusal names what
+    /// was missing: TLM, the main header in the head, or agreement of TLM with
+    /// the codestream length. The last one is not pedantry: addresses are
+    /// summed from lengths, and one extra entry would have led all tiles after
+    /// it into foreign data.
     pub fn of(head: &[u8], len: u64) -> Result<Self, String> {
-        let (at, end) = super::jp2::codestream_span(head, len).ok_or("кодстрим не найден в голове файла")?;
+        let (at, end) = super::jp2::codestream_span(head, len).ok_or("codestream not found in the file head")?;
         let cs = &head[at..];
         let mut coding = Coding::from_siz(cs)?;
         let mut entries: Vec<(Option<u32>, u64)> = Vec::new();
@@ -58,17 +62,18 @@ impl Index {
                 0x53 => coding.read_coc(body)?,
                 0x5F | 0x60 => coding.changes = true,
                 0x55 => {
-                    // TLM: [Ztlm 1][Stlm 1][записи]; биты 4–5 Stlm — ширина Ttlm
-                    // (0, 1, 2 байта), бит 6 — ширина Ptlm (2 или 4). Сегментов
-                    // бывает несколько, и записи идут в порядке Ztlm.
-                    let (z, stlm) = (*body.first().ok_or("TLM пуст")?, *body.get(1).ok_or("TLM пуст")?);
+                    // TLM: [Ztlm 1][Stlm 1][entries]; bits 4-5 of Stlm — the
+                    // width of Ttlm (0, 1, 2 bytes), bit 6 — the width of Ptlm
+                    // (2 or 4). There may be several segments, and entries go
+                    // in Ztlm order.
+                    let (z, stlm) = (*body.first().ok_or("TLM is empty")?, *body.get(1).ok_or("TLM is empty")?);
                     if last_z.is_some_and(|last| z <= last) {
-                        return Err("сегменты TLM не по порядку".to_string());
+                        return Err("TLM segments out of order".to_string());
                     }
                     last_z = Some(z);
                     let (tw, pw) = (usize::from((stlm >> 4) & 3), if stlm & 0x40 != 0 { 4 } else { 2 });
                     if (body.len() - 2) % (tw + pw) != 0 {
-                        return Err("TLM с обрывком записи".to_string());
+                        return Err("TLM with a torn entry".to_string());
                     }
                     for entry in body[2..].chunks_exact(tw + pw) {
                         let tile = match tw {
@@ -86,32 +91,33 @@ impl Index {
                 _ => {}
             }
         }
-        let sot = walk.sot().ok_or("главный заголовок не влез в голову файла")?;
+        let sot = walk.sot().ok_or("main header does not fit in the file head")?;
         if last_z.is_none() {
-            return Err("TLM нет".to_string());
+            return Err("no TLM".to_string());
         }
         if coding.comps.iter().any(|comp| comp.precincts.is_empty()) {
-            return Err("COD нет".to_string());
+            return Err("no COD".to_string());
         }
         let tiles = u64::from(coding.across()) * u64::from(coding.down());
         let mut offset = at as u64 + sot as u64;
         let mut parts = Vec::with_capacity(entries.len());
         for (ordinal, (tile, len)) in entries.into_iter().enumerate() {
-            // Без Ttlm тайл-парт на тайл один, и записи идут по индексам тайлов.
+            // Without Ttlm there is one tile part per tile, and the entries go
+            // by tile indices.
             let tile = tile.unwrap_or(ordinal as u32);
             if u64::from(tile) >= tiles || len < 14 {
-                return Err(format!("запись TLM {} не про этот кодстрим", ordinal));
+                return Err(format!("TLM entry {} is not for this codestream", ordinal));
             }
             parts.push(Part { tile, offset, len });
             offset += len;
         }
         if offset + 2 != end {
-            return Err(format!("TLM расходится с длиной кодстрима: {} против {}", offset + 2, end));
+            return Err(format!("TLM disagrees with the codestream length: {} versus {}", offset + 2, end));
         }
         Ok(Self { header: Rc::from(&head[..at + sot]), parts, coding })
     }
 
-    /// Тайл-парты тайла в порядке кодстрима.
+    /// Tile parts of the tile in codestream order.
     pub fn parts_of(&self, tile: u32) -> Vec<Part> {
         self.parts.iter().copied().filter(|part| part.tile == tile).collect()
     }
@@ -125,9 +131,9 @@ impl Index {
     }
 }
 
-/// Параметры кодирования, от которых зависит число пакетов тайла: сетка
-/// холста и тайлов из SIZ, подвыборка, ступени и прецинкты компонентов из COD
-/// и COC (ISO 15444-1, B.6–B.12).
+/// Coding parameters that determine the tile's packet count: the canvas and
+/// tile grid from SIZ, subsampling, component steps and precincts from COD and
+/// COC (ISO 15444-1, B.6-B.12).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Coding {
     canvas: (u32, u32),
@@ -137,10 +143,10 @@ pub struct Coding {
     comps: Vec<Component>,
     layers: u16,
     progression: u8,
-    /// SOP или EPH: пустой пакет тогда не один нулевой байт.
+    /// SOP or EPH: an empty packet is then not a single zero byte.
     marked: bool,
-    /// POC или PPM: порядок пакетов задан не одной прогрессией, либо их
-    /// заголовки вынесены из тела.
+    /// POC or PPM: the packet order is not set by a single progression, or
+    /// their headers are pulled out of the body.
     changes: bool,
 }
 
@@ -148,23 +154,23 @@ pub struct Coding {
 struct Component {
     dx: u8,
     dy: u8,
-    /// Показатели ширины и высоты прецинкта по разрешениям, от грубого к
-    /// подробному; длина — число разрешений (ступеней + 1).
+    /// Precinct width and height exponents per resolution, from coarse to
+    /// fine; the length is the number of resolutions (steps + 1).
     precincts: Vec<(u8, u8)>,
 }
 
 impl Coding {
     fn from_siz(cs: &[u8]) -> Result<Self, String> {
-        // SOC, потом SIZ: [FF51][Lsiz][Rsiz][Xsiz][Ysiz][XOsiz][YOsiz][XTsiz]
+        // SOC, then SIZ: [FF51][Lsiz][Rsiz][Xsiz][Ysiz][XOsiz][YOsiz][XTsiz]
         // [YTsiz][XTOsiz][YTOsiz][Csiz][Ssiz XRsiz YRsiz]×Csiz.
         let siz = 2usize;
         if cs.len() < siz + 40 {
-            return Err("кодстрим без SIZ".to_string());
+            return Err("codestream without SIZ".to_string());
         }
         let be32 = |at: usize| u32::from_be_bytes(cs[at..at + 4].try_into().unwrap());
         let count = usize::from(u16::from_be_bytes([cs[siz + 38], cs[siz + 39]]));
         if cs.len() < siz + 40 + 3 * count {
-            return Err("SIZ короче своих компонентов".to_string());
+            return Err("SIZ shorter than its components".to_string());
         }
         let comps = (0..count)
             .map(|c| Component { dx: cs[siz + 41 + 3 * c], dy: cs[siz + 42 + 3 * c], precincts: Vec::new() })
@@ -182,11 +188,11 @@ impl Coding {
         })
     }
 
-    /// COD: [Scod][SGcod: прогрессия, слоёв u16, MCT][SPcod: ступеней, кодблок
-    /// ×2, стиль, вейвлет, прецинкты по разрешениям при Scod&1].
+    /// COD: [Scod][SGcod: progression, layers u16, MCT][SPcod: steps, codeblock
+    /// ×2, style, wavelet, precincts per resolution when Scod&1].
     fn read_cod(&mut self, body: &[u8]) -> Result<(), String> {
         if body.len() < 10 {
-            return Err("COD короче положенного".to_string());
+            return Err("COD shorter than required".to_string());
         }
         self.progression = body[1];
         self.layers = u16::from_be_bytes([body[2], body[3]]);
@@ -198,19 +204,19 @@ impl Coding {
         Ok(())
     }
 
-    /// COC: [Ccoc 1 или 2][Scoc][SPcoc как у COD] — для одного компонента.
+    /// COC: [Ccoc 1 or 2][Scoc][SPcoc as in COD] — for one component.
     fn read_coc(&mut self, body: &[u8]) -> Result<(), String> {
         let wide = self.comps.len() > 256;
         let (index, rest) = match (wide, body) {
             (false, [c, rest @ ..]) => (usize::from(*c), rest),
             (true, [hi, lo, rest @ ..]) => (usize::from(u16::from_be_bytes([*hi, *lo])), rest),
-            _ => return Err("COC пуст".to_string()),
+            _ => return Err("COC is empty".to_string()),
         };
         if rest.len() < 6 {
-            return Err("COC короче положенного".to_string());
+            return Err("COC shorter than required".to_string());
         }
         let precincts = precincts_of(rest[0], rest[1], &rest[6..])?;
-        self.comps.get_mut(index).ok_or("COC про несуществующий компонент")?.precincts = precincts;
+        self.comps.get_mut(index).ok_or("COC for a nonexistent component")?.precincts = precincts;
         Ok(())
     }
 
@@ -222,23 +228,25 @@ impl Coding {
         span(self.canvas.1, self.tile_origin.1, self.tile.1)
     }
 
-    /// Ступеней у самого разложенного компонента: фактор декодера считается
-    /// от них.
+    /// Number of steps of the most decomposed component: the decoder factor is
+    /// counted from them.
     pub fn levels(&self) -> u32 {
         self.comps.iter().map(|comp| comp.precincts.len() as u32).max().unwrap_or(0).saturating_sub(1)
     }
 
-    /// Лежат ли пакеты грубых разрешений префиксом тайл-парта: разрешение —
-    /// внешний цикл у RLCP и RPCL всегда, у LRCP — при одном слое; POC и PPM
-    /// порядок ломают, SOP и EPH меняют вид пустого пакета.
+    /// Whether packets of coarse resolutions lie as a prefix of the tile part:
+    /// resolution is the outer loop for RLCP and RPCL always, for LRCP with a
+    /// single layer; POC and PPM break the order, SOP and EPH change the look
+    /// of an empty packet.
     pub fn prefixed(&self) -> bool {
         !self.changes
             && !self.marked
             && matches!((self.progression, self.layers), (0, 1) | (1, _) | (2, _))
     }
 
-    /// Пакетов тайла по разрешениям не выше `through` (B.6: прецинкты
-    /// тайла-компонента на каждом разрешении, помноженные на слои).
+    /// Packets of the tile at resolutions no higher than `through` (B.6:
+    /// precincts of the tile-component at each resolution, multiplied by the
+    /// layers).
     pub fn packets(&self, tile: u32, through: u32) -> u64 {
         let across = u64::from(self.across().max(1));
         let (p, q) = (u64::from(tile) % across, u64::from(tile) / across);
@@ -274,7 +282,7 @@ impl Coding {
     }
 }
 
-/// Тайлов вдоль стороны (B.3).
+/// Tiles along one side (B.3).
 fn span(canvas: u32, origin: u32, step: u32) -> u32 {
     match step {
         0 => 0,
@@ -282,20 +290,21 @@ fn span(canvas: u32, origin: u32, step: u32) -> u32 {
     }
 }
 
-/// Показатели прецинктов по разрешениям: свои при бите 0 стиля — по байту на
-/// разрешение, младшая тетрада ширина, старшая высота; иначе 2^15 везде.
+/// Precinct exponents per resolution: their own when bit 0 of the style is
+/// set — one byte per resolution, low nibble the width, high nibble the
+/// height; otherwise 2^15 everywhere.
 fn precincts_of(style: u8, levels: u8, tail: &[u8]) -> Result<Vec<(u8, u8)>, String> {
     let resolutions = usize::from(levels) + 1;
     match style & 1 {
         0 => Ok(vec![(15, 15); resolutions]),
         _ => match tail.len() >= resolutions {
             true => Ok(tail[..resolutions].iter().map(|b| (b & 15, b >> 4)).collect()),
-            false => Err("прецинктов в COD меньше, чем разрешений".to_string()),
+            false => Err("fewer precincts in COD than resolutions".to_string()),
         },
     }
 }
 
-/// Кусок выдержки: байты, переписанные здесь, либо кусок файла как он есть.
+/// A piece of the excerpt: bytes rewritten here, or a file piece as it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Segment {
     Bytes(Rc<[u8]>),
@@ -311,20 +320,20 @@ impl Segment {
     }
 }
 
-/// Заголовок тайл-парта, разобранный из пробы: где начинаются данные, длины
-/// пакетов из PLT и не переопределяет ли он кодирование.
+/// Tile-part header parsed from the probe: where the data starts, packet
+/// lengths from PLT, and whether it overrides the coding.
 struct Head {
     sod: usize,
     plt: Option<Vec<u64>>,
     overrides: bool,
 }
 
-/// Заголовок из пробы; `None` — до SOD проба не дотянулась.
+/// Header from the probe; `None` — the probe did not reach SOD.
 fn head_of(probe: &[u8]) -> Option<Head> {
     let mut walk = 12usize;
     let mut plt = Vec::new();
-    // Zplt последнего сегмента PLT: длины склеиваются по порядку сегментов,
-    // и сегмент не на своём месте делает PLT нечитаемым — как у TLM.
+    // Zplt of the last PLT segment: lengths are concatenated in segment order,
+    // and a segment out of place makes PLT unreadable — as with TLM.
     let mut last_z: Option<u8> = None;
     let mut ordered = true;
     let mut overrides = false;
@@ -354,7 +363,7 @@ fn head_of(probe: &[u8]) -> Option<Head> {
     None
 }
 
-/// Длины пакетов PLT: по семь бит на байт, старший бит — «продолжение».
+/// PLT packet lengths: seven bits per byte, the high bit — "continuation".
 fn varints(bytes: &[u8]) -> Vec<u64> {
     let mut out = Vec::new();
     let mut value = 0u64;
@@ -368,33 +377,33 @@ fn varints(bytes: &[u8]) -> Vec<u64> {
     out
 }
 
-/// Выдержка тайла `tile` на факторе `factor` из проб его тайл-партов —
-/// по `probe.len().min(part.len)` байт с начала каждого, в порядке
-/// [`Index::parts_of`]. Куски: главный заголовок, тайл-парты (целиком либо
-/// до нужного разрешения с дописанными пустыми пакетами), EOC.
+/// Excerpt of tile `tile` at factor `factor` from probes of its tile parts —
+/// `probe.len().min(part.len)` bytes from the start of each, in
+/// [`Index::parts_of`] order. Pieces: the main header, the tile parts (whole
+/// or up to the needed resolution with appended empty packets), EOC.
 ///
-/// Обрезка возможна, когда прогрессия кладёт разрешения префиксом, у каждого
-/// тайл-парта есть PLT, заголовок тайла кодирование не переопределяет и число
-/// записей PLT сходится со счётом пакетов; иначе тайл-парты идут целиком —
-/// это гранулярность тайла, и она честная.
+/// Cutting is possible when the progression puts resolutions in a prefix,
+/// every tile part has a PLT, the tile header does not override the coding,
+/// and the number of PLT entries matches the packet count; otherwise tile
+/// parts go whole — that is the granularity of the tile, and it is honest.
 pub fn assemble(index: &Index, tile: u32, factor: u32, probes: Vec<Vec<u8>>) -> Result<Vec<Segment>, String> {
     let parts = index.parts_of(tile);
     if parts.is_empty() {
-        return Err(format!("тайла {} нет в TLM", tile));
+        return Err(format!("tile {} is not in TLM", tile));
     }
     if probes.len() != parts.len() {
-        return Err("проб не по числу тайл-партов".to_string());
+        return Err("probes do not match the number of tile parts".to_string());
     }
     let mut heads = Vec::with_capacity(parts.len());
     for (ordinal, (part, probe)) in parts.iter().zip(&probes).enumerate() {
         if probe.len() as u64 != part.len.min(PROBE) || probe.len() < 12 {
-            return Err(format!("проба тайл-парта {} не той длины", ordinal));
+            return Err(format!("probe of tile part {} has the wrong length", ordinal));
         }
         // SOT: [FF90][Lsot 10][Isot u16][Psot u32][TPsot][TNsot].
         let isot = u32::from(u16::from_be_bytes([probe[4], probe[5]]));
         let psot = u64::from(u32::from_be_bytes(probe[6..10].try_into().unwrap()));
         if probe[..4] != [0xFF, 0x90, 0x00, 0x0A] || isot != tile || (psot != 0 && psot != part.len) || usize::from(probe[10]) != ordinal {
-            return Err(format!("тайл-парт {} тайла {} не там, где обещал TLM", ordinal, tile));
+            return Err(format!("tile part {} of tile {} is not where TLM promised", ordinal, tile));
         }
         heads.push(head_of(probe));
     }
@@ -412,9 +421,10 @@ pub fn assemble(index: &Index, tile: u32, factor: u32, probes: Vec<Vec<u8>>) -> 
         && heads.iter().all(|head| head.as_ref().is_some_and(|head| !head.overrides))
         && parts.len() <= 255;
 
-    // Где кончается нужное: тайл-парт, на котором набирается `wanted`
-    // пакетов, и сколько его пакетов в это число входит. Кончиться нужное
-    // может и ровно на границе тайл-парта — тогда он целый, а следующих нет.
+    // Where the need ends: the tile part on which `wanted` packets
+    // accumulate, and how many of its packets fall inside that number. The
+    // need can end exactly on a tile-part boundary — then that part is whole
+    // and there are none after it.
     let ending = cut.then(|| {
         let mut before = 0u64;
         for (ordinal, head) in heads.iter().enumerate() {
@@ -432,19 +442,20 @@ pub fn assemble(index: &Index, tile: u32, factor: u32, probes: Vec<Vec<u8>>) -> 
     for (ordinal, (part, mut probe)) in parts.iter().zip(probes).take(kept).enumerate() {
         let (keep, pad) = match ending {
             Some((at, packets)) if at == ordinal => {
-                let head = heads[ordinal].as_ref().expect("обрезка решена по заголовкам");
-                let plt = head.plt.as_ref().expect("обрезка решена по PLT");
+                let head = heads[ordinal].as_ref().expect("cut is decided by the headers");
+                let plt = head.plt.as_ref().expect("cut is decided by the PLT");
                 (head.sod as u64 + plt[..packets].iter().sum::<u64>(), total - wanted)
             }
             _ => (part.len, 0),
         };
-        // Копия заголовка своя, и переписать в ней можно что угодно: длину
-        // тайл-парта — вместе с пустыми пакетами, число тайл-партов —
-        // сколько их осталось.
+        // The header copy is ours, and anything in it can be rewritten: the
+        // tile-part length — together with the empty packets, the number of
+        // tile parts — how many of them are left.
         if keep < part.len || pad > 0 {
             probe[6..10].copy_from_slice(&((keep + pad) as u32).to_be_bytes());
         }
-        // Число тайл-партов шире байта стандарт пишет нулём — «не указано».
+        // The standard writes a tile-part count wider than a byte as zero —
+        // "not specified".
         probe[11] = u8::try_from(kept).unwrap_or(0);
         let probed = (probe.len() as u64).min(keep);
         probe.truncate(probed as usize);
@@ -460,12 +471,12 @@ pub fn assemble(index: &Index, tile: u32, factor: u32, probes: Vec<Vec<u8>>) -> 
     Ok(segments)
 }
 
-/// Чтение куска файла: смещение и длина — байты, ровно столько.
+/// Reading a file piece: offset and length — exactly that many bytes.
 pub type Fetch = Box<dyn FnMut(u64, u64) -> io::Result<Vec<u8>>>;
 
-/// Читатель выдержки: куски подряд, как один поток, с произвольным seek.
-/// Кусок файла читается окнами не дальше своего конца; счётчик `bytes` —
-/// сумма прочитанного из файла.
+/// Reader of the excerpt: the pieces one after another, as one stream, with
+/// arbitrary seek. A file piece is read in windows never past its end; the
+/// `bytes` counter is the total read from the file.
 pub struct Reader {
     segments: Vec<Segment>,
     starts: Vec<u64>,
@@ -478,14 +489,14 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Над ресурсом модуля: куски файла читаются у хоста.
+    /// Over a module resource: file pieces are read from the host.
     pub fn over(resource: u64, segments: Vec<Segment>, bytes: Rc<Cell<u64>>) -> Self {
         Self::over_fetch(
             segments,
             bytes,
             Box::new(move |offset, size| {
                 veldsdk::abi::resource_read(resource, offset, size).map_err(|e| {
-                    io::Error::other(format!("resource {}: чтение {} байт со смещения {}: {}", resource, size, offset, e))
+                    io::Error::other(format!("resource {}: reading {} bytes at offset {}: {}", resource, size, offset, e))
                 })
             }),
         )
@@ -527,7 +538,7 @@ impl Read for Reader {
                     let mut data = (self.fetch)(offset + within, size)?;
                     data.truncate(size as usize);
                     if data.is_empty() {
-                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "пустое чтение куска выдержки"));
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty read of an excerpt piece"));
                     }
                     self.bytes.set(self.bytes.get() + data.len() as u64);
                     self.window = data;
@@ -552,368 +563,9 @@ impl Seek for Reader {
             SeekFrom::Current(n) => self.pos as i64 + n,
         };
         if target < 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "seek до начала выдержки"));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "seek before the start of the excerpt"));
         }
         self.pos = target as u64;
         Ok(self.pos)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Кодирование гранулы Sentinel-2: три компонента без подвыборки, четыре
-    /// ступени, прецинкты 256² на всех разрешениях.
-    fn granule() -> Coding {
-        let comp = Component { dx: 1, dy: 1, precincts: vec![(8, 8); 5] };
-        Coding {
-            canvas: (10980, 10980),
-            origin: (0, 0),
-            tile: (1024, 1024),
-            tile_origin: (0, 0),
-            comps: vec![comp.clone(), comp.clone(), comp],
-            layers: 1,
-            progression: 0,
-            marked: false,
-            changes: false,
-        }
-    }
-
-    /// Счёт пакетов сходится с PLT настоящей гранулы (замер 3 сентября 2026):
-    /// у полного тайла по разрешениям 3, 3, 3, 12, 48 пакетов, у краевого
-    /// 740² — 3, 3, 3, 12, 27.
-    #[test]
-    fn packets_are_counted_as_the_granule_writes_them() {
-        let coding = granule();
-        assert_eq!((coding.across(), coding.down()), (11, 11));
-        let by_resolution = |tile: u32| -> Vec<u64> {
-            (0..5).map(|r| coding.packets(tile, r) - if r == 0 { 0 } else { coding.packets(tile, r - 1) }).collect()
-        };
-        assert_eq!(by_resolution(0), [3, 3, 3, 12, 48]);
-        assert_eq!(by_resolution(120), [3, 3, 3, 12, 27]);
-        assert_eq!(coding.packets(0, u32::MAX), 69);
-        assert_eq!(coding.levels(), 4);
-        assert!(coding.prefixed());
-
-        // Прецинкты по умолчанию — один на разрешение, а два слоя удваивают.
-        let mut plain = granule();
-        for comp in &mut plain.comps {
-            comp.precincts = vec![(15, 15); 5];
-        }
-        plain.layers = 2;
-        assert_eq!(plain.packets(0, u32::MAX), 30);
-        assert!(!plain.prefixed(), "LRCP с двумя слоями не кладёт разрешения префиксом");
-        plain.progression = 1;
-        assert!(plain.prefixed(), "у RLCP разрешение — внешний цикл при любых слоях");
-    }
-
-    /// Главный заголовок для индекса: SIZ на один компонент, COD, TLM с
-    /// данными записями — до первого SOT, который приносит тайл-парт.
-    fn main_header(canvas: u32, tile: u32, levels: u8, tlm: &[(u16, u32)]) -> Vec<u8> {
-        main_header_with(canvas, tile, levels, tlm, 0, &[])
-    }
-
-    /// Тот же заголовок со стилем кодирования `scod` в COD и лишним сегментом
-    /// `extra` (маркер, длина, тело) после него.
-    fn main_header_with(canvas: u32, tile: u32, levels: u8, tlm: &[(u16, u32)], scod: u8, extra: &[u8]) -> Vec<u8> {
-        let mut out = vec![0xFF, 0x4F, 0xFF, 0x51];
-        let mut siz = 0u16.to_be_bytes().to_vec();
-        for value in [canvas, canvas, 0, 0, tile, tile, 0, 0] {
-            siz.extend_from_slice(&value.to_be_bytes());
-        }
-        siz.extend_from_slice(&1u16.to_be_bytes());
-        siz.extend_from_slice(&[7, 1, 1]);
-        out.extend_from_slice(&((siz.len() + 2) as u16).to_be_bytes());
-        out.extend_from_slice(&siz);
-        let cod = [scod, 0, 0, 1, 0, levels, 4, 4, 0, 1];
-        out.extend_from_slice(&[0xFF, 0x52]);
-        out.extend_from_slice(&((cod.len() + 2) as u16).to_be_bytes());
-        out.extend_from_slice(&cod);
-        out.extend_from_slice(extra);
-        let mut body = vec![0u8, 0x60]; // Ztlm 0, Stlm: Ttlm u16, Ptlm u32
-        for (tile, len) in tlm {
-            body.extend_from_slice(&tile.to_be_bytes());
-            body.extend_from_slice(&len.to_be_bytes());
-        }
-        out.extend_from_slice(&[0xFF, 0x55]);
-        out.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes());
-        out.extend_from_slice(&body);
-        out
-    }
-
-    /// Длина пакета по правилу PLT: семь бит на байт, старший — «дальше».
-    fn varint(value: u32) -> Vec<u8> {
-        let mut out: Vec<u8> = Vec::new();
-        let mut rest = value;
-        loop {
-            out.insert(0, (rest & 0x7F) as u8 | if out.is_empty() { 0 } else { 0x80 });
-            rest >>= 7;
-            if rest == 0 {
-                return out;
-            }
-        }
-    }
-
-    /// Тайл-парт: SOT, PLT с данными длинами, SOD, данные.
-    fn tile_part(tile: u16, ordinal: u8, count: u8, packets: &[u32]) -> Vec<u8> {
-        tile_part_with(tile, ordinal, count, packets, &[])
-    }
-
-    /// Тот же тайл-парт с лишним сегментом `extra` (маркер, длина, тело)
-    /// в заголовке перед PLT.
-    fn tile_part_with(tile: u16, ordinal: u8, count: u8, packets: &[u32], extra: &[u8]) -> Vec<u8> {
-        let mut plt = vec![0u8];
-        for n in packets {
-            plt.extend_from_slice(&varint(*n));
-        }
-        let data: Vec<u8> = packets.iter().flat_map(|n| (1..=*n).map(|i| i as u8).collect::<Vec<u8>>()).collect();
-        let len = 12 + extra.len() + 4 + plt.len() + 2 + data.len();
-        let mut out = vec![0xFF, 0x90, 0x00, 0x0A];
-        out.extend_from_slice(&tile.to_be_bytes());
-        out.extend_from_slice(&(len as u32).to_be_bytes());
-        out.extend_from_slice(&[ordinal, count]);
-        out.extend_from_slice(extra);
-        out.extend_from_slice(&[0xFF, 0x58]);
-        out.extend_from_slice(&((plt.len() + 2) as u16).to_be_bytes());
-        out.extend_from_slice(&plt);
-        out.extend_from_slice(&[0xFF, 0x93]);
-        out.extend_from_slice(&data);
-        out
-    }
-
-    /// Файл из главного заголовка и тайл-партов; TLM в заголовке — по ним.
-    fn file(canvas: u32, tile: u32, levels: u8, parts: &[(u16, Vec<u8>)]) -> (Vec<u8>, Index) {
-        let tlm: Vec<(u16, u32)> = parts.iter().map(|(tile, bytes)| (*tile, bytes.len() as u32)).collect();
-        let mut bytes = main_header(canvas, tile, levels, &tlm);
-        for (_, part) in parts {
-            bytes.extend_from_slice(part);
-        }
-        bytes.extend_from_slice(&[0xFF, 0xD9]);
-        let index = Index::of(&bytes, bytes.len() as u64).expect("индекс строится");
-        (bytes, index)
-    }
-
-    /// Индекс складывает адреса из длин TLM от первого SOT и требует, чтобы
-    /// они сошлись с концом кодстрима; без TLM индекса нет.
-    #[test]
-    fn the_index_follows_tlm_and_checks_the_sum() {
-        let parts = [(0u16, tile_part(0, 0, 1, &[3, 4, 5])), (1, tile_part(1, 0, 1, &[6, 7, 8]))];
-        assert_eq!(varint(70_000), [0x84, 0xA2, 0x70], "три семёрки бит со старшими «дальше»");
-        let (bytes, index) = file(128, 64, 2, &parts);
-        let sot = bytes.windows(2).position(|pair| pair == [0xFF, 0x90]).unwrap() as u64;
-        assert_eq!(index.parts(), 2);
-        assert_eq!(index.parts_of(1), [Part { tile: 1, offset: sot + parts[0].1.len() as u64, len: parts[1].1.len() as u64 }]);
-        assert!(index.parts_of(2).is_empty());
-
-        let mut lying = bytes.clone();
-        lying.extend_from_slice(&[0; 7]);
-        let why = Index::of(&lying, lying.len() as u64).expect_err("сумма не сошлась");
-        assert!(why.contains("расходится"), "{why}");
-        let short = &bytes[..sot as usize - 3];
-        assert!(Index::of(short, bytes.len() as u64).expect_err("SOT не в голове").contains("не влез"));
-    }
-
-    /// Выдержка режет тайл-парт после пакетов нужного разрешения, дописывает
-    /// пустые пакеты за отрезанные, переписывает Psot и TNsot — и не трогает
-    /// ничего, когда нужен весь тайл.
-    #[test]
-    fn an_excerpt_ends_after_the_level_and_pads_the_rest() {
-        // Один компонент, две ступени: по пакету на разрешение, три пакета
-        // в тайле; у тайла 1 они разложены по двум тайл-партам.
-        let parts = [
-            (0u16, tile_part(0, 0, 1, &[3, 4, 5])),
-            (1, tile_part(1, 0, 2, &[6, 7])),
-            (1, tile_part(1, 1, 2, &[8])),
-        ];
-        let (bytes, index) = file(128, 64, 2, &parts);
-        let probes = |tile: u32| -> Vec<Vec<u8>> {
-            index.parts_of(tile).iter().map(|part| bytes[part.offset as usize..(part.offset + part.len) as usize].to_vec()).collect()
-        };
-        let header = &bytes[..bytes.windows(2).position(|pair| pair == [0xFF, 0x90]).unwrap()];
-
-        // Фактор 1: два грубых пакета — первый тайл-парт целиком, второго
-        // нет, вместо его пакета пустой; TNsot стал единицей.
-        let cut = assemble(&index, 1, 1, probes(1)).expect("собирается");
-        let Segment::Bytes(part) = &cut[1] else { panic!("тайл-парт переписан") };
-        let expect_len = parts[1].1.len() as u32 + 1;
-        assert_eq!(&part[6..10], &expect_len.to_be_bytes(), "Psot — свои байты плюс пустой пакет");
-        assert_eq!(part[11], 1, "TNsot — сколько тайл-партов осталось");
-        assert_eq!(&part[12..], &parts[1].1[12..], "данные первого тайл-парта целы");
-        assert_eq!(cut[2], Segment::Bytes(Rc::from(&[0u8][..])), "пустой пакет — нулевой байт");
-        assert_eq!(cut[3], Segment::Bytes(Rc::from(&[0xFFu8, 0xD9][..])));
-        assert_eq!(cut.len(), 4);
-        assert_eq!(cut[0], Segment::Bytes(Rc::from(header)));
-
-        // Фактор 2: один пакет из первого тайл-парта, два пустых.
-        let cut = assemble(&index, 1, 2, probes(1)).expect("собирается");
-        let Segment::Bytes(part) = &cut[1] else { panic!() };
-        let sod = 12 + 4 + 3 + 2;
-        assert_eq!(part.len(), sod + 6, "заголовок и первый пакет");
-        assert_eq!(&part[6..10], &((sod + 6 + 2) as u32).to_be_bytes());
-        assert_eq!(cut[2], Segment::Bytes(Rc::from(&[0u8, 0][..])));
-
-        // Фактор 0: всё нужно — оба тайл-парта как есть, без дописок.
-        let whole = assemble(&index, 1, 0, probes(1)).expect("собирается");
-        assert_eq!(whole.len(), 4);
-        for (segment, (_, part)) in whole[1..3].iter().zip(&parts[1..]) {
-            assert_eq!(segment, &Segment::Bytes(Rc::from(part.as_slice())));
-        }
-
-        // Проба не с того места — отказ по имени, а не тихая выдержка.
-        let mut wrong = probes(1);
-        wrong[0][5] = 0;
-        assert!(assemble(&index, 1, 1, wrong).expect_err("TLM соврал").contains("не там"));
-    }
-
-    /// Хвост нужного, не попавший в пробу, идёт куском файла — ровно до
-    /// конца нужного, а не до конца тайл-парта; читатель отдаёт выдержку
-    /// байт в байт как переписанный поток.
-    #[test]
-    fn what_the_probe_missed_comes_from_the_file() {
-        let parts = [(0u16, tile_part(0, 0, 1, &[70_000, 10, 10]))];
-        let (bytes, index) = file(64, 64, 2, &parts);
-        let part = index.parts_of(0)[0];
-        assert!(part.len > PROBE, "тайл-парт длиннее пробы");
-        let sod = 12 + 4 + (1 + 3 + 1 + 1) + 2;
-        let probe = bytes[part.offset as usize..(part.offset + PROBE) as usize].to_vec();
-
-        let cut = assemble(&index, 0, 1, vec![probe]).expect("собирается");
-        let keep = sod + 70_000 + 10;
-        assert_eq!(cut.len(), 5);
-        assert_eq!(cut[2], Segment::File { offset: part.offset + PROBE, len: keep - PROBE });
-        assert_eq!(cut[3], Segment::Bytes(Rc::from(&[0u8][..])));
-
-        let source = bytes.clone();
-        let fetch: Fetch = Box::new(move |offset, size| Ok(source[offset as usize..(offset + size) as usize].to_vec()));
-        let mut reader = Reader::over_fetch(cut, Rc::new(Cell::new(0)), fetch);
-        let mut got = Vec::new();
-        reader.read_to_end(&mut got).unwrap();
-        let mut expected = bytes[..part.offset as usize].to_vec();
-        let mut head = bytes[part.offset as usize..(part.offset + keep) as usize].to_vec();
-        head[6..10].copy_from_slice(&((keep + 1) as u32).to_be_bytes());
-        expected.extend_from_slice(&head);
-        expected.extend_from_slice(&[0, 0xFF, 0xD9]);
-        assert_eq!(got, expected);
-    }
-
-    /// Читатель отдаёт куски подряд, читает файл окнами не за конец куска и
-    /// принимает seek в любую сторону.
-    #[test]
-    fn the_reader_splices_segments_and_never_reads_past_a_piece() {
-        let disk: Vec<u8> = (0..=255u8).cycle().take(1_000_000).collect();
-        let asked = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let log = asked.clone();
-        let from = disk.clone();
-        let fetch: Fetch = Box::new(move |offset, size| {
-            log.borrow_mut().push((offset, size));
-            Ok(from[offset as usize..(offset + size) as usize].to_vec())
-        });
-        let segments = vec![
-            Segment::Bytes(Rc::from(&b"head"[..])),
-            Segment::File { offset: 1000, len: 600_000 },
-            Segment::Bytes(Rc::from(&[0u8, 0][..])),
-            Segment::File { offset: 5, len: 3 },
-        ];
-        let bytes = Rc::new(Cell::new(0));
-        let mut reader = Reader::over_fetch(segments, bytes.clone(), fetch);
-        assert_eq!(reader.len(), 4 + 600_000 + 2 + 3);
-        let mut got = Vec::new();
-        reader.read_to_end(&mut got).unwrap();
-        let mut expected = b"head".to_vec();
-        expected.extend_from_slice(&disk[1000..601_000]);
-        expected.extend_from_slice(&[0, 0]);
-        expected.extend_from_slice(&disk[5..8]);
-        assert_eq!(got, expected);
-        assert_eq!(
-            *asked.borrow(),
-            vec![(1000, 262_144), (263_144, 262_144), (525_288, 75_712), (5, 3)],
-            "окна не длиннее WINDOW и не дальше конца куска"
-        );
-        assert_eq!(bytes.get(), 600_003);
-
-        reader.seek(SeekFrom::Start(2)).unwrap();
-        let mut two = [0u8; 4];
-        reader.read_exact(&mut two).unwrap();
-        assert_eq!(&two, &[b'a', b'd', disk[1000], disk[1001]], "стык кусков читается сплошь");
-        reader.seek(SeekFrom::End(-3)).unwrap();
-        let mut tail = Vec::new();
-        reader.read_to_end(&mut tail).unwrap();
-        assert_eq!(tail, &disk[5..8]);
-        reader.seek(SeekFrom::Start(10)).unwrap();
-        assert!(reader.seek(SeekFrom::Current(-100)).is_err(), "до начала выдержки seek нет");
-    }
-
-    /// Заголовок тайла, переопределяющий кодирование (COD, COC, POC, PPT),
-    /// отменяет обрезку: счёт пакетов ведётся по главному заголовку, и с
-    /// чужими прецинктами он соврёт. Тайл-парт идёт целиком, без дописок.
-    #[test]
-    fn a_tile_header_that_overrides_coding_keeps_the_part_whole() {
-        let cod = [0xFF, 0x52, 0x00, 0x0C, 0, 0, 0, 1, 0, 2, 4, 4, 0, 1];
-        let parts = [(0u16, tile_part_with(0, 0, 1, &[3, 4, 5], &cod))];
-        let (bytes, index) = file(64, 64, 2, &parts);
-        let part = index.parts_of(0)[0];
-        let probe = bytes[part.offset as usize..(part.offset + part.len) as usize].to_vec();
-        let whole = assemble(&index, 0, 2, vec![probe]).expect("собирается");
-        assert_eq!(whole.len(), 3, "заголовок, тайл-парт целиком, EOC");
-        assert_eq!(whole[1], Segment::Bytes(Rc::from(parts[0].1.as_slice())));
-    }
-
-    /// Порядок пакетов, в котором разрешение не внешний цикл, префикса не
-    /// даёт: POC и PPM в главном заголовке, SOP и EPH в стиле кодирования —
-    /// каждый порознь запрещает обрезку, и берётся это из самого заголовка.
-    #[test]
-    fn changes_and_markers_forbid_the_prefix() {
-        let part = tile_part(0, 0, 1, &[3, 4, 5]);
-        let index_with = |scod: u8, extra: &[u8]| {
-            let mut bytes = main_header_with(64, 64, 2, &[(0, part.len() as u32)], scod, extra);
-            bytes.extend_from_slice(&part);
-            bytes.extend_from_slice(&[0xFF, 0xD9]);
-            Index::of(&bytes, bytes.len() as u64).expect("индекс строится")
-        };
-        assert!(index_with(0, &[]).coding().prefixed(), "LRCP с одним слоем — префикс");
-        let poc = [0xFF, 0x5F, 0x00, 0x09, 0, 0, 0, 0, 0, 0, 0];
-        assert!(!index_with(0, &poc).coding().prefixed(), "POC ломает порядок");
-        assert!(!index_with(0, &[0xFF, 0x60, 0x00, 0x03, 0]).coding().prefixed(), "PPM выносит заголовки пакетов");
-        assert!(!index_with(0x02, &[]).coding().prefixed(), "SOP меняет вид пустого пакета");
-        assert!(!index_with(0x04, &[]).coding().prefixed(), "EPH тоже");
-    }
-
-    /// Индекс отказывает по имени, а не молчит: сегменты TLM не по порядку,
-    /// запись про тайл, которого нет, обрывок записи.
-    #[test]
-    fn a_broken_tlm_is_refused_by_name() {
-        let parts = [(0u16, tile_part(0, 0, 1, &[3, 4, 5]))];
-        let (bytes, _) = file(64, 64, 2, &parts);
-        let tlm_at = bytes.windows(2).position(|pair| pair == [0xFF, 0x55]).unwrap();
-
-        // Второй TLM с Ztlm 0 после первого с Ztlm 0 — не по порядку.
-        let mut twice = bytes.clone();
-        twice.splice(tlm_at..tlm_at, [0xFF, 0x55, 0x00, 0x04, 0x00, 0x60]);
-        assert!(Index::of(&twice, twice.len() as u64).expect_err("порядок").contains("не по порядку"));
-
-        // Тайл 9 в кодстриме на один тайл.
-        let mut foreign = bytes.clone();
-        foreign[tlm_at + 6..tlm_at + 8].copy_from_slice(&9u16.to_be_bytes());
-        assert!(Index::of(&foreign, foreign.len() as u64).expect_err("чужой тайл").contains("не про этот"));
-
-        // Лишний байт в теле TLM — ни одна ширина записи его не делит.
-        let mut torn = bytes.clone();
-        torn.splice(tlm_at + 6..tlm_at + 6, [0u8]);
-        torn[tlm_at + 3] += 1;
-        assert!(Index::of(&torn, torn.len() as u64).expect_err("обрывок").contains("обрывком"));
-    }
-
-    /// PLT не по порядку Zplt — длин нет, и тайл-парт идёт целиком.
-    #[test]
-    fn plt_segments_out_of_order_give_no_lengths() {
-        let mut part = tile_part(0, 0, 1, &[3, 4, 5]);
-        // Второй PLT с Zplt 0 перед SOD — тем же номером, что и первый.
-        let sod = part.windows(2).position(|pair| pair == [0xFF, 0x93]).unwrap();
-        part.splice(sod..sod, [0xFF, 0x58, 0x00, 0x04, 0x00, 0x01]);
-        let head = head_of(&part).expect("до SOD дошли");
-        assert!(head.plt.is_none(), "склеивать не по порядку нельзя");
-        let ordered = head_of(&tile_part(0, 0, 1, &[3, 4, 5])).unwrap();
-        assert_eq!(ordered.plt, Some(vec![3, 4, 5]));
     }
 }

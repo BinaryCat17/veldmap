@@ -1,8 +1,0 @@
-# Конфиг нативного модуля fs: buildgen генерирует крейт в generated/
-# (Cargo.toml + клей диспетчеризации). Логика — src/module.rs.
-package: veldmap-host-fs
-language: rust
-rust:
-  dependencies:
-    # Имя временного файла для атомарной записи (см. write.rs).
-    uuid: { version: "1", features: ["v4"] }

@@ -23,9 +23,9 @@ be paid. The list of comment-held rows must shrink with every step of
 | Zoom per wheel click is one number for the globe and the canvas | shared constant `veldmodules/globe/src/wheel.rs` through the wrap |
 | Producer and consumers compute the pyramid alike | shared file `veldmodules/image-tiler/src/pyramid.rs` through the wrap |
 | The level table on the wire (`Described.levels`) is the table `produce` reads its branch from | one `Info::levels()` (`veldmodules/image-tiler/src/adapters/table.rs`) fills both; test `the_level_table_and_the_produce_branch_agree` in `adapters/reads.rs` holds it against the driver's window rule |
-| The window rule promises nothing the direct read refuses | tests `окно_не_обещает_того_чего_проход_не_отдаст`, `задетые_чанки_сходятся_с_перебором_смещений` in `adapters/tiff.rs` |
+| The window rule promises nothing the direct read refuses | tests `the_window_promises_nothing_the_pass_will_not_give`, `the_touched_chunks_agree_with_a_brute_force_over_offsets` in `adapters/tiff.rs` |
 | The memory of every tiler path is a `budget::Peak` of named terms summed against `budget::free()`; a decoder's own ceiling is named in the level table | `budget::Peak`, `Info::levels`; tests in `adapters/table.rs` on real sizes |
 | Cached tiles are keyed by the decoding rules | one constant `DECODE_REV` in `veldmodules/image-tiler/src/fingerprint.rs` |
-| The consumer's tile cap does not exceed the cache's `MAX_QUERY_TILES` | shared constant `veldmodules/tile-cache/src/tile.rs`, included by the tiler's wrap; test `потолок_аппетита_не_выше_потолка_кэша` in `wraps/rust/src/tiles.rs` |
+| The consumer's tile cap does not exceed the cache's `MAX_QUERY_TILES` | shared constant `veldmodules/tile-cache/src/tile.rs`, included by the tiler's wrap; test `the_appetite_cap_is_not_above_the_cache_cap` in `wraps/rust/src/tiles.rs` |
 | The ripple of the globe's shader equals the Rust side | comment (WGSL imports no constant) |
 | A shown scene is not also an overlay | comment in `veldmodules/data-browser/src/state/mod.rs` |

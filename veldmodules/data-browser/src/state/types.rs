@@ -1,7 +1,8 @@
-//! Вид — то, что показывается в одной вкладке.
+//! A view — what is shown in one tab.
 //!
-//! Своё состояние держит сам вариант `ViewKind`, а не модуль: два открытых
-//! Browse — это две независимые папки, а не один экран с общей переменной.
+//! The `ViewKind` variant itself holds the state, not the module: two open
+//! Browse views are two independent folders, not one screen with a shared
+//! variable.
 
 use crate::module::components::last_segment;
 use super::listing::{choice, Choice};
@@ -13,19 +14,19 @@ use super::preview::PreviewState;
 use super::search::SearchState;
 
 choice! {
-    /// Куда двигать слой в наборе. Перечислением, а не «вверх: да/нет»: у сдвига
-    /// два равноправных направления, и одно из них не является отрицанием
-    /// другого — оно просто другое.
+    /// Which way to move a layer in the set. An enum, not "up: yes/no": a shift
+    /// has two equal directions, and one is not the negation of the other — it
+    /// is simply different.
     Shift {
-        Up   = "up",   "Выше";
-        Down = "down", "Ниже";
+        Up   = "up",   "Higher";
+        Down = "down", "Lower";
     }
 }
 
-/// Идентификатор открытого вида. Уникален в пределах сессии и не
-/// переиспользуется: по нему адресуется и вкладка в разметке, и ответ,
-/// приехавший на запрос этого вида, — а вид к тому времени могли закрыть,
-/// и переиспользованный id отдал бы чужой ресурс живой вкладке.
+/// Identifier of an open view. Unique within a session and never reused: it
+/// addresses both the tab in the markup and the reply to this view's request —
+/// and the view may already be closed by then, and a reused id would hand a
+/// foreign resource to a live tab.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ViewId(pub(super) u64);
 
@@ -35,8 +36,8 @@ impl std::fmt::Display for ViewId {
     }
 }
 
-/// Вкладка возвращает свой id строкой в `UiEventResponse.value` — разобрать
-/// его обратно нужно там же, где принимается нажатие.
+/// A tab returns its id as a string in `UiEventResponse.value` — parsing it
+/// back happens where the click is handled.
 impl std::str::FromStr for ViewId {
     type Err = std::num::ParseIntError;
 
@@ -46,34 +47,35 @@ impl std::str::FromStr for ViewId {
 }
 
 pub enum ViewKind {
-    /// Заведена, но ещё ничего не показывает: спрашивает, чем её наполнить.
-    /// Своего состояния у неё нет — весь её вид и есть этот вопрос.
+    /// Created but showing nothing yet: it asks what to fill it with. It has no
+    /// state of its own — its whole appearance is that question.
     ///
-    /// Вкладкой, а не пустой панелью: панель без вкладок в дереве не живёт
-    /// (см. `state::layout`), а место, где человек ещё не решил, что смотреть,
-    /// нужно — с него начинается всякое «открыть рядом».
+    /// A tab, not an empty pane: a pane without tabs does not live in the tree
+    /// (see `state::layout`), while a place where the person has not decided
+    /// what to view yet is needed — every "open beside" starts from it.
     Empty,
     Search(SearchState),
     Browse(BrowseState),
-    /// Строки берутся из `LibraryState` — он один на модуль и приходит
-    /// рассылкой (см. state::library); своё здесь только то, как их показать.
+    /// Rows come from `LibraryState` — there is one per module and it arrives
+    /// by broadcast (see state::library); only how to show them is local here.
     Downloaded(ListingState),
     Preview(PreviewState),
-    /// Шар рисует отдельный модуль; здесь только место под него и жест.
+    /// The globe is drawn by a separate module; here there is only room for it
+    /// and the gestures.
     Globe(GlobeState),
-    /// Что сейчас лежит на шаре. Своего состояния у вида нет: слои живут в
-    /// `State::overlays` — они свойство шара, а не экрана, и переживают
-    /// закрытие этой вкладки, как переживают его контуры.
+    /// What currently lies on the globe. The view has no state of its own: the
+    /// layers live in `State::overlays` — they are a property of the globe, not
+    /// of the screen, and outlive this tab's closing, as its outlines do.
     Shown,
 }
 
 impl ViewKind {
-    /// Каким родом вкладки этот вид заводят. `None` — просмотр снимка: его не
-    /// открывают из меню, его открывает строка списка.
+    /// Which tab kind this view is opened as. `None` — snapshot preview: it is
+    /// not opened from the menu, a list row opens it.
     ///
-    /// Нужно затем, чтобы подпись и значок рода жили в одном месте: вкладка и
-    /// пункт меню обозначают одно и то же, и разъехавшиеся значки читались бы
-    /// как две разные вещи.
+    /// Needed so that the label and the kind icon live in one place: a tab and
+    /// a menu item denote the same thing, and diverging icons would read as two
+    /// different things.
     pub fn opened_as(&self) -> Option<crate::module::NewTab> {
         use crate::module::NewTab;
         Some(match self {
@@ -87,9 +89,9 @@ impl ViewKind {
         })
     }
 
-    /// Настройки показа списка — они есть у всех видов, кроме превью, и
-    /// правятся одними и теми же сообщениями. Без этого каждое из них
-    /// разбирало бы `ViewKind` заново, по-своему и с тремя ветками.
+    /// List display settings — every view except the preview has them, and the
+    /// same messages edit them. Without this each handler would destructure
+    /// `ViewKind` again, in its own way and with three branches.
     pub fn listing_mut(&mut self) -> Option<&mut ListingState> {
         match self {
             ViewKind::Search(search) => Some(&mut search.listing),
@@ -99,8 +101,8 @@ impl ViewKind {
         }
     }
 
-    /// Они же на чтение — их спрашивает сборка контуров: что в этом списке
-    /// отмечено (см. handlers::outline).
+    /// The same, read-only — outline assembly asks them: what is selected in
+    /// this list (see handlers::outline).
     pub fn listing(&self) -> Option<&ListingState> {
         match self {
             ViewKind::Search(search) => Some(&search.listing),
@@ -110,8 +112,9 @@ impl ViewKind {
         }
     }
 
-    /// Содержимое раскрытых папок. Есть там, где строки приходят из каталога
-    /// провайдера: у скачанного файлы снимка уже под рукой, листать нечего.
+    /// Content of expanded folders. Present where rows come from the provider's
+    /// catalogue: for downloaded, the snapshot's files are already at hand and
+    /// there is nothing to page through.
     pub fn children_mut(&mut self) -> Option<&mut Children> {
         match self {
             ViewKind::Search(search) => Some(&mut search.children),
@@ -128,37 +131,37 @@ impl ViewKind {
 pub struct View {
     pub id: ViewId,
     pub kind: ViewKind,
-    /// В какой панели лежит эта вкладка. Поле у вида, а не список вкладок у
-    /// панели: id уникален на всё окно, и поиск по нему обязан иметь один
-    /// ответ — а список у каждой панели отвечал бы на него перебором всех, да
-    /// ещё и допускал бы вкладку сразу в двух местах.
+    /// Which pane this tab lies in. A field on the view, not a tab list on the
+    /// pane: the id is unique across the window, and a lookup by it must have
+    /// one answer — while a list on each pane would answer by scanning all of
+    /// them, and would also allow a tab in two places at once.
     pub pane: PaneId,
 }
 
-/// Сколько знаков заголовка помещается на вкладке. Имена продуктов Copernicus
-/// доходят до восьмидесяти знаков, и вкладка по ширине имени — это одна
-/// вкладка на всё окно; полное имя видно в заголовке самого вида.
+/// How many title characters fit on a tab. Copernicus product names reach
+/// eighty characters, and a tab as wide as the name means one tab per window;
+/// the full name is visible in the view's own header.
 const TITLE_LIMIT: usize = 22;
 
 impl ViewKind {
-    /// Заголовок вкладки — последний сегмент пути, обрезанный до `TITLE_LIMIT`.
+    /// The tab title — the last path segment, truncated to `TITLE_LIMIT`.
     pub fn title(&self) -> String {
         match self {
-            // Подпись у пустой вкладки та же, которой её предлагает «плюс»:
-            // это одна и та же вещь до и после нажатия.
+            // The empty tab's label matches what the "plus" offers for it:
+            // it is the same thing before and after the click.
             ViewKind::Empty => crate::module::NewTab::Empty.title().to_string(),
-            ViewKind::Search(_) => "Поиск снимков".to_string(),
+            ViewKind::Search(_) => "Snapshot search".to_string(),
             ViewKind::Browse(browse) => match last_segment(&browse.current_path) {
-                "" => "Каталог".to_string(),
+                "" => "Catalogue".to_string(),
                 name => ellipsize(name),
             },
-            ViewKind::Downloaded(_) => "Скачанное".to_string(),
+            ViewKind::Downloaded(_) => "Downloaded".to_string(),
             ViewKind::Preview(preview) => match last_segment(&preview.label) {
-                "" => "Просмотр".to_string(),
+                "" => "Preview".to_string(),
                 name => ellipsize(name),
             },
-            ViewKind::Globe(_) => "Глобус".to_string(),
-            ViewKind::Shown => "На просмотре".to_string(),
+            ViewKind::Globe(_) => "Globe".to_string(),
+            ViewKind::Shown => "On view".to_string(),
         }
     }
 }

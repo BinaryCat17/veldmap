@@ -1,11 +1,12 @@
-//! Драйвер сетки чанков: общее для всякого источника, который отдаёт растр
-//! кусками по сетке, — базовый образ с копиями, чанк как наименьшая читаемая
-//! единица. Два цикла: точечный ([`direct`]) собирает тайл уровня из чанков
-//! ближайшей годной копии, проход ([`pass`]) ведёт ряды чанков базового образа
-//! полосами в каскад. Что уровню достаётся, решает [`Grid::footprint`] по
-//! геометрии сетки и кэшу чанков; этот ответ читают таблица уровней
-//! (`adapters::table`) и производство. Формат стои́т за трейтом [`Chunked`] —
-//! сегодня TIFF (`tiff::Chunks`); драйверу нужен только чанк в RGBA.
+//! Chunk grid driver: shared by any source that hands out a raster in chunks
+//! on a grid — the base image with its overviews, the chunk being the smallest
+//! readable unit. Two loops: pointwise ([`direct`]) builds a level tile from
+//! chunks of the nearest usable overview, the pass ([`pass`]) feeds rows of
+//! base-image chunks into the cascade as bands. What a level gets is decided
+//! by [`Grid::footprint`] from the grid geometry and the chunk cache; the
+//! level table (`adapters::table`) and production both read that answer. The
+//! format sits behind the [`Chunked`] trait — today TIFF (`tiff::Chunks`); the
+//! driver only needs the chunk in RGBA.
 
 use std::collections::VecDeque;
 
@@ -14,37 +15,37 @@ use super::super::cascade::{self, Cascade, Emit};
 use super::super::pyramid::{self, TILE};
 use super::super::resample::{resample_window, Window};
 
-/// Кэш декодированных чанков точечного чтения — в `usize` для счёта байт
-/// кэша; сама доля назначена бюджетом (`budget::CHUNK_CACHE`).
+/// Cache of decoded chunks for pointwise reads — in `usize` to count cache
+/// bytes; the share itself is set by the budget (`budget::CHUNK_CACHE`).
 pub(super) const CHUNK_CACHE_BYTES: usize = budget::CHUNK_CACHE as usize;
 
-/// Потолок области источника, читаемой ради одного тайла (в пикселях): в RGBA
-/// это половина кэша чанков. Вторая половина — под чанки вокруг области:
-/// у чужой сетки границы разводятся наружу, и задетых чанков бывает вдвое
-/// больше по стороне, чем лежит под самой областью.
+/// Cap on the source region read for a single tile (in pixels): in RGBA this
+/// is half of the chunk cache. The other half covers the chunks around the
+/// region: with a foreign grid the bounds spread outward, and twice as many
+/// chunks per side can be touched as lie under the region itself.
 ///
-/// Перевалить за потолок область может, когда ближайшая годная копия крупнее
-/// уровня по стороне больше, чем во столько раз, сколько тайлов укладывается
-/// в сторону потолка: честнее отказать, чем молча прочитать пол-файла. Годная
-/// — по обеим сторонам (см. [`Grid::source_for`]), поэтому дорог сюда два:
-/// пропуск четырёх уровней в цепочке копий и вытянутый растр, у которого
-/// короткая сторона уровня в один-два пикселя, — там отбрасывается всякая
-/// копия, и уровень читается из базового образа.
+/// A region can exceed the cap when the nearest usable overview is larger
+/// than the level by more than the factor of how many tiles fit along the cap
+/// side: refusing is more honest than silently reading half the file. Usable
+/// means on both sides (see [`Grid::source_for`]), so there are two ways here:
+/// a gap of four levels in the overview chain, and an elongated raster whose
+/// level short side is one or two pixels — there every overview is dropped,
+/// and the level is read from the base image.
 pub(super) const REGION_CAP: u64 = budget::CHUNK_CACHE / 2 / 4;
 
-/// Вырожденная сетка: чанк мельче этого читается только проходом.
+/// Degenerate grid: a chunk smaller than this is read only by the pass.
 ///
-/// Точечное чтение платит за каждый чанк отдельно — поход за ним и запуск
-/// декодера, — и у чанка в несколько десятков пикселей эта плата больше самих
-/// пикселей: тайл из таких чанков стоит тысячи вызовов там, где проход
-/// распаковывает их подряд одним. Так лежит квиклук Sentinel-2 (PVI: тайлы
-/// кодстрима 8×8); полоса TIFF в одну строку сюда не попадает — она во всю
-/// ширину растра.
+/// Pointwise reading pays for each chunk separately — a trip for it and a
+/// decoder launch — and for a chunk of a few dozen pixels that cost exceeds
+/// the pixels themselves: a tile built from such chunks takes thousands of
+/// calls where the pass unpacks them all in one go. This is how the
+/// Sentinel-2 quicklook sits (PVI: 8×8 codeblock tiles); a one-row TIFF strip
+/// never lands here — it spans the full raster width.
 pub(super) const MIN_CHUNK_PIXELS: u64 = 32 * 32;
 
-/// Чего стоит тайл уровня при точечном чтении: копия, из которой он берётся,
-/// пикселей копии под самой областью и пикселей, распакованных ради неё
-/// (область растёт до границ чанков).
+/// Cost of a level tile under pointwise reading: the overview it comes from,
+/// the overview pixels under the region itself, and the pixels unpacked for
+/// it (the region grows to chunk boundaries).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Footprint {
     pub image: usize,
@@ -52,51 +53,56 @@ pub struct Footprint {
     pub held: u64,
 }
 
-/// Уменьшенная копия растра — образ со своей сеткой чанков.
+/// Reduced copy of the raster — an image with its own chunk grid.
 pub struct Overview {
-    /// Индекс образа у источника: у TIFF — IFD для `seek_to_image`.
+    /// Image index at the source: for TIFF the IFD used by `seek_to_image`.
     pub image: usize,
     pub width: u32,
     pub height: u32,
-    /// Своя, а не базовая: копия бывает разложена иначе, чем базовый образ, а
-    /// читается всегда та, которую выбрал [`Grid::source_for`].
+    /// Its own, not the base one: an overview may be laid out differently from
+    /// the base image, and the one chosen by [`Grid::source_for`] is what gets
+    /// read.
     pub chunk: (u32, u32),
 }
 
-/// Раскладка чанков источника: базовый образ и его копии.
+/// Chunk layout of a source: the base image and its overviews.
 pub struct Grid {
     pub tiled: bool,
-    /// Сетка чанков базового образа в пикселях: у тайлового файла это тайл, у
-    /// полосного — вся ширина растра на `RowsPerStrip` строк.
+    /// Chunk grid of the base image in pixels: for a tiled file this is the
+    /// tile, for a striped one the full raster width by `RowsPerStrip` rows.
     ///
-    /// Хранится с описания затем, что наименьшая читаемая единица файла —
-    /// чанк, и окно в его половину стои́т ровно столько же, сколько целый.
-    /// Без этого числа [`Grid::pointwise`] мерил бы область, а платится за
-    /// чанки — и у полосного файла, где чанк во всю ширину, разница между
-    /// этими двумя мерками составляет весь растр.
+    /// It is kept alongside the description because the smallest readable
+    /// unit of the file is the chunk, and a window into half of it costs
+    /// exactly as much as the whole. Without this number [`Grid::pointwise`]
+    /// would measure the region, while chunks are what is paid for — and in a
+    /// striped file, where the chunk spans the full width, the gap between
+    /// these two measures is the whole raster.
     pub chunk: (u32, u32),
-    /// Копии в порядке обнаружения. В многостраничном TIFF следующие IFD —
-    /// отдельные страницы, их сюда не берут — подменять ими первую нельзя.
+    /// Overviews in discovery order. In a multi-page TIFF the following IFDs
+    /// are separate pages; they are not taken here — they must not replace the
+    /// first one.
     pub overviews: Vec<Overview>,
-    /// Байт на пиксель в сырых сэмплах файла (каналы × байт сэмпла): столько
-    /// держит декодированный чанк до развёртки в RGBA, и без этого числа счёт
-    /// памяти считал бы u16- и f32-растры байтовыми.
+    /// Bytes per pixel in the file's raw samples (channels × sample bytes):
+    /// that is what a decoded chunk holds before expansion to RGBA, and
+    /// without this number the memory count would treat u16 and f32 rasters as
+    /// byte ones.
     pub depth: u32,
 }
 
 impl Grid {
-    /// Произвольный тайл дёшев: чанки читаются точечно, а копии закрывают
-    /// глубокие уровни. Тайловому файлу без копий верхний тайл стоил бы
-    /// чтения всего растра — он идёт последовательным путём.
+    /// An arbitrary tile is cheap: chunks are read pointwise, and overviews
+    /// cover the deep levels. For a tiled file without overviews the top tile
+    /// would cost reading the whole raster — it goes down the sequential path.
     ///
-    /// Это про источник целиком, а не про уровень: даже здесь копии бывают
-    /// редкими, и уровень, которому не досталось своей, читается проходом
-    /// (см. [`Grid::pointwise`]).
+    /// This is about the source as a whole, not about a level: even here
+    /// overviews can be sparse, and a level that got none of its own is read
+    /// by the pass (see [`Grid::pointwise`]).
     pub fn random_access(&self) -> bool {
         self.tiled && !self.overviews.is_empty()
     }
 
-    /// Сетка чанков у копии с этим индексом образа; нулевой — базовый растр.
+    /// Chunk grid of the overview with this image index; zero is the base
+    /// raster.
     pub fn chunk_of(&self, image: usize) -> (u32, u32) {
         match self.overviews.iter().find(|overview| overview.image == image) {
             Some(overview) => overview.chunk,
@@ -104,33 +110,36 @@ impl Grid {
         }
     }
 
-    /// Источник для уровня: самая мелкая копия, которой хватает на обе его
-    /// стороны; `base` — размеры базового образа. Возвращает индекс образа и
-    /// его стороны.
+    /// Source for a level: the smallest overview that covers both of its
+    /// sides; `base` holds the base image sizes. Returns the image index and
+    /// its sides.
     ///
-    /// Хватает — с точностью до округления. Сторону уровня считают
-    /// округлением вверх (`pyramid::level_size`), а копии в файле записаны
-    /// делением вниз, и у нечётной стороны эти два счёта расходятся ровно на
-    /// пиксель: у растра 25437 уровню 1 нужно 12719, а его же копия в файле —
-    /// 12718. Требовать копию не у́же уровня значит отвергнуть её и взять вдвое
-    /// крупнее, то есть прочитать вчетверо больше пикселей на каждый тайл.
+    /// Covers — up to rounding. A level side is computed by rounding up
+    /// (`pyramid::level_size`), while overviews in the file are stored by
+    /// rounding down, and for an odd side these two counts differ by exactly
+    /// one pixel: for a raster of 25437, level 1 needs 12719 while its
+    /// overview in the file is 12718. Requiring an overview no narrower than
+    /// the level would reject it and take one twice as large, i.e. read four
+    /// times as many pixels per tile.
     ///
-    /// Прощёный пиксель — это дорисовка в один столбец на весь тайл
-    /// (`resample_window` разворачивает окно шире, чем оно есть, с
-    /// коэффициентом `сторона уровня / сторона копии`). Больше пикселя прощать
-    /// нельзя: у короткой стороны пиксель — это уже разы, и растр 513×3
-    /// собирал бы уровень высотой 2 из копии высотой 1.
+    /// The forgiven pixel is a one-column overdraw across the whole tile
+    /// (`resample_window` stretches the window wider than it is, by the factor
+    /// `level side / overview side`). More than one pixel must not be
+    /// forgiven: on a short side a pixel is already whole times over, and a
+    /// 513×3 raster would build a level of height 2 from an overview of
+    /// height 1.
     ///
-    /// Прощается только округление, поэтому обе стороны проверяются порознь, а
-    /// копия мельче половины уровня не годится никогда. Второе условие и
-    /// держит короткую сторону: у стороны в два пикселя «пиксель разницы» —
-    /// это её половина, и такая копия не округлена, а потеряна. Сработать оно
-    /// может только на стороне в один-два пикселя, потому что `2·(n−1) > n`
-    /// при всяком `n` больше двух; заодно им же отсекается копия под нулевой
-    /// уровень — округлять там нечего.
+    /// Only the rounding is forgiven, so the two sides are checked separately,
+    /// and an overview below half the level never qualifies. The second
+    /// condition is what guards the short side: for a side of two pixels the
+    /// "pixel of difference" is half of it, and such an overview is not
+    /// rounded but lost. It can only fire on a side of one or two pixels,
+    /// because `2·(n−1) > n` for every `n` above two; it also cuts off the
+    /// overview under level zero — there is nothing to round there.
     pub fn source_for(&self, base: (u32, u32), level_width: u32, level_height: u32) -> (usize, u32, u32) {
-        // Вычитание из стороны уровня, а не прибавление к стороне копии: битый
-        // каталог с шириной у потолка u32 переполнил бы её вместе со сборкой.
+        // Subtraction from the level side, not addition to the overview side:
+        // a corrupt catalog with a width at the u32 ceiling would overflow it
+        // along with the assembly.
         let fits = |copy: u32, level: u32| {
             copy >= level.saturating_sub(1) && u64::from(copy) * 2 > u64::from(level)
         };
@@ -147,33 +156,36 @@ impl Grid {
         best
     }
 
-    /// Тайл этого уровня читается окном — то есть тем, что и правда окно;
-    /// `base` — размеры базового образа. Чего это стои́т — [`Grid::footprint`].
+    /// A tile of this level is read as a window — meaning something that
+    /// really is a window; `base` holds the base image sizes. What it costs is
+    /// [`Grid::footprint`].
     pub fn pointwise(&self, base: (u32, u32), level: u32) -> bool {
         self.footprint(base, level).is_some()
     }
 
-    /// Цена тайла уровня при точечном чтении; `None` — точечно уровень не
-    /// читается, ему остаётся проход. Три правила, и все три про то, СКОЛЬКО
-    /// ПРИДЁТСЯ ДЕРЖАТЬ и ЗА ЧТО ПЛАТИТЬ, чтобы отдать один тайл.
+    /// Cost of a level tile under pointwise reading; `None` means the level is
+    /// not read pointwise, the pass is what remains for it. Three rules, and
+    /// all three are about HOW MUCH MUST BE HELD and WHAT IS PAID FOR to
+    /// deliver one tile.
     ///
-    /// Сетка не вырождена: чанк не мельче [`MIN_CHUNK_PIXELS`].
+    /// The grid is not degenerate: the chunk is at least [`MIN_CHUNK_PIXELS`].
     ///
-    /// Область не больше [`REGION_CAP`]. Считается она по ХУДШЕМУ тайлу
-    /// сетки, а не по идеальному: границы разводятся наружу, и настоящая
-    /// область бывает на пиксель шире (см. [`region_of`]). Сказать «окно»
-    /// там, где [`direct`] откажет, нельзя вдвойне: отказ валит весь проход,
-    /// а проход приговаривает все свои ячейки разом — и уровень не появится
-    /// уже никогда.
+    /// The region is at most [`REGION_CAP`]. It is computed for the WORST tile
+    /// of the grid, not the ideal one: bounds spread outward, and the real
+    /// region can be a pixel wider (see [`region_of`]). Claiming "window"
+    /// where [`direct`] would refuse is doubly wrong: a refusal kills the whole
+    /// pass, and the pass condemns all of its cells at once — and the level
+    /// will never appear.
     ///
-    /// Задетые чанки влезают в кэш. Меряется не площадь области, а чанки,
-    /// которых она касается: чанк распаковывается целиком, и окно в его
-    /// половину стои́т столько же. У полосного источника чанк — это строки во
-    /// всю ширину растра: тайлу нужны все полосы, накрывающие его строки, и
-    /// узость тайла не экономит ничего. Влезут они в кэш — соседний тайл того
-    /// же ряда возьмёт их готовыми; не влезут — перечитает заново, и ряд из
-    /// семи тайлов обойдётся в семь чтений файла вместо одного. Правило одно
-    /// на оба рукава: тайловый файл с крупным тайлом ведёт себя ровно так же.
+    /// The touched chunks fit in the cache. Not the region area is measured,
+    /// but the chunks it touches: a chunk is unpacked whole, and a window into
+    /// half of it costs the same. In a striped source the chunk is rows across
+    /// the full raster width: the tile needs every strip covering its rows,
+    /// and the tile's narrowness saves nothing. If they fit in the cache, the
+    /// neighboring tile of the same row takes them ready-made; if not, it
+    /// re-reads them from scratch, and a row of seven tiles costs seven file
+    /// reads instead of one. One rule covers both branches: a tiled file with
+    /// a large tile behaves exactly the same.
     pub fn footprint(&self, base: (u32, u32), level: u32) -> Option<Footprint> {
         let lw = pyramid::level_size(base.0, level).max(1);
         let lh = pyramid::level_size(base.1, level).max(1);
@@ -184,9 +196,9 @@ impl Grid {
         }
         let aligned = lw.abs_diff(sw) <= 1 && lh.abs_diff(sh) <= 1;
 
-        // У своей сетки область — ровно тайл; у пересчёта она бывает на
-        // пиксель шире, потому что пол и потолок разводят границы в разные
-        // стороны.
+        // With our own grid the region is exactly the tile; with a rescaled one
+        // it can be a pixel wider, because floor and ceil spread the bounds in
+        // opposite directions.
         let side = |level_side: u32, source_side: u32| -> u64 {
             let ideal = (u64::from(TILE) * u64::from(source_side)).div_ceil(u64::from(level_side));
             match aligned {
@@ -208,63 +220,69 @@ impl Grid {
         Some(Footprint { image, region, held })
     }
 
-    /// Свежий чанк в момент развёртки: сырые сэмплы и RGBA живут разом.
+    /// A fresh chunk at the moment of expansion: raw samples and RGBA live
+    /// side by side.
     pub fn chunk_bytes(&self, chunk: (u32, u32)) -> u64 {
         u64::from(chunk.0) * u64::from(chunk.1) * (u64::from(self.depth) + 4)
     }
 
-    /// Пик памяти точечного чтения уровня: кэш чанков (свежий кладётся до
-    /// вытеснения, поэтому сверх кэша — ещё один чанк), область худшего тайла
-    /// и сам тайл с его ужатием. `None` — уровень точечно не читается.
+    /// Memory peak of pointwise reading of a level: the chunk cache (the fresh
+    /// chunk is placed before eviction, so beyond the cache there is one more
+    /// chunk), the region of the worst tile, and the tile itself with its
+    /// compression. `None` means the level is not read pointwise.
     pub fn direct_peak(&self, base: (u32, u32), level: u32) -> Option<Peak> {
         let footprint = self.footprint(base, level)?;
         let tile = u64::from(TILE) * u64::from(TILE) * 4;
         Some(
             Peak::new()
-                .with("кэш чанков", budget::CHUNK_CACHE)
-                .with("область", footprint.region * 4)
-                .with("свежий чанк", self.chunk_bytes(self.chunk_of(footprint.image)))
-                .with("тайл", tile * 2),
+                .with("chunk cache", budget::CHUNK_CACHE)
+                .with("region", footprint.region * 4)
+                .with("fresh chunk", self.chunk_bytes(self.chunk_of(footprint.image)))
+                .with("tile", tile * 2),
         )
     }
 
-    /// Пик памяти прохода: ряд чанков базового образа полосой, свежий чанк и
-    /// полосы каскада. Полосный файл с чанком во весь снимок просит здесь копию
-    /// всего растра — и получает отказ по счёту, а не по особому потолку.
+    /// Memory peak of the pass: a row of base-image chunks as a band, the
+    /// fresh chunk, and the cascade bands. A striped file with a chunk across
+    /// the whole scene asks here for a copy of the entire raster — and gets a
+    /// refusal by the count, not by a special cap.
     pub fn pass_peak(&self, base: (u32, u32)) -> Peak {
         let (width, height) = base;
         Peak::new()
-            .with("полоса", u64::from(width) * u64::from(self.chunk.1) * 4)
-            .with("свежий чанк", self.chunk_bytes(self.chunk))
-            .with("каскад", cascade::bytes(width, height))
+            .with("band", u64::from(width) * u64::from(self.chunk.1) * 4)
+            .with("fresh chunk", self.chunk_bytes(self.chunk))
+            .with("cascade", cascade::bytes(width, height))
     }
 }
 
-/// Сколько пикселей стороны на деле распаковывается под область в `side`
-/// пикселей при чанке в `chunk` и копии в `source`.
+/// How many pixels of a side are actually unpacked under a region of `side`
+/// pixels with a chunk of `chunk` and an overview of `source`.
 ///
-/// Область растёт до границ сетки чанков, а какой именно тайл спросят —
-/// заранее неизвестно: [`Grid::pointwise`] отвечает за уровень целиком.
-/// Поэтому берётся худшее смещение из тех, что у этого уровня бывают, — и
-/// бывают они разные, смотря совпадает ли сетка уровня с сеткой копии
-/// (`aligned`). Больше, чем есть у копии, не выходит: чанков у неё конечное
-/// число.
+/// The region grows to the chunk grid bounds, and which tile is asked for is
+/// not known in advance: [`Grid::pointwise`] answers for the level as a whole.
+/// So the worst offset among those this level can have is taken — and they do
+/// differ, depending on whether the level grid matches the overview grid
+/// (`aligned`). It never exceeds what the overview has: the number of chunks
+/// is finite.
 pub(super) fn spanned(side: u64, chunk: u32, source: u32, aligned: bool) -> u64 {
     if side == 0 {
         return 0;
     }
     let chunk = u64::from(chunk.max(1));
     let tile = u64::from(TILE);
-    // Всё решает то, насколько далеко от границы чанка область может
-    // начаться. У своей сетки начало кратно тайлу (см. [`region_of`]), и если
-    // сетки соразмерны — чанк кратен тайлу либо тайл чанку, — таких начал
-    // конечное число, а дальше всех от границы стои́т `чанк − тайл`. У чужой
-    // сетки начало произвольно, и худшее отстои́т на чанк без единицы.
+    // Everything hinges on how far from a chunk boundary the region can start.
+    // With our own grid the start is a multiple of the tile (see
+    // [`region_of`]), and if the grids are commensurate — the chunk is a
+    // multiple of the tile or vice versa — there are finitely many such
+    // starts, the farthest from the boundary standing at `chunk − tile`. With
+    // a foreign grid the start is arbitrary, and the worst stands a whole
+    // chunk minus one away.
     //
-    // Разница эта не тонкая: у тайлового COG с внутренним тайлом 4096 своя
-    // сетка кладёт весь экранный тайл в один чанк, а чужая мерка засчитала бы
-    // два по каждой стороне — то есть вчетверо больше памяти, чем нужно, и
-    // уровень объявлялся бы непригодным для окна на ровном месте.
+    // The difference is not subtle: for a tiled COG with an inner tile of 4096
+    // our own grid puts the whole screen tile into one chunk, while the foreign
+    // measure would count two along each side — that is four times more memory
+    // than needed, and the level would be declared unfit for a window for no
+    // reason.
     let flush = aligned && (chunk % tile == 0 || tile % chunk == 0);
     let offset = match flush {
         true => chunk - tile.min(chunk),
@@ -274,29 +292,32 @@ pub(super) fn spanned(side: u64, chunk: u32, source: u32, aligned: bool) -> u64 
     touched.saturating_mul(chunk)
 }
 
-/// Область копии под один тайл уровня.
+/// Overview region under one level tile.
 pub(super) struct Region {
     pub(super) sx0: u64,
     pub(super) sx1: u64,
     pub(super) sy0: u64,
     pub(super) sy1: u64,
-    /// Доля прочитанного, которую занимает сам тайл. Прочитанное бывает шире
-    /// на долю пикселя с каждой стороны — усреднению нужен каждый задетый
-    /// пиксель, — и ужимается именно окно: растянутое на тайл прочитанное
-    /// целиком уехало бы на эту долю, у соседнего тайла в другую сторону, и на
-    /// стыке остался бы шов.
+    /// The share of the read area that the tile itself occupies. The read area
+    /// can be wider by a fraction of a pixel on each side — averaging needs
+    /// every touched pixel — and it is the window that gets compressed: the
+    /// read area stretched over the tile would shift entirely by that
+    /// fraction, the neighboring tile's the other way, and a seam would remain
+    /// at the joint.
     pub(super) window: Window,
 }
 
-/// Где искать тайл в копии. Чистая функция, потому что от неё зависит не вид
-/// картинки, а цена чтения: пиксель, приписанный области сверх нужного,
-/// превращается в лишние чанки файла и в прыжки по нему (см. `aligned` в
-/// [`direct`]).
+/// Where to look for a tile in the overview. A pure function, because what
+/// depends on it is not the look of the picture but the cost of reading: a
+/// pixel attributed to the region beyond what is needed turns into extra file
+/// chunks and jumps over them (see `aligned` in [`direct`]).
 ///
-/// `aligned` — копия и уровень суть одна сетка. Тогда тайл берётся ровно там,
-/// где он лежит, и окно совпадает с прочитанным. Иначе масштаб дробный, и
-/// границы разводятся наружу (floor/ceil): у двоичных копий доли нулевые и
-/// разницы нет, а небинарные (3, 5, 7/2) дают её на каждом тайле.
+/// `aligned` — the overview and the level are one and the same grid. Then the
+/// tile is taken exactly where it lies, and the window matches what is read.
+/// Otherwise the scale is fractional and the bounds spread outward
+/// (floor/ceil): for power-of-two overviews the fractions are zero and there
+/// is no difference, while non-binary ones (3, 5, 7/2) produce it on every
+/// tile.
 pub(super) fn region_of(
     (tx, ty): (u32, u32),
     (tw, th): (u32, u32),
@@ -306,13 +327,14 @@ pub(super) fn region_of(
 ) -> Region {
     let (x0, y0) = (u64::from(tx) * u64::from(TILE), u64::from(ty) * u64::from(TILE));
     if aligned {
-        // Начало отступает назад ровно настолько, чтобы тайлу досталась хоть
-        // строка копии. Копия короче уровня на тот самый прощённый пиксель, и у
-        // последнего тайла его может не остаться вовсе: сторона 4609 — это
-        // десять рядов, последний в один пиксель, а копия кончается на 4608.
-        // Пустая область здесь не пустой тайл, а отказ всего прохода — и с ним
-        // приговор всем его ячейкам разом (см. `Fetch::produced`), то есть ряд,
-        // который не появится уже никогда.
+        // The start steps back just far enough for the tile to get at least one
+        // row of the overview. The overview is shorter than the level by that
+        // very forgiven pixel, and the last tile may have none of it left at
+        // all: a side of 4609 is ten rows, the last one a single pixel, while
+        // the overview ends at 4608. An empty region here is not an empty tile
+        // but a refusal of the whole pass — and with it a verdict against all
+        // of its cells at once (see `Fetch::produced`), meaning a row that
+        // will never appear.
         let (x0, y0) = (x0.min(u64::from(sw).saturating_sub(1)), y0.min(u64::from(sh).saturating_sub(1)));
         let (x1, y1) =
             ((x0 + u64::from(tw)).min(u64::from(sw)), (y0 + u64::from(th)).min(u64::from(sh)));
@@ -336,33 +358,34 @@ pub(super) fn region_of(
     Region { sx0, sx1, sy0, sy1, window }
 }
 
-/// Источник, отдающий растр чанками по сетке ([`Grid`]).
+/// A source that serves a raster in chunks on a grid ([`Grid`]).
 pub trait Chunked {
-    /// Чанк `index` образа `image` — RGBA8 и его фактические размеры: у
-    /// краевых чанков полезная часть короче сетки. Индекс — `ряд × чанков в
-    /// ряду + колонка`.
+    /// Chunk `index` of image `image` — RGBA8 and its actual size: for edge
+    /// chunks the useful part is shorter than the grid. The index is
+    /// `row × chunks per row + column`.
     fn chunk(&mut self, image: usize, index: u32) -> Result<(Vec<u8>, u32, u32), String>;
 
-    /// Чанки `indices` образа `image` сейчас прочтут — источник, знающий, где
-    /// они лежат в файле, называет это носителю (`veldsdk::abi::
-    /// resource_prefetch`), и по проводу они едут разом, несколькими
-    /// запросами в полёте, а не по промаху за промахом. Умолчание — ничего:
-    /// не всякий источник знает свои смещения.
+    /// Chunks `indices` of image `image` are about to be read — a source that
+    /// knows where they lie in the file tells the medium so (`veldsdk::abi::
+    /// resource_prefetch`), and they travel over the wire together, with
+    /// several requests in flight, rather than miss by miss. The default is
+    /// nothing: not every source knows its offsets.
     fn prefetch(&mut self, _image: usize, _indices: &[u32]) -> Result<(), String> {
         Ok(())
     }
 }
 
-/// Декодированные чанки одного образа, RGBA8. Вытеснение — по старшинству и
-/// до бюджета: тайлы приходят соседними, и старее всех — самый ненужный.
+/// Decoded chunks of one image, RGBA8. Eviction is by seniority and up to the
+/// budget: tiles arrive in neighborhood order, and the oldest is the least
+/// needed one.
 struct ChunkCache {
     entries: VecDeque<(u32, Vec<u8>, u32, u32)>,
     bytes: usize,
-    /// Обращений и из них попаданий. Считается затем, что по этой паре и видно
-    /// главную цену прохода: чанк, взятый готовым, не стои́т ничего, а промах —
-    /// это поход в сеть, и один такой дороже всей распаковки заказа вместе
-    /// взятой. Разъехавшаяся с уровнем сетка узнаётся здесь же — по числу
-    /// промахов, вчетверо большему числа тайлов.
+    /// Accesses and, of those, hits. Counted because this pair reveals the
+    /// main cost of the pass: a chunk taken ready-made costs nothing, while a
+    /// miss is a trip to the network, and a single one costs more than all the
+    /// unpacking of the order together. A grid drifted apart from the level
+    /// shows up right here too — by a miss count four times the tile count.
     asked: u32,
     hits: u32,
 }
@@ -387,7 +410,8 @@ impl ChunkCache {
 
         let (rgba, dw, dh) = source.chunk(image, index)?;
 
-        // Свежий остаётся при любом бюджете: без него не собрать текущий тайл.
+        // The fresh one survives any budget: without it the current tile
+        // cannot be assembled.
         self.bytes += rgba.len();
         self.entries.push_back((index, rgba, dw, dh));
         while self.bytes > CHUNK_CACHE_BYTES && self.entries.len() > 1 {
@@ -400,8 +424,8 @@ impl ChunkCache {
     }
 }
 
-/// Точечное чтение: тайлы `wants` уровня `level` из чанков ближайшей годной
-/// копии; `base` — размеры базового образа.
+/// Pointwise reading: tiles `wants` of level `level` from chunks of the
+/// nearest usable overview; `base` holds the base image sizes.
 pub fn direct<S: Chunked>(
     source: &mut S,
     grid: &Grid,
@@ -417,33 +441,37 @@ pub fn direct<S: Chunked>(
     let across = sw.div_ceil(cw);
     let mut chunks = ChunkCache::new();
 
-    // Копия и уровень — одна и та же сетка, если расходятся они не больше чем
-    // на пиксель округления. Ровно это прощение объявил [`Grid::source_for`],
-    // ВЫБИРАЯ копию, — и не заметить его при ЧТЕНИИ дорого: сторона уровня
-    // считается округлением вверх, копия в файле записана делением вниз, и
-    // пропорциональный пересчёт сдвигает область каждого тайла на пиксель
-    // влево-вверх. Область выходит на пиксель шире тайла и задевает вчетверо
-    // больше чанков файла. Само по себе это дёшево — лишний чанк чаще всего
-    // берётся готовым из кэша, — а дорого другое: чанки собираются рядами, ряд
-    // отстои́т от соседнего на всю ширину сетки, и чтение ходит по файлу
-    // вперёд-назад на каждом тайле. Хост читает такой ход как случайный доступ
-    // и сбрасывает разгон упреждающего чтения в один блок (см. `Readahead` в
-    // network/range.rs), а с ним и всю скорость.
+    // The overview and the level are one and the same grid if they differ by
+    // no more than a rounding pixel. [`Grid::source_for`] declared exactly
+    // this forgiveness when CHOOSING the overview — and missing it when
+    // READING is expensive: the level side is computed by rounding up, the
+    // overview in the file is stored by rounding down, and the proportional
+    // rescale shifts each tile's region by a pixel to the left and up. The
+    // region comes out a pixel wider than the tile and touches four times as
+    // many file chunks. By itself this is cheap — the extra chunk usually
+    // comes ready-made from the cache — but the expensive part is elsewhere:
+    // chunks are assembled in rows, a row stands a whole grid width away from
+    // its neighbor, and the reading walks the file back and forth on every
+    // tile. The host reads such walking as random access and resets the
+    // readahead ramp-up to a single block (see `Readahead` in
+    // network/range.rs), dropping all the speed with it.
     //
-    // Платится за это пикселем содержимого у дальнего края тайла: сегодня та
-    // же доля пикселя размазывается ресемплом по всей стороне. Привязка при
-    // этом не двигается — она считается по сетке уровня, а не по копии.
+    // What is paid for this is a pixel of content at the far edge of the tile:
+    // today the same fraction of a pixel is smeared by the resample across the
+    // whole side. The georeference does not move meanwhile — it is computed
+    // from the level grid, not from the overview.
     let aligned = lw.abs_diff(sw) <= 1 && lh.abs_diff(sh) <= 1;
     let began = std::time::Instant::now();
 
     veldsdk::log::debug!(target: "decode",
-        "прямой доступ: уровень {} ({}×{}) из образа {} ({}×{}), тайлов {}, сетка {}",
+        "pointwise access: level {} ({}×{}) from image {} ({}×{}), {} tiles, grid {}",
         level, lw, lh, image, sw, sh, wants.len(),
-        if aligned { "своя" } else { "чужая" });
+        if aligned { "own" } else { "foreign" });
 
-    // Чанки под всеми заказанными тайлами — носителю наперёд, одним заказом
-    // (см. [`Chunked::prefetch`]); та же геометрия, что и у сборки ниже.
-    // Сорвавшийся заказ прохода не валит: чанки приедут обычным чтением.
+    // Chunks under all ordered tiles go to the medium up front, in one order
+    // (see [`Chunked::prefetch`]); the same geometry as the assembly below.
+    // A failed order does not kill the pass: the chunks arrive by ordinary
+    // reading.
     let mut needed = std::collections::BTreeSet::new();
     for &(tx, ty) in wants {
         let (tw, th) = (pyramid::tile_extent(tx, lw), pyramid::tile_extent(ty, lh));
@@ -459,38 +487,40 @@ pub fn direct<S: Chunked>(
     }
     let needed: Vec<u32> = needed.into_iter().collect();
     if let Err(why) = source.prefetch(image, &needed) {
-        veldsdk::log::debug!(target: "decode", "чанки наперёд не привезены, читаем по промахам: {}", why);
+        veldsdk::log::debug!(target: "decode", "chunks not prefetched, reading on misses: {}", why);
     }
 
     for &(tx, ty) in wants {
         let tw = pyramid::tile_extent(tx, lw);
         let th = pyramid::tile_extent(ty, lh);
 
-        // Прямоугольник тайла в пикселях источника. Масштаб дробный, границы
-        // наружу (floor/ceil): усреднению нужен каждый задетый пиксель.
+        // The tile rectangle in source pixels. The scale is fractional, the
+        // bounds go outward (floor/ceil): averaging needs every touched pixel.
         //
-        // Прочитанное при этом ШИРЕ того, что тайлу принадлежит, — на долю
-        // пикселя с каждой стороны. Тайлу принадлежит окно `window`, и
-        // ужимается именно оно: растянутое на тайл прочитанное целиком уехало
-        // бы на эту долю, у соседнего тайла — в другую сторону, и на стыке
-        // остался бы шов. У двоичных копий доли нулевые и разницы нет, а
-        // небинарные (3, 5, 7/2) дают её на каждом тайле.
+        // What is read is WIDER than what belongs to the tile — by a fraction
+        // of a pixel on each side. The tile owns the `window`, and it is the
+        // window that gets compressed: the read area stretched over the tile
+        // would shift entirely by that fraction, the neighboring tile's the
+        // other way, and a seam would remain at the joint. For power-of-two
+        // overviews the fractions are zero and there is no difference, while
+        // non-binary ones (3, 5, 7/2) produce it on every tile.
         let Region { sx0, sx1, sy0, sy1, window } =
             region_of((tx, ty), (tw, th), (lw, lh), (sw, sh), aligned);
         let (rw, rh) = ((sx1 - sx0) as u32, (sy1 - sy0) as u32);
         if rw == 0 || rh == 0 {
-            return Err(format!("тайлу {}:{} не досталось пикселей источника", tx, ty));
+            return Err(format!("tile {}:{} got no source pixels", tx, ty));
         }
         if u64::from(rw) * u64::from(rh) > REGION_CAP {
             return Err(format!(
-                "область {}×{} под тайл больше потолка — копии в файле слишком редкие",
+                "region {}×{} under the tile exceeds the cap — overviews in the file are too sparse",
                 rw, rh
             ));
         }
         let (sx0, sy0) = (sx0 as u32, sy0 as u32);
 
-        // Область собирается из пересечения с чанками; за краем данных нет —
-        // у краевых чанков полезная часть короче.
+        // The region is assembled from the intersection with the chunks;
+        // beyond the data edge there is nothing — for edge chunks the useful
+        // part is shorter.
         let mut region = vec![0u8; (rw as usize) * (rh as usize) * 4];
         for cy in sy0 / ch..=(sy0 + rh - 1) / ch {
             for cx in sx0 / cw..=(sx0 + rw - 1) / cw {
@@ -516,41 +546,44 @@ pub fn direct<S: Chunked>(
         emit(level, tx, ty, tw, th, &tile)?;
     }
 
-    // Чем обошёлся проход. Строка нужна затем, что цену тайла иначе не
-    // измерить: наружу едет только «сколько прочитано», а это водяной знак
-    // головы чтения, и при произвольном доступе он стои́т на месте, пока
-    // чтение ходит назад.
+    // What the pass cost. The line is here because the tile cost cannot be
+    // measured otherwise: only "how much was read" travels outward, and that
+    // is the watermark of the read head, which under random access stands
+    // still while the reading walks backward.
     //
-    // Главное в ней — промахи кэша чанков против тайлов. Их поровну, когда
-    // сетка своя. Больше — когда область разъехалась с сеткой копии, и растёт
-    // при этом не столько число промахов, сколько время: чтение ходит по файлу
-    // назад, а возврат хост читает как случайный доступ. Вчетверо промахи
-    // растут у копии, которая крупнее уровня вдвое (её у файла может не быть
-    // на этой ступени вовсе) — там это честная цена, а не разъезд сеток.
+    // The essence of it is chunk-cache misses against tiles. They are even
+    // when the grid is our own. More — when the region has drifted from the
+    // overview grid, and what grows then is not so much the miss count as the
+    // time: the reading walks the file backward, and the host reads the
+    // backward jump as random access. Misses grow fourfold for an overview
+    // twice the size of the level (the file may lack one at this step
+    // entirely) — there it is the honest price, not a grid drift.
     veldsdk::log::debug!(target: "perf",
-        "проход: уровень {}, тайлов {}, чанков {} ({} готовыми), сетка {}, за {:.2} с",
+        "pass: level {}, {} tiles, {} chunks ({} from cache), grid {}, {:.2} s",
         level, wants.len(), chunks.asked - chunks.hits, chunks.hits,
-        if aligned { "своя" } else { "чужая" }, began.elapsed().as_secs_f32());
+        if aligned { "own" } else { "foreign" }, began.elapsed().as_secs_f32());
     Ok(())
 }
 
-/// Последовательный проход: ряды чанков базового образа сверху вниз — полосами
-/// в каскад, который строит все уровни разом; `base` — размеры базового образа.
+/// Sequential pass: rows of base-image chunks from top to bottom — as bands
+/// into the cascade that builds all levels at once; `base` holds the base
+/// image sizes.
 pub fn pass<S: Chunked>(source: &mut S, grid: &Grid, base: (u32, u32), emit: Emit) -> Result<(), String> {
     let (width, height) = base;
     let (cw, ch) = grid.chunk;
     let across = width.div_ceil(cw);
     let down = height.div_ceil(ch);
-    grid.pass_peak(base).admit().map_err(|why| format!("проход: {}", why))?;
+    grid.pass_peak(base).admit().map_err(|why| format!("pass: {}", why))?;
 
     veldsdk::log::debug!(target: "decode",
-        "проход: {}×{}, чанк {}×{}, рядов {} ({})",
+        "pass: {}×{}, chunk {}×{}, {} rows ({})",
         width, height, cw, ch, down,
-        if grid.tiled { "тайловый без копий" } else { "полосный" });
+        if grid.tiled { "tiled without overviews" } else { "striped" });
 
     let mut cascade = Cascade::new(0, width, height);
     for cy in 0..down {
-        // Высота ряда — по сетке: у нижнего края ряд короче целиком.
+        // The row height follows the grid: at the bottom edge the row is
+        // shorter as a whole.
         let rows = ch.min(height - cy * ch);
         let mut band = vec![0u8; (width as usize) * (rows as usize) * 4];
         for cx in 0..across {

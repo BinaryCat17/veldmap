@@ -3,9 +3,9 @@ use crate::proto::data_provider::DataProduct;
 use super::listing::choice;
 
 choice! {
-    /// Миссия, по которой сужается запрос.
+    /// The mission the query is narrowed by.
     Mission {
-        Any       = "any",        "Все", "все";
+        Any       = "any",        "All", "all";
         Sentinel1 = "sentinel-1", "Sentinel-1";
         Sentinel2 = "sentinel-2", "Sentinel-2";
         Sentinel3 = "sentinel-3", "Sentinel-3";
@@ -13,8 +13,8 @@ choice! {
 }
 
 impl Mission {
-    /// Имя коллекции, как его знает каталог; пусто — не сужать. Имена
-    /// буквальные и уходят в запрос без перевода.
+    /// The collection name as the catalog knows it; empty — do not narrow. Names
+    /// are literal and go into the query untranslated.
     pub fn collection(self) -> &'static str {
         match self {
             Mission::Any => "",
@@ -24,43 +24,45 @@ impl Mission {
         }
     }
 
-    /// Есть ли у снимков этой миссии облачность.
+    /// Whether snapshots of this mission carry cloud cover.
     ///
-    /// У радара её нет вовсе, и условие по ней отсекает не часть выдачи, а всю:
-    /// каталог отбирает снимки, у которых атрибут есть и меньше порога, а у
-    /// Sentinel-1 его не бывает (проверено — выдача пустая). «Все миссии» тоже
-    /// не в счёт: радар входит и в них.
+    /// Radar has none at all, and a condition on it cuts not part of the results
+    /// but all of them: the catalog selects snapshots that carry the attribute and
+    /// are below the threshold, while Sentinel-1 never has it (verified — the
+    /// results are empty). "All missions" does not count either: radar is among
+    /// them too.
     pub fn clouded(self) -> bool {
         matches!(self, Mission::Sentinel2 | Mission::Sentinel3)
     }
 }
 
 choice! {
-    /// Окно съёмки: насколько глубоко в прошлое смотреть.
+    /// The acquisition window: how far back to look.
     ///
-    /// Само по себе окно выдачу почти не меняет: каталог отдаёт самое свежее
-    /// первым, и пятьдесят самых свежих сняты минуты назад — они попадают в
-    /// любое окно. Смысл у него появляется вместе с сужением по месту: у одной
-    /// плитки пролёты за неделю и за год — это разные списки.
+    /// By itself the window barely changes the results: the catalog gives the most
+    /// recent first, and the fifty most recent were shot minutes ago — they fall
+    /// into any window. Its meaning appears together with the spatial narrowing:
+    /// over one tile, passes of the past week and of the past year are different
+    /// lists.
     Period {
-        Any   = "any",   "За всё время", "всё время";
-        Week  = "week",  "За неделю",    "неделя";
-        Month = "month", "За месяц",     "месяц";
-        Year  = "year",  "За год",       "год";
-        /// Оба края названы датами. Отдельным вариантом, а не парой полей рядом
-        /// с пресетом: «за неделю» и «с 1 по 5 августа» — это два разных
-        /// способа сказать одно и то же, и держать их одновременно значит
-        /// завести вопрос «какой из них главный».
-        Custom = "custom", "Свой интервал", "свой интервал";
+        Any   = "any",   "All time",    "all time";
+        Week  = "week",  "Past week",   "past week";
+        Month = "month", "Past month",  "past month";
+        Year  = "year",  "Past year",   "past year";
+        /// Both edges are given as dates. A separate variant, not a pair of fields
+        /// next to the presets: "past week" and "August 1 to 5" are two different
+        /// ways to say one and the same thing, and keeping both at once would
+        /// raise the question "which one is primary".
+        Custom = "custom", "Custom range", "custom range";
     }
 }
 
 impl Period {
-    /// Начало окна в unix-секундах; 0 — не ограничивать.
+    /// The start of the window in unix seconds; 0 — do not limit.
     pub fn since(self, now: i64) -> i64 {
         let days = match self {
-            // Свой интервал считается не отсюда, а из набранных дат
-            // (см. `SearchState::window`).
+            // The custom interval is computed not here but from the typed dates
+            // (see `SearchState::window`).
             Period::Any | Period::Custom => return 0,
             Period::Week => 7,
             Period::Month => 30,
@@ -71,18 +73,18 @@ impl Period {
 }
 
 choice! {
-    /// Потолок облачности. Спрашивается только у оптических миссий — см.
+    /// The cloud cover ceiling. Asked only of optical missions — see
     /// [`Mission::clouded`].
     Cloud {
-        Any    = "any", "Любая",  "любая";
-        Upto10 = "10",  "До 10%", "до 10%";
-        Upto30 = "30",  "До 30%", "до 30%";
-        Upto60 = "60",  "До 60%", "до 60%";
+        Any    = "any", "Any",       "any";
+        Upto10 = "10",  "Up to 10%", "up to 10%";
+        Upto30 = "30",  "Up to 30%", "up to 30%";
+        Upto60 = "60",  "Up to 60%", "up to 60%";
     }
 }
 
 impl Cloud {
-    /// Порог в процентах; `None` — не ограничивать.
+    /// The threshold in percent; `None` — do not limit.
     pub fn max(self) -> Option<f64> {
         match self {
             Cloud::Any => None,
@@ -95,43 +97,46 @@ impl Cloud {
 
 #[derive(Default)]
 pub struct SearchState {
-    /// Запрос к провайдеру — не то же, что фильтр по имени в `listing`: тот
-    /// отбирает уже найденное, этот решает, что искать.
+    /// The query to the provider — not the same as the name filter in `listing`:
+    /// that one filters what is already found, this one decides what to search.
     pub query: String,
     pub mission: Mission,
     pub period: Period,
-    /// Края своего интервала — как их набрали, а не как разобрали. Текстом,
-    /// потому что набранное наполовину («2026-08-») числом ещё не является, а
-    /// стирать из поля недобранное значило бы отнимать у него ввод.
+    /// The edges of the custom interval — as typed, not as parsed. Text, because a
+    /// half-typed value ("2026-08-") is not a number yet, and erasing the
+    /// unfinished part from the field would mean taking input away from it.
     pub from: String,
     pub to: String,
-    /// Потолок облачности. Держится и когда его не спрашивают (миссия сменилась
-    /// на радарную), но в запрос тогда не уходит: см. `handlers::search::run`.
+    /// The cloud cover ceiling. Kept even when it is not asked (the mission
+    /// switched to radar), but then it does not go into the query: see
+    /// `handlers::search::run`.
     pub cloud: Cloud,
     pub results: Vec<DataProduct>,
-    /// Содержимое раскрытых снимков: продукт, лежащий папкой, раскрывается в
-    /// свои файлы прямо в выдаче — тем же листингом, что и в каталоге.
+    /// Contents of expanded snapshots: a product that lies as a folder expands
+    /// into its files right in the results — the same listing as in the catalog.
     pub children: super::browse::Children,
-    /// Последняя ошибка search от data-provider (пусто, если запрос успешен)
+    /// The last search error from data-provider (empty on a successful request)
     pub error: Option<String>,
-    /// Ожидание ответа на data-provider/on_search: актуален только последний —
-    /// результат по прошлому запросу под нынешним запросом ввёл бы в заблуждение.
+    /// Waiting for an answer to data-provider/on_search: only the last one is
+    /// current — the result of a past request under the present query would be
+    /// misleading.
     pub request: veldsdk::Latest,
-    /// Как показывать найденное — отбор, порядок, страница.
+    /// How to show what is found — filtering, order, page.
     pub listing: super::listing::ListingState,
 }
 
 impl SearchState {
-    /// Окно съёмки для запроса: пара unix-секунд, 0 — край не задан.
+    /// The acquisition window for the query: a pair of unix seconds, 0 — the edge
+    /// is not set.
     ///
-    /// Одним местом на оба края: у пресета верхнего края нет вовсе («за
-    /// неделю» значит «по сегодня»), у своего интервала оба выводятся из
-    /// набранного, — и решать, какой из двух способов сейчас в силе, должен
-    /// кто-то один.
+    /// One place for both edges: a preset has no upper edge at all ("past week"
+    /// means "through today"), while the custom interval derives both from what
+    /// was typed — and which of the two ways is in force must be decided by one
+    /// place.
     ///
-    /// Верхний край — конец названного дня, а не его полночь: «по 13 августа»
-    /// без этого не включало бы сам тринадцатое, и снимок, ради которого дату
-    /// и набрали, в выдачу бы не попал.
+    /// The upper edge is the end of the named day, not its midnight: "through
+    /// August 13" would otherwise not include the thirteenth itself, and the
+    /// snapshot the date was typed for would not make it into the results.
     pub fn window(&self, now: i64) -> (i64, i64) {
         use crate::module::components::format::parse_date;
         match self.period {

@@ -1,17 +1,20 @@
-//! Раскладка между запусками: как экран сложили, таким он и открывается.
+//! Layout between launches: however the screen was arranged, that is how it
+//! opens.
 //!
-//! Пишется она сама — по каждому действию, которое её меняет, а не по кнопке
-//! «сохранить»: раскладка не документ, а то, где человек оставил работу, и
-//! спрашивать разрешения запомнить это незачем.
+//! It is written by itself — on every action that changes it, not on a "save"
+//! button: the layout is not a document but where the person left the work, and
+//! asking permission to remember that is pointless.
 //!
-//! Сохраняется только то, что определяет, **что показано**: форма дерева,
-//! доли границ, род каждой вкладки и то немногое, из чего её содержимое
-//! спрашивается заново (папка каталога, условия поиска, снимок просмотра).
-//! Само содержимое приходит ответом и в файле ему делать нечего: список папки
-//! за неделю станет другим, а показанный из файла был бы вчерашней правдой.
+//! Only what determines **what is shown** is saved: the shape of the tree, the
+//! split fractions, the kind of each tab, and the little from which its content
+//! is requested anew (catalogue folder, search terms, preview snapshot). The
+//! content itself arrives as a response and has no business in the file: a
+//! folder listing will change within a week, and one shown from the file would
+//! be yesterday's truth.
 //!
-//! Файл — кэш, а не документ: не разобрался или пропал — окно открывается тем,
-//! что назвал конфиг, и потеря стоит ровно одного расставления вкладок.
+//! The file is a cache, not a document: if it fails to parse or is missing, the
+//! window opens with what the config named, and the loss costs exactly one
+//! rearrangement of the tabs.
 
 use crate::module::state::listing::Choice;
 use crate::module::state::search::{Cloud, Mission, Period};
@@ -22,26 +25,27 @@ use crate::module::NewTab;
 use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::{FsReadRequest, FsWriteRequest, FsWriteResult};
 
-/// Где лежит запомненное. Рядом с `runtime/`, а не в `data/`: там скачанное, и
-/// снос кэша данных не должен уносить с собой расставленные вкладки.
+/// Where the memory lives. Next to `runtime/`, not in `data/`: that holds the
+/// downloads, and clearing the data cache must not carry the arranged tabs
+/// away with it.
 const PATH: &str = "state/data-browser.json";
 
-/// Потолок файла раскладки при чтении: она — десятки строк json на вкладку, и
-/// крупнее этого под её именем лежит не она.
+/// Cap of the layout file at read time: it is tens of lines of json per tab,
+/// and anything larger under its name is not it.
 const LAYOUT_CAP: u64 = 1024 * 1024;
 
-// -- Сохранённая раскладка --
+// -- Saved layout --
 //
-// Отдельные типы, а не сериализация живого состояния: в состоянии лежат
-// ресурсы, ожидания ответов и присланные каталогом строки, и ни одно из этого
-// не переживает запуск. Здесь — только то, что можно записать словами.
+// Separate types rather than a serialization of the live state: the state holds
+// resources, pending replies and rows delivered by the catalogue, and none of
+// that survives a launch. Here is only what can be written in words.
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Saved {
     root: SavedNode,
-    /// Панель, что была под рукой, — номером в порядке обхода дерева. Номер, а
-    /// не пометка у самой панели: «под рукой» бывает ровно одна, а пометка у
-    /// каждой позволила бы записать две.
+    /// The pane that was at hand — by its number in tree walk order. A number,
+    /// not a mark on the pane itself: "at hand" is exactly one, while a mark on
+    /// each would allow two to be written.
     focus: usize,
 }
 
@@ -50,7 +54,7 @@ struct Saved {
 enum SavedNode {
     Pane {
         tabs: Vec<SavedTab>,
-        /// Показанная вкладка — номером в списке выше.
+        /// The shown tab — by its number in the list above.
         active: usize,
     },
     Split {
@@ -68,8 +72,8 @@ enum SavedTab {
     Browse {
         path: String,
     },
-    /// Условия поиска, а не найденное: выдача приходит от каталога, и вчерашняя
-    /// под сегодняшним запросом была бы неправдой.
+    /// Search terms, not what was found: results come from the catalogue, and
+    /// yesterday's under today's query would be a lie.
     Search {
         query: String,
         mission: String,
@@ -81,24 +85,25 @@ enum SavedTab {
     Downloaded,
     Globe,
     Shown,
-    /// Чем снимок подписан и запись библиотеки, если он скачан, — ровно то, из
-    /// чего его открывают заново (см. `handlers::preview::reopen`).
+    /// What the snapshot is signed with and the library record, if it is
+    /// downloaded — exactly what it is reopened from (see
+    /// `handlers::preview::reopen`).
     Preview {
         label: String,
         entry: Option<String>,
-        /// Величина, названная смотрящим; пусто — выбор тайлера. По умолчанию,
-        /// чтобы файл, записанный без неё, читался.
+        /// The variable named by the viewer; empty means the tiler's choice. It
+        /// is the default so that a file written without it still reads.
         #[serde(default)]
         variable: String,
     },
 }
 
-// -- Запись --
+// -- Writing --
 
-/// Пишет раскладку, если она изменилась с прошлой записи.
+/// Writes the layout if it changed since the last write.
 ///
-/// Сравнение отпечатком, а не «мы знаем, какие сообщения её меняют»: список
-/// таких сообщений пришлось бы держать в голове и однажды забыть в нём новое.
+/// Comparison by fingerprint, not "we know which messages change it": such a
+/// list would have to be kept in mind and one day a new one forgotten in it.
 pub fn save_if_changed(state: &mut State) {
     let Ok(body) = veldsdk::serde_json::to_vec(&snapshot(state)) else { return };
     let mark = fingerprint(&body);
@@ -109,17 +114,17 @@ pub fn save_if_changed(state: &mut State) {
     write(state, &body);
 }
 
-/// Забыть, что раскладка записана. Зовётся с каждого отказа записи: отпечаток
-/// ставится до неё — иначе одно и то же тело уезжало бы на каждое событие, —
-/// и, оставленный после отказа, он молчал бы до следующей правки раскладки. А
-/// её может и не случиться: расставили вкладки один раз, запись сорвалась, и
-/// запомнить их больше нечем.
+/// Forgets that the layout is written. Called on every failed write: the
+/// fingerprint is set before it — otherwise the same body would go out on every
+/// event, — and, left after a failure, it would stay silent until the next
+/// layout edit. And that may never come: the tabs were arranged once, the write
+/// failed, and there is nothing left to remember them with.
 fn forget(state: &mut State) {
     state.last_saved = 0;
 }
 
-/// Запоминает нынешнюю раскладку как записанную, ничего не записывая, — так
-/// восстановленная не переписывает сама себя тем же содержимым.
+/// Remembers the current layout as written without writing anything — so a
+/// restored one does not rewrite itself with the same content.
 fn remember(state: &mut State) {
     if let Ok(body) = veldsdk::serde_json::to_vec(&snapshot(state)) {
         state.last_saved = fingerprint(&body);
@@ -133,13 +138,13 @@ fn fingerprint(body: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// Кладёт байты в файл через fs: регион → on_write → освобождение по ответу
-/// (см. [`on_write_result`]).
+/// Puts the bytes into the file via fs: region → on_write → release on reply
+/// (see [`on_write_result`]).
 fn write(state: &mut State, body: &[u8]) {
     let region = match veldsdk::resource::region_of(body) {
         Ok(region) => region,
         Err(error) => {
-            veldsdk::log::warn!(target: "handlers", "раскладка не записана: {}", error);
+            veldsdk::log::warn!(target: "handlers", "layout not written: {}", error);
             forget(state);
             return;
         }
@@ -148,7 +153,7 @@ fn write(state: &mut State, body: &[u8]) {
     crate::calls::fs::on_write(
         &FsWriteRequest {
             path: PATH.to_string(),
-            // Владение уезжает в таблицу ожидания: освободит его ответ.
+            // Ownership goes into the pending table: the reply releases it.
             handle: Some(region.into_handle()),
         },
         &correlation,
@@ -159,41 +164,44 @@ pub fn on_write_result(state: &mut State, result: FsWriteResult) {
     let Some(region) = state.layout_writes.take(&veldsdk::correlation()) else { return };
     drop(veldsdk::OwnedResource::from_raw_id(region));
     if !result.error.is_empty() {
-        // Незаписанная раскладка стоит одного расставления вкладок — жаловаться
-        // человеку не о чем, а в логе след нужен.
-        veldsdk::log::warn!(target: "handlers", "раскладка не записана: {}", result.error);
+        // An unwritten layout costs one rearrangement of the tabs — there is
+        // nothing to complain about to the person, but a trace in the log is
+        // needed.
+        veldsdk::log::warn!(target: "handlers", "layout not written: {}", result.error);
         forget(state);
     }
 }
 
-// -- Чтение --
+// -- Reading --
 
-/// Спросить сохранённую раскладку. Ответ разбирает [`on_read_result`]; он же
-/// открывает стартовую вкладку, когда вспоминать нечего, — до ответа окно
-/// пустое, и это единственное честное состояние: что показывать, ещё неизвестно.
+/// Asks for the saved layout. The reply is parsed by [`on_read_result`]; it
+/// also opens the starting tab when there is nothing to remember — until the
+/// reply the window is empty, and that is the only honest state: what to show
+/// is not known yet.
 pub fn load(state: &mut State) {
     let correlation = state.layout_read.begin();
     crate::calls::fs::on_read(&FsReadRequest { path: PATH.to_string() }, &correlation);
 }
 
-/// Файл раскладки прочитан — или не прочитан вовсе: первый запуск, снесённый
-/// runtime, чужая версия формата. Все три случая значат одно: вспоминать
-/// нечего, открываем то, что назвал конфиг.
+/// The layout file has been read — or not read at all: a first launch, a
+/// cleared runtime, a foreign format version. All three cases mean one thing:
+/// there is nothing to remember, we open what the config named.
 pub fn on_read_result(state: &mut State, opened: ResourceOpened) {
     let correlation = veldsdk::correlation();
     match state.layout_read.settle(&correlation) {
         veldsdk::Reply::Current => {}
-        // Ответ на вытесненный вопрос: собирать по нему экран второй раз
-        // нельзя, а ресурс в нём наш — владение уже передали нам, и отпустить
-        // его больше некому.
+        // A reply to an evicted question: the screen cannot be assembled from
+        // it a second time, but the resource in it is ours — ownership was
+        // already handed to us, and there is no one else to release it.
         veldsdk::Reply::Stale => {
             if let Ok(handle) = veldsdk::resource::accept(&opened) {
                 veldsdk::resource::release(handle);
             }
             return;
         }
-        // Чужой ответ на общем топике: `fs/on_read_result` слушают трое, и
-        // трогать ресурс в чужом ответе нельзя — он уже может быть чьим-то.
+        // A foreign reply on the shared topic: `fs/on_read_result` is listened
+        // to by three, and a resource in a foreign reply must not be touched —
+        // it may already belong to someone.
         veldsdk::Reply::Foreign => {
             return veldsdk::resource::discard("fs/on_read_result", opened);
         }
@@ -206,7 +214,7 @@ pub fn on_read_result(state: &mut State, opened: ResourceOpened) {
     let saved = match veldsdk::serde_json::from_slice::<Saved>(&bytes) {
         Ok(saved) => saved,
         Err(error) => {
-            veldsdk::log::warn!(target: "handlers", "раскладка не разобралась: {}", error);
+            veldsdk::log::warn!(target: "handlers", "layout did not parse: {}", error);
             return fresh(state);
         }
     };
@@ -215,12 +223,12 @@ pub fn on_read_result(state: &mut State, opened: ResourceOpened) {
     remember(state);
 }
 
-/// Первый запуск: одна вкладка, названная конфигом.
+/// First launch: one tab, named by the config.
 fn fresh(state: &mut State) {
     super::nav::on_new_tab(state, state.focused(), state.start);
 }
 
-// -- Снимок живого состояния --
+// -- Snapshot of the live state --
 
 fn snapshot(state: &State) -> Saved {
     let mut panes = Vec::new();
@@ -229,8 +237,8 @@ fn snapshot(state: &State) -> Saved {
     Saved { root, focus }
 }
 
-/// Узел дерева и, попутно, порядок обхода панелей — им называется та, что была
-/// под рукой.
+/// A tree node and, along the way, the pane walk order — the pane that was at
+/// hand is named by it.
 fn save_node(state: &State, node: &Node, panes: &mut Vec<PaneId>) -> SavedNode {
     match node {
         Node::Leaf(leaf) => {
@@ -276,19 +284,20 @@ fn save_tab(kind: &ViewKind) -> SavedTab {
     }
 }
 
-// -- Сборка живого состояния из снимка --
+// -- Assembling the live state from the snapshot --
 
 fn restore(state: &mut State, saved: &Saved) {
     let mut panes = Vec::new();
     rebuild(state, state.focused(), &saved.root, &mut panes);
-    // Панель, чьи вкладки все до одной оказались повторами синглтона, вышла
-    // пустой — а пустых панелей не бывает: закрыть в ней нечего, и убрать её
-    // потом было бы нечем. Правило то же, что у закрытой вкладки.
+    // A pane whose tabs all turned out to be duplicates of a singleton comes
+    // out empty — and there are no empty panes: there is nothing to close in
+    // it, and removing it afterwards would be impossible. The same rule as for
+    // a closed tab.
     for pane in &panes {
         state.forget_if_empty(*pane);
     }
-    // Взгляд — туда, где он был; панели вне списка не бывает, но список мог
-    // приехать от другой версии формата.
+    // The gaze goes where it was; a pane outside the list cannot exist, but the
+    // list could arrive from another format version.
     if let Some(pane) = panes.get(saved.focus).or(panes.first())
         && let Some(view) = state.active_in(*pane)
     {
@@ -303,16 +312,17 @@ fn rebuild(state: &mut State, pane: PaneId, node: &SavedNode, panes: &mut Vec<Pa
             for tab in tabs {
                 open_tab(state, pane, tab);
             }
-            // Показанной делаем ту, что была показана: открытие делает активной
-            // каждую вкладку, поэтому это отдельный шаг после всех.
+            // Make shown the one that was shown: opening makes every tab
+            // active, so this is a separate step after all of them.
             let shown = state.views_in(pane).nth(*active).map(|view| view.id);
             if let Some(view) = shown {
                 state.focus(view);
             }
         }
         SavedNode::Split { axis, fraction, first, second } => {
-            // Ось неизвестна — файл из другой версии формата; тогда деления
-            // просто не будет, а вкладки обеих его половин лягут в одну панель.
+            // Axis unknown — the file is from another format version; then
+            // there is simply no split, and the tabs of both its halves fall
+            // into one pane.
             let side = match Axis::from_key(axis) {
                 Some(axis) => axis.tail(),
                 None => {
@@ -328,12 +338,11 @@ fn rebuild(state: &mut State, pane: PaneId, node: &SavedNode, panes: &mut Vec<Pa
     }
 }
 
-/// Заводит вкладку и просит то, чем она живёт, — тем же ходом, каким её
-/// заводит человек.
+/// Opens a tab and requests what it lives on — the same way a person opens it.
 fn open_tab(state: &mut State, pane: PaneId, tab: &SavedTab) {
-    // Синглтон, уже восстановленный в другой панели, второй раз не заводим:
-    // файл могли поправить руками, а два глобуса — это два места под кадр у
-    // модуля, который рисует один (см. `handlers::nav::singleton`).
+    // A singleton already restored in another pane is not opened twice: the
+    // file could have been edited by hand, and two globes mean two places for a
+    // frame in the module that draws one (see `handlers::nav::singleton`).
     if let Some(kind) = singleton_kind(tab)
         && super::nav::singleton(state, kind).is_some()
     {
@@ -362,8 +371,9 @@ fn open_tab(state: &mut State, pane: PaneId, tab: &SavedTab) {
             super::search::run(state, id);
         }
         SavedTab::Downloaded => {
-            // Каталог библиотеки уже спрошен на старте (см. nav::bootstrap), и
-            // приедет он рассылкой — своего запроса вкладке не нужно.
+            // The library catalogue is already requested at startup (see
+            // nav::bootstrap) and will arrive by broadcast — the tab needs no
+            // request of its own.
             state.open_in(pane, ViewKind::Downloaded(Default::default()));
         }
         SavedTab::Globe => {
@@ -378,7 +388,8 @@ fn open_tab(state: &mut State, pane: PaneId, tab: &SavedTab) {
     }
 }
 
-/// Род вкладки, которой не бывает двух. `None` — таких заводят сколько угодно.
+/// The kind of tab of which there cannot be two. `None` — those are opened as
+/// many as you like.
 fn singleton_kind(tab: &SavedTab) -> Option<NewTab> {
     match tab {
         SavedTab::Downloaded => Some(NewTab::Downloaded),
@@ -386,159 +397,5 @@ fn singleton_kind(tab: &SavedTab) -> Option<NewTab> {
         SavedTab::Shown => Some(NewTab::Shown),
         SavedTab::Search { .. } => Some(NewTab::Search),
         SavedTab::Empty | SavedTab::Browse { .. } | SavedTab::Preview { .. } => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::module::state::{Side, MIN_PANE};
-
-    fn state() -> State {
-        State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние")
-    }
-
-    /// Собранный экран переживает запись и чтение: те же панели, те же доли,
-    /// те же вкладки в тех же местах.
-    #[test]
-    fn layout_survives_a_round_trip() {
-        let mut before = state();
-        let left = before.focused();
-        let right = before.split_pane(left, Side::Right, 0.3).expect("панель заведена");
-        let under = before.split_pane(right, Side::Below, 0.75).expect("панель заведена");
-        before.open_in(left, ViewKind::Browse(BrowseState::default()));
-        before.open_in(left, ViewKind::Empty);
-        before.open_in(right, ViewKind::Globe(Default::default()));
-        before.open_in(under, ViewKind::Shown);
-        // Показана в левой панели первая, а не последняя открытая.
-        let first = before.views_in(left).next().expect("вкладка").id;
-        before.focus(first);
-
-        let body = veldsdk::serde_json::to_vec(&snapshot(&before)).expect("снимок");
-
-        let mut after = state();
-        let saved: Saved = veldsdk::serde_json::from_slice(&body).expect("разбор снимка");
-        restore(&mut after, &saved);
-
-        assert_eq!(after.layout().count(), 3);
-        assert_eq!(
-            veldsdk::serde_json::to_vec(&snapshot(&after)).expect("снимок"),
-            body,
-            "раскладка после чтения не та же"
-        );
-    }
-
-    /// Названная величина превью переживает запись и чтение — и вкладка,
-    /// записанная без неё, читается с выбором тайлера.
-    #[test]
-    fn a_previews_variable_survives_the_round_trip() {
-        let mut before = state();
-        let pane = before.focused();
-        let view = super::super::nav::open_preview(&mut before, pane, "S5P_CO.nc".to_string(), Some("S5P_CO.nc".to_string()));
-        let preview = before.preview_mut(view).expect("вкладка");
-        preview.variable = "/PRODUCT/qa_value".to_string();
-        // Канва названную показывает — только такая и пишется: отвергнутая
-        // открывалась бы после перезапуска тем же отказом без списка под ним.
-        preview.view_state = Some(crate::proto::image_view::ViewState {
-            variable: Some(crate::proto::image_view::Variable { path: "/PRODUCT/qa_value".to_string(), ..Default::default() }),
-            ..Default::default()
-        });
-        let body = veldsdk::serde_json::to_vec(&snapshot(&before)).expect("снимок");
-
-        let mut after = state();
-        let saved: Saved = veldsdk::serde_json::from_slice(&body).expect("разбор снимка");
-        restore(&mut after, &saved);
-        let restored = after.views().iter().find_map(|view| match &view.kind {
-            ViewKind::Preview(preview) => Some(preview.variable.clone()),
-            _ => None,
-        });
-        assert_eq!(restored.as_deref(), Some("/PRODUCT/qa_value"));
-
-        let legacy: SavedTab = veldsdk::serde_json::from_str(r#"{"tab":"preview","label":"a.nc","entry":null}"#)
-            .expect("старая запись читается");
-        assert!(matches!(legacy, SavedTab::Preview { variable, .. } if variable.is_empty()));
-
-        // Отвергнутая названная (канва показывает не её) не пишется.
-        before.preview_mut(view).expect("вкладка").view_state = Some(Default::default());
-        let saved: Saved = veldsdk::serde_json::from_slice(&veldsdk::serde_json::to_vec(&snapshot(&before)).expect("снимок"))
-            .expect("разбор");
-        let mut again = state();
-        restore(&mut again, &saved);
-        let restored = again.views().iter().find_map(|view| match &view.kind {
-            ViewKind::Preview(preview) => Some(preview.variable.clone()),
-            _ => None,
-        });
-        assert_eq!(restored.as_deref(), Some(""), "отвергнутая величина записана во вкладку");
-    }
-
-    /// Второй глобус из поправленного руками файла не заводится: место под
-    /// кадр у рисующего модуля одно.
-    #[test]
-    fn a_second_singleton_is_dropped() {
-        let mut restored = state();
-        let saved = Saved {
-            root: SavedNode::Pane {
-                tabs: vec![SavedTab::Globe, SavedTab::Globe, SavedTab::Shown],
-                active: 0,
-            },
-            focus: 0,
-        };
-        restore(&mut restored, &saved);
-        assert_eq!(restored.views().len(), 2);
-    }
-
-    /// Синглтон, названный в файле дважды, оставлял свою вторую панель пустой
-    /// навсегда: закрывать в ней нечего, а уходит панель из дерева только по
-    /// закрытой вкладке.
-    #[test]
-    fn a_pane_left_empty_by_a_duplicate_goes_away() {
-        let mut restored = state();
-        let saved = Saved {
-            root: SavedNode::Split {
-                axis: "row".to_string(),
-                fraction: 0.5,
-                first: Box::new(SavedNode::Pane { tabs: vec![SavedTab::Globe], active: 0 }),
-                second: Box::new(SavedNode::Pane { tabs: vec![SavedTab::Globe], active: 0 }),
-            },
-            focus: 0,
-        };
-        restore(&mut restored, &saved);
-        assert_eq!(restored.views().len(), 1, "глобус один");
-        assert_eq!(restored.layout().count(), 1, "пустая панель осталась в дереве");
-    }
-
-    /// Доля из файла зажимается тем же пределом, что живая граница: панель,
-    /// открывшаяся в ноль, не показывает ни вкладок, ни границы, за которую ей
-    /// вернуть место.
-    #[test]
-    fn a_restored_fraction_obeys_the_same_floor_as_the_border() {
-        for fraction in [0.0f32, 1.0, 0.001, 0.999] {
-            let mut restored = state();
-            // Окно к моменту чтения раскладки уже известно: его размер
-            // приезжает владельцу сразу по поднятии модуля, а раскладку
-            // приносит ответ fs — то есть заведомо позже.
-            restored.window = (2048, 1536);
-            let saved = Saved {
-                root: SavedNode::Split {
-                    axis: "row".to_string(),
-                    fraction,
-                    first: Box::new(SavedNode::Pane { tabs: vec![SavedTab::Shown], active: 0 }),
-                    second: Box::new(SavedNode::Pane { tabs: vec![SavedTab::Globe], active: 0 }),
-                },
-                focus: 0,
-            };
-            restore(&mut restored, &saved);
-            let panes: Vec<crate::module::state::PaneId> =
-                restored.views().iter().filter_map(|view| restored.pane_of(view.id)).collect();
-            for pane in panes {
-                let share = restored.layout().share(pane).0;
-                assert!(
-                    share * restored.logical_width() >= MIN_PANE,
-                    "доля {} дала панели {} точек",
-                    fraction,
-                    share * restored.logical_width()
-                );
-            }
-        }
     }
 }

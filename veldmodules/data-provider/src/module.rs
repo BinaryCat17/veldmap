@@ -17,64 +17,69 @@ pub struct Config {
 }
 
 pub struct State {
-    /// Чем подписываются запросы к хранилищу. `None` — ключей нет: конфиг
-    /// оставил их пустыми, потому что `.env` не завели (см. `cdse::NO_KEYS`).
-    /// Именно `Option`, а не пустые ключи внутри подписи: подписать ими можно,
-    /// и разница видна только на той стороне, кодом 403.
+    /// What signs the requests to the storage. `None` means no keys: the
+    /// config left them empty because `.env` was never set up (see
+    /// `cdse::NO_KEYS`). `Option` on purpose, not empty keys inside a
+    /// signature: those can still sign, and the difference is visible only on
+    /// the other side, as 403.
     pub identity: Option<Identity>,
-    /// Запросы, ожидающие HTTP-ответа: id генерируется, когда мы зовём network,
-    /// и снимается в on_http_result.
+    /// Requests waiting for an HTTP response: the id is generated when network
+    /// is called and taken in on_http_result.
     pub pending_http: veldsdk::Correlator<Pending>,
-    /// Открываемые удалённые ресурсы: correlation_id → имя заказчика, которому
-    /// уйдёт владение (см. cdse::on_open).
+    /// Remote resources being opened: correlation_id → the requester's name,
+    /// which receives ownership (see cdse::on_open).
     pub opening: veldsdk::Correlator<String>,
 }
 
-/// Что мы спросили у сети и кому отвечать.
+/// What was asked of the network and who is to be answered.
 ///
-/// Хранилище и каталог отвечают в один и тот же топик, поэтому вид запроса
-/// записан здесь, а не выводится из ответа: догадываться по содержимому значит
-/// однажды разобрать листинг как поиск.
+/// The storage and the catalogue answer on the same topic, so the request
+/// kind is recorded here rather than inferred from the response: guessing
+/// from the content means one day parsing a listing as a search.
 pub struct Pending {
-    /// Внешний id заказчика (data-browser); эхом возвращается в его ответ.
+    /// The requester's external id (data-browser); echoed back in its response.
     pub correlation_id: String,
     pub what: Asked,
 }
 
 pub enum Asked {
-    /// Листинг пути. Сам путь нужен, чтобы отсеять из ответа S3 запрошенный
-    /// префикс — в списке содержимого папке незачем быть собой.
+    /// A path listing. The path itself is kept to filter the requested prefix
+    /// out of the S3 answer — in a content list the folder has no business
+    /// being itself.
     List(String),
-    /// Поиск. Запрос хранится, потому что ответ может его не закрыть: своё окно
-    /// свежести мы вправе снять и спросить заново (см. `catalogue::FRESH_DAYS`),
-    /// а `widened` говорит, что это уже второй заход и третьего не будет.
+    /// A search. The request is kept because the answer may not close it: our
+    /// freshness window may be lifted and the search asked again (see
+    /// `catalogue::FRESH_DAYS`), and `widened` marks that this is already the
+    /// second attempt and there will be no third.
     Search { request: SearchRequest, widened: bool },
-    /// Растры продукта: поддерево листается страницами, найденные ключи
-    /// копятся здесь, пока хранилище не отдаст последнюю.
-    /// Обход поддерева продукта под растры. `downloaded` едет с самого
-    /// запроса и до самого выбора: от него зависит, предлагать ли подробный
-    /// растр, который читается только целым проходом по файлу
-    /// (см. `ImageryRequest.downloaded`).
+    /// Product rasters: the subtree is listed page by page, and the found keys
+    /// accumulate here until the storage serves the last page.
+    /// Traversal of the product subtree for rasters. `downloaded` travels from
+    /// the request all the way to the choice: it decides whether to offer the
+    /// detailed raster, which is read only by a full pass over the file
+    /// (see `ImageryRequest.downloaded`).
     Imagery { identifier: String, keys: Vec<String>, downloaded: bool, wanted: String },
-    /// Манифест продукта — второй ход после обхода: ключи уже собраны, а какой
-    /// из них измерение, называет он (см. `manifest`). Ключи едут с собой,
-    /// потому что ответ на `on_imagery` собирается из них обоих.
-    /// Манифест продукта — за ним идут, когда выбор растра иначе был бы
-    /// догадкой. `downloaded` едет и здесь: он про то же самое, что и в
-    /// [`Asked::Imagery`], и до выбора добирается только через это ожидание.
+    /// The product manifest — the second step after the traversal: the keys
+    /// are already collected, and it names which of them is a measurement
+    /// (see `manifest`). The keys travel along because the `on_imagery`
+    /// response is assembled from both.
+    /// The product manifest — it is fetched when the raster choice would
+    /// otherwise be a guess. `downloaded` travels here too: it means the same
+    /// as in [`Asked::Imagery`] and reaches the choice only through this wait.
     Manifest { identifier: String, keys: Vec<String>, downloaded: bool, wanted: String },
-    /// Продукт по точному имени — обратный ход поиска. Имя хранится для
-    /// объяснения пустого ответа: каталог на «не нашлось» отвечает молча.
+    /// A product by exact name — the return leg of a search. The name is kept
+    /// to explain an empty answer: the catalogue answers "not found" silently.
     Locate { name: String },
-    /// Упаковки той же съёмки — второй ход после `Locate`: спросили об одной
-    /// упаковке, а показывать надо снимок. `facts` — факты найденного, по
-    /// которым из ответа отбираются свои (`scene::same_scene`); `found` — то,
-    /// что нашлось по имени, и ответ, если упаковок не подъехало.
+    /// Packages of the same acquisition — the second step after `Locate`: one
+    /// package was asked for, but the scene is what should be shown. `facts`
+    /// are the facts of the found product, by which the matching ones are
+    /// picked from the answer (`scene::same_scene`); `found` is what the name
+    /// turned up, and the answer if no packages arrived.
     Siblings { facts: scene::Facts, found: DataProduct },
 }
 
-// Реэкспорт обработчиков: имена совпадают с ключами топиков в schema.yaml,
-// по ним их зовёт сгенерированный клей.
+// Re-export of the handlers: the names match the topic keys in schema.yaml,
+// by which the generated glue calls them.
 pub use cdse::{
     module_init as hook_init,
 

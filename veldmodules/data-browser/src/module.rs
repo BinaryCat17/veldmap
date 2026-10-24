@@ -17,41 +17,43 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
     State::new(config)
 }
 
-// -- Event hook (Elm-цикл: вызывается сгенерированным раннером после каждого
-// сообщения). Пересобирает view и шлёт в ui-service; неизменившийся layout по
-// шине не едет — топик объявлен снимком (см. его schema.yaml). --
+// -- Event hook (Elm loop: called by the generated runner after every message).
+// Rebuilds the view and sends it to ui-service; an unchanged layout does not
+// ride the bus — the topic is declared a snapshot (see its schema.yaml). --
 pub fn hook_event(state: &State) {
     let root = view::build_root(state);
     veld_ui_service_wrap::render::render(root, crate::calls::ui_service::on_set_view);
 }
 
-// -- UI-события (ui-service/on_ui_event, адресовано нам через target) --
-// Один топик на все виджеты: ui-service возвращает нажатое эхом парой строк и
-// смысла их не знает. Разбор — единственное место, где строки снова становятся
-// сообщением; дальше по модулю едет уже `Msg`.
+// -- UI events (ui-service/on_ui_event, addressed to us via target) --
+// One topic for all widgets: ui-service returns what was pressed as a pair of
+// strings and knows nothing of their meaning. Decoding is the one place where
+// the strings become a message again; from here on the module carries `Msg`.
 pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::UiEventResponse) {
     let Some(message) = Msg::decode(&event) else {
-        veldsdk::log::warn!(target: "handlers", "непонятное сообщение разметки: '{}'", event.method);
+        veldsdk::log::warn!(target: "handlers", "unrecognized layout message: '{}'", event.method);
         return;
     };
 
-    // Извещение о том, что не вышло, живёт до следующего действия — и гаснет
-    // здесь, до разбора: обработчик этого же нажатия вправе поставить своё, и
-    // гашение после него стёрло бы свежее (см. `State::notice`).
+    // A notice about what failed lives until the next action — and goes dark
+    // here, before the dispatch: the handler of the same press is entitled to
+    // set its own, and clearing it afterwards would erase the fresh one (see
+    // `State::notice`).
     //
-    // Действия, а не всякого сообщения: указатель над областью и её новый
-    // размер приезжают на голое движение мыши, а показ на шаре переводит взгляд
-    // как раз на шар — курсор оказывается над той самой областью, и извещение о
-    // неудавшемся показе стиралось бы раньше, чем его успевали прочесть.
+    // Actions, not every message: the pointer over an area and its new size
+    // arrive on bare mouse movement, while showing on the globe moves the gaze
+    // precisely to the globe — the cursor ends up over that very area, and the
+    // notice about a failed show would be erased before anyone could read it.
     if !idle(&message) {
         state.notice = None;
     }
 
-    // Раскладку запоминаем после разбора, но не на том, чего человек не
-    // отправлял: граница и область шлют десятки сообщений в секунду, и каждое
-    // прогоняло бы снимок всего дерева панелей через serde_json впустую.
-    // Отпускание границы сюда не входит — им перетаскивание и кончается, и
-    // записать надо ровно то место, где её отпустили (см. [`settled`]).
+    // The layout is remembered after the dispatch, but not on what the person
+    // did not send: a divider and an area send dozens of messages a second, and
+    // each would push a snapshot of the whole pane tree through serde_json for
+    // nothing. Releasing the divider is not among them — that is how the drag
+    // ends, and exactly the place where it was released must be recorded (see
+    // [`settled`]).
     let settled = settled(&message);
 
     match message {
@@ -63,8 +65,8 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::TabMove(id, side) => handlers::nav::on_tab_move(state, id, side),
         Msg::TabCollapse => handlers::nav::on_tab_collapse(state),
         Msg::Divide(split, delta) => state.divide(split, delta),
-        // Границу отпустили: делать нечего — это тот самый момент, ради
-        // которого сообщение и заведено, а запоминает раскладку общий ход ниже.
+        // The divider was released: nothing to do — this is the very moment the
+        // message exists for, and the common step below remembers the layout.
         Msg::Divided => {}
         Msg::TabDrop(pane, drop) => handlers::nav::on_tab_drop(state, pane, drop),
         Msg::Download(identifier, product) => {
@@ -75,9 +77,10 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::DownloadSnapshot(product) => handlers::library::on_download_snapshot(state, product),
         Msg::PauseSnapshot(product) => handlers::library::on_pause_snapshot(state, product),
         Msg::Reveal(name) => handlers::library::on_reveal_pressed(state, name),
-        // «Снять с шара» — про всё, что на нём лежит: и растры, и контуры.
-        // Порознь их не снять ничем, а разделять их пользователю не по чему —
-        // он видит один шар.
+        // "Remove from the globe" applies to everything lying on it: both
+        // rasters and outlines. There is no way to remove them separately, and
+        // nothing to separate them by for the user — one globe is what they
+        // see.
         Msg::GlobeClear => {
             handlers::overlay::clear_all(state);
             handlers::outline::clear(state);
@@ -102,20 +105,20 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
     }
 }
 
-/// Есть ли раскладке что запоминать после этого сообщения.
+/// Whether the layout has anything to remember after this message.
 ///
-/// Всё, чего человек не отправлял (см. [`idle`]), раскладки не меняет — кроме
-/// отпускания границы: оно и есть конец перетаскивания. Отдельным предикатом,
-/// а не своим списком сообщений: два списка одного и того же разошлись бы на
-/// первом же новом сообщении, приезжающем «само».
+/// Anything the person did not send (see [`idle`]) does not change the layout —
+/// except releasing the divider: that is the end of the drag. A separate
+/// predicate rather than its own message list: two lists of the same thing
+/// would drift apart on the first new message that arrives "on its own".
 fn settled(message: &Msg) -> bool {
     !idle(message) || matches!(message, Msg::Divided)
 }
 
-/// Сообщение, которое человек не отправлял, — оно приезжает от того, что
-/// курсор подвинулся или окно поделили. Таким нечего гасить извещения: они
-/// говорят о том, что не вышло по нажатию, и стереть их вправе только
-/// следующее нажатие.
+/// A message the person did not send — it arrives from the cursor moving or the
+/// window being split. Such messages have no business clearing notices: the
+/// notices speak about what failed on a press, and only the next press may
+/// erase them.
 fn idle(message: &Msg) -> bool {
     matches!(
         message,
@@ -128,9 +131,9 @@ fn idle(message: &Msg) -> bool {
     )
 }
 
-/// Сообщение из тела вкладки. Вид назвал себя сам (см. `Msg::In`), поэтому
-/// адресат здесь известен точно — и обработчику не приходится гадать, какая из
-/// панелей была под рукой.
+/// A message from the tab body. The view named itself (see `Msg::In`), so the
+/// addressee is known exactly here — and the handler does not have to guess
+/// which pane was at hand.
 fn on_view_message(state: &mut State, view: crate::module::state::ViewId, message: ViewMsg) {
     match message {
         ViewMsg::Fill(kind) => handlers::nav::fill(state, view, kind),
@@ -178,27 +181,28 @@ fn on_view_message(state: &mut State, view: crate::module::state::ViewId, messag
 // -- Sub handlers --
 pub use handlers::library::on_state;
 pub use handlers::preview::on_view_state;
-// Раскладка окна между запусками: файл читается один раз на старте, пишется по
-// каждому действию с вкладками (см. handlers::persist).
+// Window layout across runs: the file is read once at startup and written on
+// every tab action (see handlers::persist).
 pub use handlers::persist::{on_read_result, on_write_result};
 
-/// Ресурс открыт. Топиков два — библиотека отдаёт скачанный файл, провайдер
-/// открывает ещё не скачанный, — но сообщение одно, так что и обработчик
-/// один; чей это ответ — превью или растра наложения, — говорит таблица
-/// маршрутов, а не содержимое.
+/// A resource is open. There are two topics — the library hands over a
+/// downloaded file, the provider opens a not-yet-downloaded one — but the
+/// message is one, so the handler is one as well; whose answer it is — a
+/// preview or an overlay raster — the routing table says, not the contents.
 pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceOpened) {
     if handlers::preview::on_resource_opened(state, &opened) { return; }
     if handlers::overlay::on_opened(state, &opened) { return; }
     veldsdk::resource::discard("on_open_result", opened);
 }
 pub use handlers::globe::on_probed;
-// Ход добычи тайлов наложений: глобус рассказывает, сколько снимку ещё ехать, —
-// показывают это списки, у которых есть его строка.
+// Overlay tile harvesting progress: the globe reports how much of the snapshot
+// is still in flight — the lists holding its row show it.
 pub use handlers::overlay::on_overlay_progress;
 
-/// Продукт каталога по ключу хранилища. Ждут его двое — показ снимка на шаре и
-/// контур отмеченного, — и по содержимому их не различить: продукт в обоих
-/// случаях один и тот же. Чей это ответ, говорит таблица маршрутов.
+/// The catalogue product for a storage key. Two wait for it — showing the
+/// snapshot on the globe and outlining the checked one — and by contents they
+/// are indistinguishable: the product is the same in both cases. Whose answer
+/// it is the routing table says.
 pub fn on_locate_result(
     state: &mut State,
     response: crate::proto::data_provider::LocateResponse,
@@ -206,9 +210,9 @@ pub fn on_locate_result(
     let Some(asked) = state.locates.take(&veldsdk::correlation()) else { return };
     match asked {
         state::Locate::Outline(key) => handlers::outline::located(state, key, response),
-        // Один ход к каталогу отвечает обоим: показать снимок — это и очертить
-        // его (см. `overlay::on_toggle_pressed`), и второй такой же запрос ради
-        // той же геометрии был бы лишним.
+        // One trip to the catalogue answers both: showing the snapshot also
+        // outlines it (see `overlay::on_toggle_pressed`), and a second identical
+        // request for the same geometry would be redundant.
         state::Locate::Overlay(key) => {
             handlers::outline::located(state, key.clone(), response.clone());
             handlers::overlay::on_located(state, &key, response);
@@ -216,9 +220,9 @@ pub fn on_locate_result(
     }
 }
 
-/// Растры продукта. Ждут их двое — вкладка превью и собираемое наложение, —
-/// и чей это ответ, говорит таблица маршрутов, а не содержимое (то же, что у
-/// `on_open_result`).
+/// The product's rasters. Two wait for them — the preview tab and the overlay
+/// being assembled — and whose answer it is the routing table says, not the
+/// contents (same as `on_open_result`).
 pub fn on_imagery_result(
     state: &mut State,
     response: crate::proto::data_provider::ImageryResponse,

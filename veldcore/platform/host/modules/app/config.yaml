@@ -1,6 +1,0 @@
-# Конфиг нативного модуля app: buildgen генерирует крейт в generated/
-# (Cargo.toml + клей диспетчеризации). Логика — src/module.rs.
-package: veldmap-host-app
-language: rust
-rust:
-  dependencies: {}

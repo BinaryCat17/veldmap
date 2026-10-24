@@ -1,4 +1,4 @@
-//! Handlers для data-browser
+//! Handlers for data-browser
 
 pub mod search;
 pub mod browse;
@@ -14,13 +14,14 @@ pub mod window;
 
 use veldsdk::graphics::TextureFormat;
 
-/// Открыть файл ресурсом тем, чей он: скачанный — библиотекой, потому что файл
-/// под рукой, прочее — провайдером, по сети. `local` — имя записи библиотеки,
-/// если файл лежит на диске целиком (`LibraryState::local_name`); им же
-/// вкладка и сборка наложения помнят, чем открыт файл. Оба открывателя
-/// отвечают одним `core.ResourceOpened` на эту корреляцию, и дальше разницы
-/// нет. Учёт ожидания у каждого зовущего свой, поэтому корреляцию он заводит
-/// сам.
+/// Open a file with the resource that owns it: a downloaded one — with the
+/// library, because the file is at hand; anything else — with the provider, over
+/// the network. `local` is the library record name, used when the file lies on
+/// disk in full (`LibraryState::local_name`); the tab and the overlay assembly
+/// remember it as the way the file was opened. Both openers answer with a single
+/// `core.ResourceOpened` per this correlation, and beyond that there is no
+/// difference. Waiting is tracked by each caller, so it raises the correlation
+/// itself.
 pub fn open_resource(identifier: String, local: Option<String>, correlation: &str) {
     match local {
         Some(name) => crate::calls::data_library::on_open(
@@ -34,20 +35,21 @@ pub fn open_resource(identifier: String, local: Option<String>, correlation: &st
     }
 }
 
-/// Формат места под чужой рендер — и у канвы просмотра, и у шара. UNORM с
-/// sRGB-числами: разметка сэмплит эту текстуру как обычную картинку и
-/// линеаризует сама, а закодируй её GPU второй раз — вкладка приехала бы
-/// темнее соседней. Один на оба места, потому что правило одно: разъехавшись,
-/// они дали бы ровно эту разницу, и видна она была бы только их сравнением.
+/// Format of the slot for a foreign render — both for the view canvas and for the
+/// globe. UNORM with sRGB values: the markup samples this texture as an ordinary
+/// picture and linearizes it itself, while if the GPU encoded it a second time,
+/// the tab would arrive darker than its neighbor. One for both slots, because the
+/// rule is one: were they to diverge, they would give exactly this difference, and
+/// it would be visible only by comparing them.
 pub const SURFACE_FORMAT: TextureFormat = TextureFormat::TexRgba8Unorm;
 
 #[derive(serde::Deserialize)]
 pub struct Config {
-    /// Вид в стартовой вкладке: "search" (умолчание), "browse", "downloaded".
-    /// Превью здесь нет: оно открывается на конкретный файл, а его в конфиге
-    /// не назовёшь.
+    /// View in the starting tab: "search" (default), "browse", "downloaded".
+    /// There is no preview here: it opens on a concrete file, and no config can
+    /// name one.
     ///
-    /// Спрашивается только на первом запуске: дальше окно открывается тем, как
-    /// его сложили в прошлый раз (см. handlers::persist).
+    /// Consulted only on the first run: afterwards the window opens the way it was
+    /// arranged last time (see handlers::persist).
     pub initial_view: Option<String>,
 }

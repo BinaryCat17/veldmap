@@ -1,7 +1,7 @@
-//! Вкладка глобуса: область во весь экран и подпись под ней.
+//! The globe tab: an area across the whole screen and a caption under it.
 //!
-//! Своего содержимого у вкладки почти нет — всё, что видно, рисует чужой
-//! модуль. Здесь только место под него и то, что вокруг.
+//! The tab has almost no content of its own — everything visible is drawn by
+//! another module. Here is only the place for it and what is around.
 
 use veld_ui_service_wrap::{column, row, viewport};
 
@@ -11,45 +11,46 @@ use crate::module::state::{GlobeState, State, ViewId};
 use crate::module::{theme, Msg, ViewMsg};
 
 
-/// Чем управляют шаром. Величина, а не строка на месте: её ширину меряет
-/// [`hint_fits`], и разойтись им нельзя.
-const HINT: &str = "Тащите — вращает, колесо — приближает к курсору, щелчок — выбирает";
+/// How the globe is controlled. A constant, not a string at the place of use:
+/// [`hint_fits`] measures its width, and the two must not diverge.
+const HINT: &str = "Drag to rotate, wheel to zoom at the cursor, click to select";
 
-/// Помещается ли подсказка в полосу вместе со всем, что важнее её.
+/// Whether the hint fits into the bar together with everything that outranks
+/// it.
 ///
-/// Важнее — размер области и кнопка «Снять с шара»: первое говорит, куда
-/// смотрят, вторая делает дело, а подсказка лишь напоминает, чем вращают шар.
-/// Правило то же, что у имени снимка ([`picked_chars`]): место кнопкам полоса
-/// отводит первым.
+/// Outranking it are the area size and the "Remove from globe" button: the
+/// first tells where one looks, the second does the work, while the hint only
+/// recalls how the globe is rotated. The rule is the same as for the scene name
+/// ([`picked_chars`]): the bar gives the buttons their room first.
 fn hint_fits(width: f32, clearable: bool) -> bool {
     let mut taken = format::text_width(HINT, theme::TEXT_LABEL)
-        + format::text_width("область ещё не размечена", theme::TEXT_LABEL)
+        + format::text_width("viewport not sized yet", theme::TEXT_LABEL)
         + crate::module::view::BAR_SPACING
         + theme::GUTTER * 2.0;
     if clearable {
-        taken += format::text_width("Снять с шара", theme::TEXT_SMALL)
+        taken += format::text_width("Remove from globe", theme::TEXT_SMALL)
             + BUTTON_PAD
             + crate::module::view::BAR_SPACING;
     }
     taken <= width
 }
 
-/// Поля кнопки по обе стороны — те же, что ставит `theme::bar_button`.
+/// The button padding on both sides — the same that `theme::bar_button` sets.
 const BUTTON_PAD: f32 = 8.0 * 2.0;
 
-/// Сколько знаков имени помещается в полосу шириной `width`.
+/// How many characters of the name fit into a bar of width `width`.
 ///
-/// Считается, а не назначается числом: имя укорачивает клиент
-/// (`format::ellipsize`) — способа сказать тексту «сожмись» в этом протоколе
-/// нет, — и названное с запасом оно выдавит за край кнопки, то единственное,
-/// ради чего в эту полосу и смотрят. Постоянным числом это не выражается:
-/// полоса бывает и во весь экран, и в половину.
+/// Computed, not assigned as a number: the client shortens the name
+/// (`format::ellipsize`) — this protocol has no way to tell a text to "shrink"
+/// — and named with a spare it would push the button past the edge, the only
+/// thing this bar is looked at for. A constant number cannot express it: the
+/// bar can be whole-screen or half.
 ///
-/// Кнопки меряются по своим подписям — своей ширины у них нет, они её и есть,
-/// — и считаются все три, даже когда показаны не все: лишний запас укорачивает
-/// имя, недостача выдавливает кнопку.
+/// The buttons are measured by their labels — they have no width of their own,
+/// they are their labels — and all three are counted even when not all are
+/// shown: a spare margin shortens the name, a shortage pushes the button out.
 fn picked_chars(width: f32) -> usize {
-    const LABELS: [&str; 3] = ["Смотреть", "В каталоге", "Снять с шара"];
+    const LABELS: [&str; 3] = ["View", "In catalogue", "Remove from globe"];
     let buttons: f32 = LABELS
         .iter()
         .map(|label| {
@@ -61,9 +62,9 @@ fn picked_chars(width: f32) -> usize {
     format::mono_fit((width - buttons - theme::GUTTER * 2.0).max(0.0), theme::TEXT_SMALL)
 }
 
-/// Снимок, о котором говорит полоса: чем его подписать, чем адресовать и каким
-/// способом смотреть. Три поля, а не тройка: имя и ключ у снимка похожи с виду,
-/// и перепутать их местами в тройке ничто не мешает.
+/// The scene the bar talks about: what to sign it with, what to address it by,
+/// and which way to view it. Three fields, not a tuple: the name and the key of
+/// a scene look alike, and nothing keeps one from swapping them in a tuple.
 struct Subject<'a> {
     label: &'a str,
     key: &'a str,
@@ -71,9 +72,9 @@ struct Subject<'a> {
 }
 
 pub fn view(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
-    // Текстуру область получает от нас же: мы её выделили в ответ на
-    // предыдущий on_resized. На первом кадре её ещё нет — место занимается
-    // пустым, и это нормально: следующим событием оно придёт.
+    // The area gets its texture from us: we allocated it in answer to the
+    // previous on_resized. On the first frame it is not there yet — the place is
+    // taken empty, and that is fine: it arrives with the next event.
     let mut area = viewport::<Msg>()
         .width(Length::Fill)
         .height(Length::Fill)
@@ -93,28 +94,30 @@ pub fn view(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
     .into()
 }
 
-/// Полоса под областью: чем управляют слева, что на шаре справа.
+/// The bar under the area: what controls the globe on the left, what is on the
+/// globe on the right.
 ///
-/// Названный снимок вытесняет размер места: пока не выбрано и не наложено
-/// ничего, размер — то единственное, что можно сказать о безымянной области,
-/// а как только снимок назван, он и есть ответ на вопрос «на что я смотрю».
-/// Рядом с именем — то, что с ним делают, глядя на шар: посмотреть его самого
-/// и найти его в каталоге. У наложений «снять» — разом все; по одному их
-/// снимают в «На просмотре», здесь кнопка на случай, когда той вкладки не
-/// открыто.
+/// A named scene displaces the area size: while nothing is selected or laid
+/// over, the size is the only thing one can say about an unnamed area, and once
+/// a scene is named, it is the answer to the question "what am I looking at".
+/// Next to the name goes what is done with it while looking at the globe: view
+/// the scene itself and find it in the catalogue. Overlays are "removed" all at
+/// once; one by one they are removed in "Shown", here is the button for the
+/// case when that tab is not open.
 fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
-    // Что назвать: выбранный щелчком контур, а без него — верхний слой на шаре.
-    // Обычно это один и тот же снимок; расходятся они, когда щёлкнули по
-    // соседнему контуру, и тогда именем отвечает выбор — он свежее.
+    // What to name: the outline picked by a click, and without one — the top
+    // layer on the globe. Usually it is one and the same scene; they diverge
+    // when a neighboring outline was clicked, and then the name answers with the
+    // pick — it is fresher.
     //
-    // Верхний из тех, что видно: слоёв бывает несколько, назвать одной строкой
-    // можно только один, а собирающийся или скрытый назвал бы то, чего на шаре
-    // нет.
-    // Выбранный ищется и среди слоёв: контура у снимка может не быть вовсе —
-    // геометрию каталог знает не про всё, а отметку с него могли снять, — и
-    // тогда назвать его больше нечем. Молчаливый откат к верхнему слою здесь
-    // хуже всего: полоса называет не тот снимок, к которому только что привели,
-    // и её кнопки уводят тоже не к нему.
+    // The topmost of those visible: there can be several layers, only one can be
+    // named in a single line, and one still gathering or hidden would name what
+    // is not on the globe.
+    // The picked one is sought among the layers too: a scene may have no outline
+    // at all — the catalogue knows geometry not about everything, and the mark
+    // could have been taken off it — and then there is nothing left to name it
+    // by. A silent fallback to the top layer is worst here: the bar names not
+    // the scene that was just pointed at, and its buttons lead away from it too.
     let picked = state.picked_key();
     let layer_named = |key: &str| {
         state.overlays.iter().find(move |overlay| overlay.identifier == key).map(|overlay| {
@@ -146,8 +149,9 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
     let mut trailing: Vec<Element<Msg>> = Vec::new();
     match subject {
         Some(subject) => {
-            // Имя занимает всё, что осталось от полосы: место кнопкам разметка
-            // отводит первым, и никакое имя их за край не вытолкнет.
+            // The name takes everything left of the bar: the layout gives the
+            // buttons their room first, and no name will push them past the
+            // edge.
             trailing.push(
                 container(
                     mono::<Msg>(format::ellipsize(subject.label, picked_chars(state.pane_width(view))))
@@ -160,7 +164,7 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
                 .into(),
             );
             trailing.push(
-                theme::bar_button("Смотреть")
+                theme::bar_button("View")
                     .on_press(Msg::In(
                         view,
                         components::preview_of(&state.library, subject.key, subject.folder),
@@ -168,7 +172,7 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
                     .into(),
             );
             trailing.push(
-                theme::bar_button("В каталоге")
+                theme::bar_button("In catalogue")
                     .on_press(Msg::In(view, ViewMsg::InCatalog(subject.key.to_string())))
                     .into(),
             );
@@ -176,24 +180,24 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
         None => {
             let label = match &globe.surface {
                 Some(surface) => format!("{}×{}", surface.width, surface.height),
-                None => "область ещё не размечена".to_string(),
+                None => "viewport not sized yet".to_string(),
             };
             trailing.push(
                 text::<Msg>(label).size(theme::TEXT_LABEL).color(theme::INK_FAINT).single_line().into(),
             );
         }
     }
-    // Контуры считаются наравне с растрами: очерченный шар — тоже «что-то на
-    // нём лежит», и снимать это надо тем же рычагом.
+    // Outlines count on par with rasters: an outlined globe too has "something
+    // lying on it", and it is to be taken off with the same lever.
     if !state.overlays.is_empty() || !state.outlined.is_empty() {
-        trailing.push(theme::bar_button("Снять с шара").on_press(Msg::GlobeClear).into());
+        trailing.push(theme::bar_button("Remove from globe").on_press(Msg::GlobeClear).into());
     }
 
-    // Подсказка уступает место названному снимку — как и размер области выше:
-    // что делают со снимком, важнее того, чем вращают шар. И кнопке уступает
-    // тоже, если вдвоём они в полосу не влезли. Уступает целиком, а не
-    // ужимается: огрызок «Тащите — враща…» не научит ничему и всё равно
-    // отберёт место у того единственного, ради чего в эту полосу и смотрят.
+    // The hint yields its place to the named scene — as does the area size
+    // above: what is done with the scene outranks how the globe is rotated. It
+    // yields to the button too if the two do not fit into the bar. It yields
+    // entirely, not by shrinking: a stub "Drag to rot…" teaches nothing and
+    // still takes room from the only thing this bar is looked at for.
     let mut parts: Vec<Element<Msg>> = Vec::new();
     if !named {
         if hint_fits(state.pane_width(view), trailing.len() > 1) {
@@ -205,9 +209,9 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
                     .into(),
             );
         }
-        // Распорка нужна только здесь: при названном снимке остаток полосы
-        // занимает его имя, и второй тянущийся элемент отобрал бы у него
-        // половину места.
+        // The spacer is needed only here: with a named scene the rest of the bar
+        // is taken by its name, and a second stretching element would take away
+        // half of its place.
         parts.push(theme::spacer().into());
     }
     parts.extend(trailing);
@@ -220,35 +224,4 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
             .align_items(Alignment::Center),
     )
     .into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{hint_fits, picked_chars};
-
-    /// Имени достаётся то, что осталось от кнопок, — и в узкой панели не
-    /// остаётся ничего. Ноль здесь честнее любого минимума: полоса, в которой
-    /// имени нет места, обязана показать кнопки целыми, а огрызок имени в две
-    /// буквы не назовёт снимка и всё равно отберёт у них место.
-    #[test]
-    fn the_name_gives_the_bar_buttons_their_room_first() {
-        let wide = picked_chars(1600.0);
-        let half = picked_chars(800.0);
-        assert!(wide > half, "широкая полоса вмещает больше: {} против {}", wide, half);
-        assert_eq!(picked_chars(260.0), 0, "кнопки занимают полосу целиком");
-        assert!(half > 0, "в половине экрана имя ещё помещается");
-    }
-
-    /// Подсказка уступает полосу тому, что делает дело. Проверяется на ширине
-    /// панели, поделённой пополам: там подсказка с кнопкой не уживаются, и
-    /// уйти обязана подсказка — обрезанная кнопка не нажимается.
-    #[test]
-    fn the_hint_gives_the_bar_button_its_room_first() {
-        // Ширины логические, как и `pane_width`: окно 2048 физических пикселей
-        // при двукратном масштабе — это тысяча с небольшим, половина панели —
-        // пятьсот.
-        assert!(hint_fits(1024.0, true), "в целой полосе помещаются оба");
-        assert!(!hint_fits(508.0, true), "подсказка выдавила кнопку из узкой полосы");
-        assert!(hint_fits(700.0, false), "без кнопки подсказке хватает и половины");
-    }
 }

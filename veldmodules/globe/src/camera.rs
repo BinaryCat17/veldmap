@@ -1,116 +1,122 @@
-//! Камера над Землёй и матрицы, которые из неё выводятся.
+//! Camera over the Earth and the matrices derived from it.
 //!
-//! Камера — это рамка над поверхностью: орт `at` показывает, над какой точкой
-//! она висит, орт `up` — что на экране сверху, а высота говорит, насколько она
-//! отодвинута. Смотрит она в центр эллипсоида.
+//! The camera is a frame above the surface: the unit vector `at` shows the point
+//! it hangs over, the unit vector `up` — what is at the top of the screen, and
+//! the height says how far it is pulled back. It looks at the center of the
+//! ellipsoid.
 //!
-//! ## Почему рамка, а не пара углов
+//! ## Why a frame and not a pair of angles
 //!
-//! Из этого следует всё остальное в файле. Широта с долготой — координаты с
-//! полюсом: меридианы там сходятся, «на восток» перестаёт значить хоть
-//! что-нибудь, и жест в этих координатах приходится либо разгонять на
-//! 1/cos(широты), либо останавливать стеной, не доводя до макушки. У рамки
-//! полюса нет: жест — это поворот вокруг собственных осей камеры, дуга выходит
-//! ровно та, о которой просили, на любой широте, и через полюс камера
-//! переезжает, не заметив его. Широта с долготой выводятся из `at`, когда о них
-//! спрашивают, — и никогда наоборот.
+//! Everything else in the file follows from this. Latitude and longitude are
+//! coordinates with a pole: meridians converge there, "east" stops meaning
+//! anything, and a gesture in these coordinates has to be either scaled by
+//! 1/cos(latitude) or stopped by a wall short of the top. The frame has no
+//! pole: a gesture is a rotation about the camera's own axes, the arc comes out
+//! exactly the one asked for at any latitude, and the camera crosses the pole
+//! without noticing it. Latitude and longitude are derived from `at` when they
+//! are asked about — and never the other way around.
 //!
-//! Земля при этом неподвижна: у неё есть собственная система координат, и
-//! вращать надо было бы её вместе с ней — а тогда «что за точка под курсором»
-//! перестало бы быть вопросом к одной матрице.
+//! The Earth itself stays still: it has its own coordinate frame, and one would
+//! have to rotate it together with it — and then "what point is under the
+//! cursor" would stop being a question for a single matrix.
 //!
-//! ## Всё меряется тем, что видно
+//! ## Everything is measured by what is visible
 //!
-//! Высота сама по себе не значит ничего: и жест, и наводка на место говорят об
-//! угле — сколько дуги умещается в кадре. Эту величину считает
-//! [`Camera::visible_deg`], и она же, обращённая, отвечает на вопрос «с какой
-//! высоты видно вот столько» ([`height_for`]). Отсюда и главное свойство
-//! управления: протаскивание на всю высоту области поворачивает ровно на то,
-//! что в ней видно, — на любой высоте.
+//! Height by itself means nothing: both the gesture and the aim at a place speak
+//! of an angle — how much arc fits in the frame. [`Camera::visible_deg`] computes
+//! that quantity, and inverted it answers the question "from what height this
+//! much is visible" ([`height_for`]). Hence the main property of the controls:
+//! dragging across the full height of the area turns by exactly what is visible
+//! in it — at any height.
 //!
-//! ## Кватернион здесь ровно один и ровно там, где он сильнее рамки
+//! ## The quaternion here is exactly one, and only where it beats the frame
 //!
-//! Хранит камера рамку, а не кватернион: потребителям (матрица вида, луч под
-//! курсором) нужны три оси, и кватернион пришлось бы разворачивать в них каждый
-//! кадр. Но у перелёта задача другая — провести кадр между двумя ориентациями,
-//! — и вот на ней рамка проигрывает: интерполировать пару ортов покомпонентно
-//! значит вести их по хорде и выправлять Грам–Шмидтом, то есть идти не тем
-//! путём и притворяться, что тем. Поэтому [`Flight`] держит концы кватернионами
-//! и ведёт между ними slerp'ом — единственную операцию, ради которой они здесь
-//! и заведены.
+//! The camera stores a frame, not a quaternion: consumers (the view matrix, the
+//! ray under the cursor) need three axes, and a quaternion would have to be
+//! unfolded into them every frame. But a flight has a different task — to carry
+//! the frame between two orientations — and here the frame loses: interpolating
+//! a pair of unit vectors componentwise means walking them along a chord and
+//! fixing up with Gram–Schmidt, that is, taking a different path and pretending
+//! it is the requested one. Therefore [`Flight`] keeps its ends as quaternions
+//! and moves between them with slerp — the single operation for which they are
+//! introduced here at all.
 
 use glam::{DMat3, DMat4, DQuat, DVec3, Vec3, Vec4};
 
-/// Матрица 4×4 в раскладке WGSL: по столбцам. Наружу отдаётся отсюда, потому
-/// что раскладка uniform'а — договор этого файла с шейдером.
+/// A 4×4 matrix in the WGSL layout: by columns. It is exported from here
+/// because the uniform layout is this file's contract with the shader.
 pub use glam::Mat4;
 
 use crate::module::geodesy::{self, Geodetic};
 use crate::module::mesh;
 
-/// Вертикальный угол обзора. Им меряется не только проекция: жест и наводка
-/// считают через него, сколько дуги в кадре, — поэтому он один на всех.
+/// Vertical field of view. Not only the projection is measured by it: the
+/// gesture and the aim use it to compute how much arc fits in the frame — so
+/// there is a single one for everyone.
 const FOV_Y_DEG: f64 = 50.0;
 
-// Во сколько раз приближает один щелчок колеса — тот же шаг, что у канвы
-// просмотра, из одного файла (см. `wheel.rs`). Множится, правда, разное: у
-// канвы масштаб, у шара высота. У поверхности это одно и то же, а на отлёте
-// шар растёт медленнее — угол, под которым он виден, высоте не
-// пропорционален.
+// How much one wheel click zooms in — the same step as the preview canvas,
+// from a single file (see `wheel.rs`). What it multiplies differs: scale for
+// the canvas, height for the globe. At the surface these are the same, but at
+// a distance the globe grows more slowly — the angle at which it is seen is
+// not proportional to height.
 use super::wheel::ZOOM_PER_STEP;
 
-/// Высота над эллипсоидом: от вида, где снимок читается пиксель в пиксель, до
-/// вида, где Земля — шарик.
+/// Height above the ellipsoid: from the view where the image is read pixel for
+/// pixel to the view where the Earth is a small ball.
 ///
-/// Нижний край — не про безопасность, а про подробность, и выводится он из
-/// [`FOV_Y_DEG`]: с высоты `h` **над нарисованным** в кадре умещается по
-/// вертикали `0,93·h` метров поверхности, то есть при окне в тысячу строк —
-/// `h/1070` метров на пиксель.
+/// The lower bound is about detail, not safety, and it is derived from
+/// [`FOV_Y_DEG`]: from height `h` **above the drawn surface** `0.93·h` meters of
+/// surface fit vertically in the frame, that is, with a thousand-row window —
+/// `h/1070` meters per pixel.
 ///
-/// Нижний край отсчитывается от выноса, а не назначается сам по себе:
-/// спуститься к выносу вплотную значит пройти сквозь нарисованное. Десятикратный
-/// запас — выбор, а не выводимая величина: ничто не ломается и на пятикратном,
-/// просто вынос там занимает уже пятую часть высоты, и разглядывать поверхность
-/// с такой отметки не за чем.
+/// The lower bound is counted off the lift, not assigned by itself: descending
+/// right to the lift means passing through the drawn surface. The tenfold margin
+/// is a choice, not a derived quantity: nothing breaks at fivefold either, the
+/// lift just occupies a fifth of the height there, and there is nothing to
+/// examine from such a mark.
 ///
-/// Искажения вынос при этом не даёт: всё, что меряет камеру над видимым, меряет
-/// до него ([`Camera::visible_deg`]). Точность координат полу не указ — она идёт
-/// от расстояния до глаза, и у пола это десятки микрон (`geodesy::parts`).
+/// The lift introduces no distortion: everything the camera measures above the
+/// visible measures before it ([`Camera::visible_deg`]). Coordinate accuracy is
+/// not a limit here — it comes from the distance to the eye, and at the floor it
+/// is tens of microns (`geodesy::parts`).
 ///
-/// Восемьсот метров — это семьсот двадцать над нарисованным, то есть семь
-/// десятых метра на пиксель при окне в тысячу строк: подробнее любого снимка,
-/// какой сюда приезжает, и довольно, чтобы вести границу поля рукой.
+/// Eight hundred meters is seven hundred above the drawn surface, that is,
+/// seven tenths of a meter per pixel with a thousand-row window: finer than any
+/// image that arrives here, and enough to trace a field boundary by hand.
 const HEIGHT_RANGE_M: (f64, f64) = (mesh::SURFACE_LIFT_M * 10.0, 80_000_000.0);
 
-/// Во сколько раз больше земли может накрывать пиксель под курсором, чем
-/// накрыл бы в надире, прежде чем удержание начнёт слабеть.
+/// How many times more ground a pixel under the cursor may cover than it would
+/// cover at nadir, before the hold starts to weaken.
 ///
-/// Вдвое — выбор, а не выводимая величина, и выбран он по ширине полосы, на
-/// которой удержание слабеет: косинус у кромки падает круто, и вчетверо она
-/// сжимается до десятка пикселей курсора — то есть кромка дёргает вид
-/// по-прежнему, только на более коротком пути. Мерка эта — косой взгляд, а не
-/// удаление от середины кадра: держать перестают там, где поверхность уходит
-/// из-под луча, то есть на подступах к силуэту. А далеко ли до силуэта, зависит
-/// не от одной высоты: по вертикальному краю кадра он показывается лишь на
-/// отлёте, а в углу панели 16:9 — втрое ниже, и удержание слабеет там тоже.
-/// Это не оговорка, а то же правило: угол панели и смотрит на землю куда косее.
+/// Twice is a choice, not a derived quantity, and it is chosen by the width of
+/// the band where the hold weakens: the cosine falls steeply at the rim, and at
+/// fourfold it shrinks to a dozen cursor pixels — the rim still jerks the view,
+/// only over a shorter path. The measure is the grazing angle, not the distance
+/// from the center of the frame: holding stops where the surface leaves the ray,
+/// that is, on the approach to the silhouette. And how far the silhouette is
+/// depends not on height alone: at the vertical edge of the frame it shows only
+/// at a distance, while in the corner of a 16:9 panel — three times lower, and
+/// the hold weakens there as well. This is not a caveat but the same rule: the
+/// corner of the panel looks at the ground much more obliquely.
 const GRAZE_LIMIT: f64 = 2.0;
 
-/// Запас вокруг наведённого: контур, упирающийся в край кадра, читается как
-/// обрезанный.
+/// Margin around the aimed point: an outline touching the frame edge reads as
+/// cut off.
 const FRAME_MARGIN: f64 = 1.3;
 
-/// Сколько длится перелёт к наведённому, секунды.
+/// How long the flight to the aimed point lasts, seconds.
 ///
-/// Одно число на любое расстояние: перелёт объясняет, куда уехал вид, а не
-/// отмеряет путь. Растянутый пропорционально дуге, он длился бы полминуты при
-/// наводке с другого полушария — и это ждали бы, а не смотрели.
+/// One number for any distance: a flight explains where the view went, it does
+/// not measure out the path. Stretched in proportion to the arc, it would last
+/// half a minute for an aim from the other hemisphere — and that would be
+/// waited for, not watched.
 const FLIGHT_S: f64 = 0.6;
 
-/// Перелёт к наведённому: концы и пройденное время.
+/// A flight to the aimed point: the ends and the elapsed time.
 ///
-/// Концы, а не «цель и скорость»: у первой записи есть конец, у второй он
-/// только подразумевается, и камера подъезжала бы к нему бесконечно.
+/// Ends, not "goal and velocity": the first has an end, the second only implies
+/// one, and the camera would approach it forever.
 #[derive(Clone, Copy, PartialEq)]
 struct Flight {
     from: DQuat,
@@ -122,23 +128,24 @@ struct Flight {
 
 #[derive(Clone, Copy, PartialEq)]
 pub struct Camera {
-    /// Куда смотрит камера — единичная нормаль к эллипсоиду в подкамерной
-    /// точке. Широта с долготой выводятся из неё (см. `geodesy::angles`), а не
-    /// хранятся: у пары углов есть полюс, у направления его нет.
+    /// Where the camera looks — a unit normal to the ellipsoid at the point
+    /// under the camera. Latitude and longitude are derived from it (see
+    /// `geodesy::angles`), not stored: a pair of angles has a pole, a direction
+    /// does not.
     at: DVec3,
-    /// Что на экране сверху — орт, перпендикулярный `at`. Хранится, а не
-    /// выводится из оси мира: выведенный, он у полюса не определён, и жест
-    /// упирался бы в стену ровно там.
+    /// What is at the top of the screen — a unit vector orthogonal to `at`.
+    /// Stored, not derived from the world axis: derived, it is undefined at the
+    /// pole, and the gesture would hit a wall exactly there.
     up: DVec3,
-    /// Высота считается от поверхности эллипсоида, поэтому «100 км» означает
-    /// 100 км и над экватором, и над полюсом.
+    /// Height is measured from the ellipsoid surface, so "100 km" means 100 km
+    /// both at the equator and at the pole.
     height_m: f64,
-    /// Идущий перелёт. `None` — камера стои́т там, где её оставили.
+    /// The flight in progress. `None` — the camera stands where it was left.
     flight: Option<Flight>,
 }
 
 impl Default for Camera {
-    /// Начальный вид — Евразия целиком: то, ради чего приложение и открывают.
+    /// The initial view — all of Eurasia: what the application is opened for.
     fn default() -> Self {
         let at = geodesy::unit(45.0, 60.0);
         Self { at, up: frame_up(at, DVec3::Z), height_m: 14_000_000.0, flight: None }
@@ -146,42 +153,46 @@ impl Default for Camera {
 }
 
 impl Camera {
-    /// Протаскивание: Земля едет за курсором. Отсюда и знаки — камера
-    /// поворачивается навстречу жесту, а не вместе с ним.
+    /// Dragging: the Earth moves with the cursor. Hence the signs — the camera
+    /// turns to meet the gesture, not along with it.
     ///
-    /// Доля области переводится в градусы по тому, что в области видно: на
-    /// отлёте это полторы сотни градусов и больше, у самой поверхности — доли
-    /// градуса. Постоянный темп сгодился бы ровно для одной высоты, а на всех
-    /// остальных жест был бы либо вязким, либо срывающимся.
+    /// A share of the area is converted to degrees by what is visible in it: at
+    /// a distance it is a hundred and fifty degrees and more, right at the
+    /// surface — fractions of a degree. A constant rate would suit exactly one
+    /// height, and at all the others the gesture would be either sluggish or
+    /// slipping out of hand.
     ///
-    /// Разгона по широте здесь нет и быть не может: горизонтальный жест — это
-    /// поворот вокруг собственной вертикали кадра, а не приращение долготы, и
-    /// дуга у него одна и та же хоть на экваторе, хоть у макушки.
+    /// There is no latitude scaling here and there cannot be: a horizontal
+    /// gesture is a rotation about the frame's own vertical, not an increment of
+    /// longitude, and its arc is the same at the equator and near the top.
     ///
-    /// Через полюс камера переезжает и оказывается за ним севером книзу. Это не
-    /// сбой, а то же, что видно из окна самолёта: перевалили макушку — смотрят
-    /// назад. Доворачивать кадр жест не берётся, это провернуло бы мир на
-    /// пол-оборота на глазах; север возвращают тем же протаскиванием обратно
-    /// либо наводкой на снимок (см. [`Camera::focus`]).
+    /// The camera crosses the pole and ends up beyond it with north pointing
+    /// down. This is not a failure but the same as seen from an airplane window:
+    /// having crossed the top, one looks backward. The gesture does not take it
+    /// upon itself to finish turning the frame — that would spin the world half
+    /// a turn before one's eyes; north is brought back by the same dragging back
+    /// or by aiming at an image (see [`Camera::focus`]).
     ///
-    /// Жест и точно обратный ему друг друга снимают — и косой тоже, потому что
-    /// поворот здесь один. Разбитый на рыскание и тангаж, он снимался бы
-    /// обратным только в пределе мелкого шага: два поворота конечной величины
-    /// вокруг разных осей не складываются в тот, о котором просили, и на полном
-    /// отлёте набегает градус промаха и градус крена.
+    /// A gesture and its exact inverse cancel each other — and a diagonal one
+    /// too, because there is a single rotation here. Split into yaw and pitch,
+    /// it would be cancelled only in the limit of a small step: two rotations of
+    /// finite size about different axes do not compose into the one asked for,
+    /// and at full distance a degree of miss and a degree of roll accumulate.
     ///
-    /// Обвод же по кругу возвращает вид повёрнутым на площадь обойдённого — вот
-    /// это свойство сферы, и оно остаётся: никаким выбором оси его не снять.
+    /// Going around in a circle, however, returns the view turned by the area of
+    /// the traversed loop — that is a property of the sphere, and it stays: no
+    /// choice of axes removes it.
     pub fn orbit(&mut self, dx: f32, dy: f32) {
-        // Жест — это перехват управления: доводить прежнюю наводку, пока её
-        // уводят руками, значит тянуть камеру в две стороны разом.
+        // A gesture takes over the control: continuing the previous aim while it
+        // is moved by hand means pulling the camera in two directions at once.
         self.flight = None;
 
-        // Во всю высоту области видно вдвое больше, чем от центра до края.
+        // Across the full height of the area twice as much is visible as from
+        // the center to the edge.
         let span = 2.0 * self.visible_deg();
-        // Ось поворота складывается из осей кадра, а угол — её длина: у
-        // горизонтального жеста это вертикаль кадра, у вертикального —
-        // горизонталь, у косого — та, что между ними.
+        // The rotation axis is composed of the frame axes, and the angle is its
+        // length: for a horizontal gesture it is the frame's vertical, for a
+        // vertical one — the horizontal, for a diagonal — whatever lies between.
         let turn = (self.up * -f64::from(dx) + self.side() * -f64::from(dy)) * span;
         let angle_deg = turn.length();
         if angle_deg <= 0.0 {
@@ -194,64 +205,67 @@ impl Camera {
         self.settle();
     }
 
-    /// Приблизиться, оставив место под точкой кадра там же, где оно было.
+    /// Zoom in, keeping the ground under a frame spot where it was.
     ///
-    /// Удерживаемая точка задаётся смещением от середины кадра в долях
-    /// **высоты** области, обе оси; нули — приближение в середину. Долями
-    /// высоты, а не своей стороны у каждой оси, — по той же причине, что и у
-    /// [`Camera::orbit`]: угол обзора задан по вертикали, и пропорции области в
-    /// счёт не входят вовсе.
+    /// The held point is given as an offset from the center of the frame in
+    /// shares of the **height** of the area, both axes; zeros — zoom toward the
+    /// center. In shares of height, not of each axis's own side — for the same
+    /// reason as in [`Camera::orbit`]: the field of view is set vertically, and
+    /// the proportions of the area do not enter at all.
     ///
-    /// Приближение — это умножение высоты, а удержание — доворот рамки: место
-    /// под курсором отстоит от подкамерной точки на [`Camera::arc_at`], и с
-    /// новой высоты та же точка кадра смотрит уже не туда. Разницу двух дуг
-    /// поворот и отыгрывает.
+    /// Zooming is multiplying the height, and the hold is a final turn of the
+    /// frame: the point under the cursor stands off the point under the camera
+    /// by [`Camera::arc_at`], and from the new height the same frame spot looks
+    /// elsewhere already. The turn plays back the difference of the two arcs.
     ///
-    /// Считается это в два хода, и второй не роскошь. Дуга сферическая, а
-    /// поворачивают ею геодезическую нормаль; высота отмеряется по нормали, а
-    /// кадр смотрит в центр. Оба промаха вместе уводят кадр на пиксель за
-    /// щелчок — и множатся на спуске, потому что каждый следующий щелчок
-    /// увеличивает уже уехавшее. Поэтому место спрашивается ещё раз, уже
-    /// точное, и рамка доворачивается на то, чем оно разошлось с обещанным.
-    /// Второй ход снимает и тот боковой снос, что есть у приближения в
-    /// середину, где первого нет вовсе.
+    /// It is computed in two passes, and the second is not a luxury. The arc is
+    /// spherical, while what it turns is a geodetic normal; height is measured
+    /// along the normal, and the frame looks at the center. Both misses together
+    /// drift the frame by a pixel per click — and multiply on the way down,
+    /// because each next click enlarges what has already moved. Therefore the
+    /// place is asked again, precisely now, and the frame turns by the amount it
+    /// diverged from the promised one. The second pass also removes the sideways
+    /// drift that zooming toward the center has, where there is no first pass.
     pub fn zoom_at(&mut self, steps: f32, hold_x: f32, hold_y: f32) {
         if !(steps.is_finite() && hold_x.is_finite() && hold_y.is_finite()) {
             return;
         }
-        // Жест — это перехват управления: доводить прежнюю наводку, пока её
-        // уводят руками, значит тянуть камеру в две стороны разом.
+        // A gesture takes over the control: continuing the previous aim while it
+        // is moved by hand means pulling the camera in two directions at once.
         self.flight = None;
 
-        // Доли высоты считаются сверху вниз, а ось Y кадра смотрит вверх.
+        // Height shares are counted top-down, while the frame's Y axis points up.
         let (right, above) = frame_offset(f64::from(hold_x), -f64::from(hold_y));
 
         let height_m = (self.height_m * ZOOM_PER_STEP.powf(f64::from(steps)))
             .clamp(HEIGHT_RANGE_M.0, HEIGHT_RANGE_M.1);
-        // У самой кромки силуэта удержание слабеет — не ради арифметики, а
-        // потому, что удерживать там нечего: поверхность уходит из-под луча,
-        // один пиксель кадра накрывает километры (см. `geodesy::intersect_at`),
-        // и дрогни курсор на пиксель — под ним оказалось бы совсем другое
-        // место. Слабеет оно тем, что держится точка ближе к середине: она
-        // такое же место кадра, только опознаваемое. Иначе у кромки щелчок
-        // разворачивал бы шар на шестую часть кадра, а пикселем дальше — уже
-        // ни на сколько.
+        // Right at the silhouette rim the hold weakens — not for the sake of the
+        // arithmetic, but because there is nothing to hold there: the surface
+        // leaves the ray, a single frame pixel covers kilometers (see
+        // `geodesy::intersect_at`), and a jitter of the cursor by a pixel would
+        // put a completely different place under it. It weakens by keeping the
+        // point closer to the center: the same frame spot, only a recognizable
+        // one. Otherwise at the rim a click would spin the globe by a sixth of
+        // the frame, and a pixel further — by nothing at all.
         //
-        // Хватка спрашивается с обеих высот — нынешней и той, куда едут, — и
-        // берётся меньшая. Отдаляясь, камера уменьшает диск, и место, которое
-        // держалось, оказывается за силуэтом: держать его там уже нельзя, и
-        // знать об этом надо до поворота, а не после.
+        // The grip is asked at both heights — the current one and the one being
+        // traveled to — and the smaller is taken. Pulling back, the camera
+        // shrinks the disk, and the held place ends up beyond the silhouette: it
+        // can no longer be held there, and this must be known before the turn,
+        // not after.
         //
-        // Пара эта симметрична, и в этом всё дело: у щелчка назад те же две
-        // высоты, значит и хватка та же, значит он отменяет щелчок вперёд.
-        // Загляни она на щелчок вперёд по ходу — вышло бы по-разному в разные
-        // стороны, и пара перестала бы быть парой.
+        // The pair is symmetric, and that is the whole point: a click back has
+        // the same two heights, hence the same grip, hence it cancels the click
+        // forward. Were it to peek at the click forward along the way, the two
+        // directions would come out different, and the pair would stop being a
+        // pair.
         let alpha_seen = right.hypot(above).atan();
         let share = self.grip(alpha_seen).min(Self { height_m, ..*self }.grip(alpha_seen));
         let (right, above) = (right * share, above * share);
         let alpha = right.hypot(above).atan();
-        // Место берётся до смены высоты и берётся точное — тем же ходом, что у
-        // щелчка (см. [`Camera::probe`]): по эллипсоиду, с выносом, в f64.
+        // The place is taken before the height change and taken precisely — the
+        // same way as at a click (see [`Camera::probe`]): against the ellipsoid,
+        // with the lift, in f64.
         let held = geodesy::intersect_at(
             geodesy::world(self.geodetic()),
             self.look(right, above),
@@ -259,15 +273,15 @@ impl Camera {
         );
         let before = self.arc_at(alpha);
 
-        // Упор в кламп — это несостоявшееся приближение: высота та же, а с ней
-        // и место в кадре, так что дальше делать нечего.
+        // Hitting the clamp is a zoom that did not happen: the height is the
+        // same, and so is the place in the frame, so there is nothing to do.
         let moved = height_m != self.height_m;
         self.height_m = height_m;
 
-        // Земли под курсором не оказывается разве что за краем всего кадра:
-        // хватка подтягивает удерживаемую точку внутрь диска раньше, чем луч
-        // успевает промахнуться. Живая причина выйти здесь — несостоявшееся
-        // приближение, а промах ловится за компанию, чтобы не гадать.
+        // There is no ground under the cursor only beyond the very edge of the
+        // frame: the grip pulls the held point inside the disk before the ray
+        // can miss. The live reason to exit here is a zoom that did not happen;
+        // a miss is caught along the way, so as not to guess.
         let Some(held) = held.filter(|_| moved) else { return };
 
         if let (Some(before), Some(after)) = (before, self.arc_at(alpha)) {
@@ -275,46 +289,50 @@ impl Camera {
             self.swing(side * right + up * above, before - after);
         }
 
-        // Экранная невязка — в дугу, тем же отставанием, но уже с новой высоты.
-        // Не оказаться дуги под этим углом не может: хватка утянула точку
-        // внутрь диска раньше, и обе высоты она спросила до поворота. Ветка
-        // стои́т, чтобы не гадать, а не потому, что за ней что-то есть.
+        // The screen mismatch goes into the arc, with the same lag, but already
+        // from the new height. The arc under this angle cannot be missing: the
+        // grip pulled the point inside the disk earlier, and it asked both
+        // heights before the turn. The branch stands so as not to guess, not
+        // because something hides behind it.
         let Some(slope) = self.slope_at(alpha) else { return };
-        // Поперёк радиуса кадра усиление другое, и это не тонкость. Доворот
-        // идёт вокруг оси, лежащей в плоскости дуги, поэтому место обходит её
-        // по кругу и азимут меняется на `δ·ctg ψ`, а экранная невязка поперёк —
-        // это азимут, умноженный на угол. Отсюда `tg ψ / α`, а не `dψ/dα` и не
-        // само отношение дуги к углу: у середины кадра все трое сходятся, а
-        // дальше от неё расходятся на четверть и больше — и приложенное
-        // поперёк радиальное оставляет до пикселя невязки там, где верное
-        // оставляет десятитысячные.
+        // Across the frame radius the gain is different, and this is not a
+        // subtlety. The final turn goes about an axis lying in the plane of the
+        // arc, so the place walks around it in a circle and the azimuth changes
+        // by `δ·ctg ψ`, while the screen mismatch across is the azimuth times
+        // the angle. Hence `tg ψ / α`, not `dψ/dα` and not the bare ratio of arc
+        // to angle: at the center of the frame all three coincide, and away from
+        // it they diverge by a quarter and more — and applying the radial gain
+        // across leaves up to a pixel of mismatch where the correct one leaves
+        // ten-thousandths.
         let across_slope = match self.arc_at(alpha) {
             Some(arc) if alpha > 0.0 => arc.tan() / alpha,
-            // Держат ровно середину кадра: дуги нет, и все усиления там сошлись.
+            // The exact center of the frame is held: there is no arc, and all the
+            // gains coincide there.
             _ => slope,
         };
         let length = right.hypot(above);
-        // Проходов два, и число это замерено, а не выбрано: на худшем из
-        // перебираемых положений (`a_zoom_holds_whatever_it_took_hold_of`) один
-        // оставляет полторы сотых пикселя, два — полторы десятитысячных, три —
-        // две миллионных. Одного мало не само по себе, а на спуске: невязку
-        // каждого щелчка умножают все следующие, а щелчков от вида на всю Землю
-        // до пола сорок четыре.
+        // There are two passes, and this number is measured, not chosen: on the
+        // worst of the positions tried (`a_zoom_holds_whatever_it_took_hold_of`)
+        // one leaves a hundredth and a half of a pixel, two — ten-thousandth and
+        // a half, three — two millionths. One is not enough by itself, but on
+        // the way down: every following click multiplies the mismatch of the
+        // previous one, and there are forty-four clicks from the whole-Earth
+        // view to the floor.
         for _ in 0..2 {
-            // Где место оказалось на самом деле. Спрашивается оно тем же
-            // способом, каким рисуется кадр, — осями рамки, — и потому ловит
-            // любой промах разом, не разбирая, чей он.
+            // Where the place actually ended up. It is asked the same way the
+            // frame is drawn — by the frame axes — and therefore catches any
+            // miss at once, without sorting out whose it is.
             let Some((was_right, was_above)) = self.seen_at(held) else { return };
             let now = was_right.hypot(was_above);
-            // Куда уехало место: вдоль радиуса кадра и поперёк него. Порознь
-            // потому, что усиления у этих двух разные.
+            // Where the place moved: along the frame radius and across it.
+            // Separately, because the two have different gains.
             let (along, across) = match length > 0.0 && now > 0.0 {
                 true => (
                     now.atan() * (right * was_right + above * was_above) / (length * now) - alpha,
                     now.atan() * (right * was_above - above * was_right) / (length * now),
                 ),
-                // Держат середину кадра: радиуса нет, и всё, что есть, —
-                // радиальное, а усиления там всё равно сошлись.
+                // The center of the frame is held: there is no radius, and all
+                // that is left is radial, and the gains coincide there anyway.
                 false => (now.atan() - alpha, 0.0),
             };
 
@@ -324,9 +342,10 @@ impl Camera {
                     (side * right + up * above) / length,
                     (up * right - side * above) / length,
                 ),
-                // Держат середину кадра: радиуса нет, и направление задаёт
-                // сама невязка. Нет и её — доворачивать нечего, а нулевую ось
-                // погасит `swing`.
+                // The center of the frame is held: there is no radius, and the
+                // direction is set by the mismatch itself. If there is none
+                // either, there is nothing to turn, and `swing` zeroes out a
+                // zero axis.
                 false => match now > 0.0 {
                     true => ((side * was_right + up * was_above) / now, up),
                     false => (side, up),
@@ -337,14 +356,15 @@ impl Camera {
         }
     }
 
-    /// Довернуть рамку на `angle` радиан в сторону `toward` — вектора в мировых
-    /// осях, от которого в счёт идёт только поперечная взгляду часть.
+    /// Turn the frame by `angle` radians toward `toward` — a vector in world
+    /// axes, of which only the part across the view counts.
     ///
-    /// Ось поворота складывается из нормали под камерой и этого вектора, а у
-    /// точки ровно в середине кадра его нет вовсе. Это не край случая, а
-    /// обычное дело — курсор посреди области, — и молчать о нём нельзя:
-    /// `normalize` нулевого вектора даёт NaN, а рамку из NaN не чинит уже
-    /// ничего.
+    /// The rotation axis is composed of the normal under the camera and this
+    /// vector, and for a point exactly in the center of the frame there is no
+    /// such vector at all. This is not an edge case but an everyday one — the
+    /// cursor in the middle of the area — and it cannot be kept silent about:
+    /// `normalize` of a zero vector gives NaN, and nothing fixes a frame made of
+    /// NaN.
     fn swing(&mut self, toward: DVec3, angle: f64) {
         let axis = self.at.cross(toward);
         let length = axis.length();
@@ -357,27 +377,30 @@ impl Camera {
         self.settle();
     }
 
-    /// Навести камеру на место так, чтобы вокруг него было видно круг заданного
-    /// углового радиуса.
+    /// Aim the camera at a place so that a circle of the given angular radius
+    /// is visible around it.
     ///
-    /// Наводка ставит север кверху: к снимку приводят, чтобы его рассмотреть, а
-    /// накопленный жестом крен к нему отношения не имеет. У самого полюса
-    /// «север кверху» не определено — там за верх кадра берётся прежний, и это
-    /// ничему не противоречит: любой поворот кадра над макушкой равно хорош.
+    /// The aim puts north up: one is brought to an image to look it over, and
+    /// the roll accumulated by gestures has nothing to do with that. Right at
+    /// the pole "north up" is undefined — there the previous top is taken, and
+    /// this contradicts nothing: any turn of the frame above the top is equally
+    /// good.
     ///
-    /// Камера не прыгает, а едет: скачок через полшара не читается как
-    /// перемещение — вид просто становится другим, и куда делся прежний,
-    /// приходится соображать. Ведёт её [`Camera::advance`] по кадровому тику.
+    /// The camera does not jump, it travels: a leap across half the globe does
+    /// not read as movement — the view simply becomes a different one, and one
+    /// has to reason out where the previous one went. [`Camera::advance`] drives
+    /// it on the frame tick.
     pub fn focus(&mut self, lat_deg: f64, lon_deg: f64, radius_deg: f64) {
         let at = geodesy::unit(lat_deg, lon_deg);
         let up = frame_up(at, self.up);
         let height_m =
             height_for(radius_deg * FRAME_MARGIN).clamp(HEIGHT_RANGE_M.0, HEIGHT_RANGE_M.1);
 
-        // Та же цель, что уже ведём, — не повод начинать сначала: приходи
-        // наводка каждый кадр, перелёт каждый раз возвращался бы в начало и
-        // камера ползла бы, не приезжая никогда. Со стороны это выглядит не
-        // зависанием, а «почти едет», и потому дороже обычной поломки.
+        // The same goal as the one already in progress is no reason to start
+        // over: were the aim to arrive every frame, the flight would return to
+        // the start every time and the camera would crawl without ever arriving.
+        // From outside this looks not like a hang but like "almost moving", and
+        // so it costs more than an ordinary breakage.
         let to = orientation(at, up);
         if self.flight.is_some_and(|flight| flight.to == to && flight.to_height_m == height_m) {
             return;
@@ -392,33 +415,36 @@ impl Camera {
         });
     }
 
-    /// Продвинуть идущий перелёт на кадр. `false` — вести нечего.
+    /// Advance the flight in progress by a frame. `false` — there is nothing to
+    /// drive.
     ///
-    /// Ответ нужен не для перерисовки — кадр сравнивается с нарисованным
-    /// целиком, и подвинувшаяся камера видна там сама, — а для тайлов: уровень
-    /// и набор видимых ячеек наложений считают по камере, и пока она едет, их
-    /// приходится спрашивать заново (см. `module::on_ui_event`).
+    /// The answer is needed not for redrawing — the frame is compared against
+    /// the drawn one as a whole, and a moved camera is visible there by itself —
+    /// but for the tiles: the level and the set of visible overlay cells are
+    /// computed from the camera, and while it travels they have to be asked for
+    /// again (see `module::on_ui_event`).
     pub fn advance(&mut self, dt_s: f32) -> bool {
         let Some(mut flight) = self.flight else { return false };
 
         flight.passed_s += f64::from(dt_s).max(0.0);
         let part = (flight.passed_s / FLIGHT_S).clamp(0.0, 1.0);
-        // Трогается и встаёт плавно: на постоянной скорости оба конца перелёта
-        // выглядят рывком, и особенно конец — вид замирает мгновенно.
+        // It starts and stops smoothly: at a constant speed both ends of the
+        // flight look like a jerk, and especially the end — the view freezes
+        // instantly.
         let eased = part * part * (3.0 - 2.0 * part);
 
         let spin = flight.from.slerp(flight.to, eased);
         self.at = spin * DVec3::Z;
         self.up = spin * DVec3::Y;
-        // Высота ведётся долями, а не метрами: приближение — это умножение (см.
-        // [`Camera::zoom_at`]), и на равномерном ходе весь перелёт съедался бы
-        // первым же кадром, а последние километры ползли бы.
+        // The height is driven in shares, not in meters: zooming is multiplying
+        // (see [`Camera::zoom_at`]), and with a uniform step the whole flight
+        // would be eaten by the first frame while the last kilometers crawled.
         let times = flight.to_height_m / flight.from_height_m;
         self.height_m = flight.from_height_m * times.powf(eased);
 
         match part >= 1.0 {
-            // Конец — это ровно та камера, о которой просили, а не то, что
-            // осталось от округлений на последнем шаге.
+            // The end is exactly the camera that was asked for, not what is left
+            // over from rounding on the last step.
             true => {
                 self.at = flight.to * DVec3::Z;
                 self.up = flight.to * DVec3::Y;
@@ -430,147 +456,154 @@ impl Camera {
         true
     }
 
-    /// Где висит камера, в тех координатах, в которых приходит вся остальная
-    /// геометрия. Выводится, а не хранится (см. заголовок файла).
+    /// Where the camera hangs, in the same coordinates as all the rest of the
+    /// geometry. Derived, not stored (see the file header).
     fn geodetic(&self) -> Geodetic {
         let (lat_deg, lon_deg) = geodesy::angles(self.at);
         Geodetic { lat_deg, lon_deg, height_m: self.height_m }
     }
 
-    /// Ось экрана вправо — она же ось вертикального жеста.
+    /// The screen axis to the right — also the axis of the vertical gesture.
     fn side(&self) -> DVec3 {
         self.up.cross(self.at).normalize()
     }
 
-    /// Вернуть рамке ортонормальность: поворотами она теряет её по капле, а
-    /// матрица вида и луч под курсором выводятся из неё обе.
+    /// Restore orthonormality to the frame: rotations lose it drop by drop, and
+    /// both the view matrix and the ray under the cursor are derived from it.
     fn settle(&mut self) {
         self.at = self.at.normalize();
         let up = self.up.reject_from_normalized(self.at);
-        // Ноль означал бы, что «верх» сошёлся с направлением взгляда, — такого
-        // поворота нет ни у одного жеста, но молча вырожденной рамка остаться
-        // не должна: из неё выводится вся геометрия кадра.
+        // Zero would mean that "up" has met the view direction — no gesture
+        // makes such a rotation, but the frame must not silently stay
+        // degenerate: all the geometry of the frame is derived from it.
         if up.length_squared() > 1e-12 {
             self.up = up.normalize();
         }
     }
 
-    /// Угловой радиус видимого: сколько градусов дуги отделяют точку под
-    /// камерой от края кадра по вертикали. Частный случай [`Camera::arc_at`],
-    /// где вывод и записан.
+    /// The angular radius of the visible: how many degrees of arc separate the
+    /// point under the camera from the frame edge along the vertical. A special
+    /// case of [`Camera::arc_at`], where the derivation is written out.
     ///
-    /// Сжатием эллипсоида здесь пренебрегаем: на темпе жеста его треть процента
-    /// не видна, а честный счёт потребовал бы знать, в какую сторону ведёт
-    /// жест. Приближению под курсором этого мало — оно снимает промах
-    /// доворотом по месту (см. [`Camera::zoom_at`]).
+    /// The flattening of the ellipsoid is neglected here: at the pace of a
+    /// gesture its third of a percent is invisible, while an honest computation
+    /// would require knowing which way the gesture leads. Zooming under the
+    /// cursor needs more than that — it removes the miss by a final turn at the
+    /// place (see [`Camera::zoom_at`]).
     fn visible_deg(&self) -> f64 {
         match self.arc_at((FOV_Y_DEG * 0.5).to_radians()) {
             Some(arc) => arc.to_degrees(),
-            // Край кадра мимо Земли: тогда её видно до горизонта, и дальше него
-            // ничего нет.
+            // The frame edge misses the Earth: then it is visible out to the
+            // horizon, and there is nothing beyond it.
             None => (mesh::drawn_radius() / self.radius()).acos().to_degrees(),
         }
     }
 
-    /// Косинус угла, под которым луч встречает поверхность: во столько раз
-    /// больше земли накрывает пиксель кадра, чем накрыл бы в надире, — только
-    /// обратной величиной. У кромки силуэта косинус сходит к нулю, а накрытое
-    /// пикселем растёт без предела. `None` — луч идёт мимо Земли.
+    /// The cosine of the angle at which the ray meets the surface: by how many
+    /// times a frame pixel covers more ground than it would at nadir — only as
+    /// the inverse quantity. At the silhouette rim the cosine goes to zero,
+    /// while what the pixel covers grows without bound. `None` — the ray misses
+    /// the Earth.
     fn grazing(&self, alpha: f64) -> Option<f64> {
         let sine = self.radius() / mesh::drawn_radius() * alpha.sin();
         (sine < 1.0).then(|| (1.0 - sine * sine).sqrt())
     }
 
-    /// Насколько крепко держится место под этим углом от оси взгляда: единица —
-    /// целиком, ноль — не держится вовсе.
+    /// How firmly the place is held at this angle from the view axis: one —
+    /// fully, zero — not held at all.
     fn grip(&self, alpha: f64) -> f64 {
         self.grazing(alpha).map_or(0.0, |cosine| (cosine * GRAZE_LIMIT).min(1.0))
     }
 
-    /// Сколько дуги стои́т градус угла: подкамерная точка, пройдя дугу, сдвигает
-    /// место в кадре во столько раз меньше.
+    /// How much arc a degree of angle costs: the point under the camera, having
+    /// covered the arc, shifts the place in the frame that many times less.
     ///
-    /// В середине кадра градус угла стои́т `r − 1` дуги, а у кромки силуэта, где
-    /// поверхность уходит из-под луча, — сколько угодно. `None` — луч идёт мимо
-    /// Земли.
+    /// In the middle of the frame a degree of angle costs `r − 1` of arc, while
+    /// at the silhouette rim, where the surface leaves the ray — as much as you
+    /// like. `None` — the ray misses the Earth.
     fn slope_at(&self, alpha: f64) -> Option<f64> {
         let radius = self.radius() / mesh::drawn_radius();
         Some(radius * alpha.cos() / self.grazing(alpha)? - 1.0)
     }
 
-    /// Дуга от точки под камерой до места, которое видно под углом `alpha` к
-    /// оси взгляда, — в радианах. `None` — луч идёт мимо Земли.
+    /// The arc from the point under the camera to the place seen at angle
+    /// `alpha` to the view axis — in radians. `None` — the ray misses the Earth.
     ///
-    /// Луч под этим углом встречает поверхность там, где сходятся три отрезка —
-    /// от центра до камеры, от центра до точки и сам луч; по теореме синусов
-    /// угол при точке равен `asin(r · sin α)`, а искомая дуга — то, что осталось
-    /// от развёрнутого угла. Главная ветвь асинуса законна потому, что у
-    /// ближнего корня — того, что видно, — угол при камере вместе с искомой
-    /// дугой острый.
+    /// A ray at this angle meets the surface where three segments converge —
+    /// from the center to the camera, from the center to the point, and the ray
+    /// itself; by the law of sines the angle at the point equals
+    /// `asin(r · sin α)`, and the wanted arc is what remains of the unfolded
+    /// angle. The principal branch of asin is valid because at the near root —
+    /// the one that is seen — the angle at the camera together with the wanted
+    /// arc is acute.
     ///
-    /// Угол здесь произвольный, и потому спрашивают отсюда двое: край кадра
-    /// ([`Camera::visible_deg`]) и удерживаемая точка ([`Camera::zoom_at`]).
+    /// The angle here is arbitrary, and so two parties ask this: the frame edge
+    /// ([`Camera::visible_deg`]) and the held point ([`Camera::zoom_at`]).
     fn arc_at(&self, alpha: f64) -> Option<f64> {
-        // До нарисованной поверхности, а не до эллипсоида: видно вынос, а не
-        // его. Насколько это важно и с какой высоты — сказано у самой мерки
-        // (`mesh::drawn_radius`), и сказано там один раз.
+        // To the drawn surface, not to the ellipsoid: what is seen is the lift,
+        // not it. How much this matters and from what height is told at the
+        // measure itself (`mesh::drawn_radius`), and told there once.
         let sine = self.radius() / mesh::drawn_radius() * alpha.sin();
         (sine < 1.0).then(|| sine.asin() - alpha)
     }
 
-    /// Насколько камера удалена от центра, в экваториальных радиусах, — мера, в
-    /// которой считается вся геометрия вида.
+    /// How far the camera is from the center, in equatorial radii — the measure
+    /// in which all the view geometry is computed.
     fn radius(&self) -> f64 {
         1.0 + self.height_m / geodesy::SEMI_MAJOR_M
     }
 
-    /// Где стои́т глаз — одним числом, грубо. Этого довольно отбору видимого: он
-    /// решает, попадает ли ячейка в кадр, и восемь десятых метра такого решения
-    /// не меняют. Тому, что рисуется, нужны обе половины ([`Camera::eye_parts`]).
+    /// Where the eye stands — as one number, roughly. This is enough for
+    /// visibility selection: it decides whether a cell falls in the frame, and
+    /// eight tenths of a meter do not change such a decision. What is drawn
+    /// needs both halves ([`Camera::eye_parts`]).
     pub fn eye(&self) -> geodesy::World {
         self.eye_parts().0
     }
 
-    /// Где стои́т глаз — половинами, как и всё, что рисуется. Вычитается он из
-    /// вершины уже в шейдере, и одной половиной эта разность потеряла бы всю
-    /// подробность (см. [`geodesy::parts`]).
+    /// Where the eye stands — in halves, like everything that is drawn. It is
+    /// subtracted from the vertex already in the shader, and with a single half
+    /// this difference would lose all the detail (see [`geodesy::parts`]).
     pub fn eye_parts(&self) -> (geodesy::World, geodesy::World) {
         geodesy::parts(geodesy::world(self.geodetic()))
     }
 
-    /// Метров поверхности на пиксель кадра по вертикали — мера выбора уровня
-    /// тайлов наложений. Считается в центре вида: к краям кадра метраж
-    /// растёт, но уровень — величина логарифмическая, и на ступень это
-    /// набегает только у самого горизонта.
+    /// Meters of surface per frame pixel along the vertical — the measure for
+    /// choosing the level of the overlay tiles. It is computed at the center of
+    /// the view: toward the frame edges the footage grows, but the level is a
+    /// logarithmic quantity, and it accumulates a whole step only right at the
+    /// horizon.
     pub fn metres_per_pixel(&self, height_px: u32) -> f64 {
         let arc = 2.0 * self.visible_deg().to_radians() * geodesy::SEMI_MAJOR_M;
         arc / f64::from(height_px.max(1))
     }
 
-    /// Куда смотрит точка кадра, долями области: (0, 0) — левый верхний угол.
-    /// Отдаёт луч — начало и направление; во что он упирается, знает `geodesy`.
+    /// Where the frame spot looks, in shares of the area: (0, 0) — the left
+    /// top corner. Returns the ray — origin and direction; what it runs into is
+    /// `geodesy`'s business.
     ///
-    /// Обратное к проекции, но не обращением матрицы: базис камеры известен и
-    /// без неё, а обратная матрица 4×4 — это ещё полсотни строк, которые
-    /// сойдутся с прямой только на глаз.
+    /// The inverse of the projection, but without inverting the matrix: the
+    /// camera basis is known without it, and a 4×4 inverse is another fifty
+    /// lines that would agree with the direct one only by eye.
     pub fn ray(&self, x: f32, y: f32, aspect: f32) -> (DVec3, DVec3) {
-        // Доли области считаются от угла и каждая по своей стороне; кадру же
-        // нужно смещение от середины, и обе оси в долях высоты. Горизонталь
-        // растягивается пропорциями области, а ось Y кадра смотрит вверх.
+        // Area shares are counted from the corner, each on its own side; the
+        // frame needs an offset from the center, both axes in shares of height.
+        // The horizontal is stretched by the proportions of the area, and the
+        // frame's Y axis points up.
         let (right, above) =
             frame_offset((f64::from(x) - 0.5) * f64::from(aspect), 0.5 - f64::from(y));
         (geodesy::world(self.geodetic()), self.look(right, above))
     }
 
-    /// Куда смотрит точка кадра, отстоящая от середины на заданные тангенсы
-    /// осей кадра.
+    /// Where the frame spot standing off the center by the given tangents of the
+    /// frame axes looks.
     fn look(&self, right: f64, above: f64) -> DVec3 {
         let (side, up, forward) = self.basis();
         (forward + side * right + up * above).normalize()
     }
 
-    /// Где в кадре видно точку — теми же тангенсами, обратное к [`Camera::look`].
-    /// `None` — точка за спиной, и точки кадра у неё нет.
+    /// Where the point is seen in the frame — the same tangents, the inverse of
+    /// [`Camera::look`]. `None` — the point is behind, and it has no frame spot.
     fn seen_at(&self, point: DVec3) -> Option<(f64, f64)> {
         let (side, up, forward) = self.basis();
         let direction = point - geodesy::world(self.geodetic());
@@ -578,53 +611,58 @@ impl Camera {
         (ahead > 0.0).then(|| (direction.dot(side) / ahead, direction.dot(up) / ahead))
     }
 
-    /// Место, которое видно в точке кадра, — обратное к [`project`] для всего,
-    /// что нарисовано на выносе.
+    /// The place seen at a frame spot — the inverse of [`project`] for
+    /// everything drawn on the lift.
     ///
-    /// Луч встречает не саму поверхность, а поднятую на `mesh::SURFACE_LIFT_M`:
-    /// под курсором видно нарисованное, а нарисовано оно там. Пересеки он
-    /// эллипсоид, и ответ назвал бы место, отстоящее от увиденного: в углу
-    /// кадра это шесть десятков метров на обычном приближении и сотни там, где
-    /// на поверхность смотрят вскользь. Чем косее луч, тем дальше уводит лишняя
-    /// высота, — а у самой кромки силуэта ответ ненадёжен и без того
-    /// (см. `geodesy::intersect_at`).
+    /// The ray meets not the surface itself but the one raised by
+    /// `mesh::SURFACE_LIFT_M`: what is seen under the cursor is the drawn thing,
+    /// and it is drawn there. Were the ray to cross the ellipsoid, the answer
+    /// would name a place standing off the seen one: in the corner of the frame
+    /// it is sixty meters at an ordinary zoom and hundreds where the surface is
+    /// glanced along. The more grazing the ray, the further the extra height
+    /// leads away — and right at the silhouette rim the answer is unreliable as
+    /// it is (see `geodesy::intersect_at`).
     ///
-    /// `None` — мимо Земли; это такой же ответ, как точка.
+    /// `None` — past the Earth; that is the same kind of answer as a point.
     pub fn probe(&self, x: f32, y: f32, aspect: f32) -> Option<(f64, f64)> {
         let (eye, direction) = self.ray(x, y, aspect);
         geodesy::intersect_at(eye, direction, mesh::SURFACE_LIFT_M).map(geodesy::surface_at)
     }
 
-    /// Плоскости отсечения выводятся из высоты, а не заданы числами: на близком
-    /// подлёте фиксированная ближняя плоскость съедает почти всю точность
-    /// глубины, а на отлёте дальняя обрезала бы Землю.
-    /// Матрица здесь **без переноса**: глаз стои́т в начале координат, а
-    /// вычитают его из вершины в шейдере. Иначе перенос — число порядка
-    /// единицы — сам уезжал бы на видеокарту в `f32`, и вершина, сколь угодно
-    /// точная, теряла бы восемь десятых метра в умножении на него.
+    /// The clipping planes are derived from the height, not given as numbers:
+    /// on a close approach a fixed near plane eats almost all the depth
+    /// precision, while at a distance the far plane would cut the Earth off.
+    /// The matrix here is **without translation**: the eye stands at the origin,
+    /// and the shader subtracts it from the vertex. Otherwise the translation —
+    /// a number of order one — would travel to the GPU in `f32` by itself, and
+    /// any vertex, however precise, would lose eight tenths of a meter in the
+    /// multiplication by it.
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
-        // Половина расстояния до нарисованного, а не до эллипсоида, — той же
-        // меркой, что и всё прочее здесь (`mesh::drawn_radius`). Срезать при
-        // нынешнем поле не срезало бы и второе: надир лежит на `H − вынос`, а
-        // `H/2` перегоняет его только ниже двух выносов, то есть вчетверо ниже
-        // пола. Разными мерками эти двое разъехались бы молча.
+        // Half the distance to the drawn thing, not to the ellipsoid — the same
+        // measure as everything else here (`mesh::drawn_radius`). At the current
+        // field it would not cut even the second one: the nadir lies at
+        // `H − lift`, and `H/2` overtakes it only below two lifts, that is,
+        // four times under the floor. With different measures the two would
+        // silently diverge.
         let near = geodesy::metres(self.height_m - mesh::SURFACE_LIFT_M) * 0.5;
-        // Дальний край эллипсоида не дальше, чем |eye| + большая полуось.
+        // The far edge of the ellipsoid is no further than |eye| + semi-major
+        // axis.
         let far = self.radius() as f32 + 1.05;
-        // Перспектива с диапазоном глубины 0..1 — тем, который ждёт wgpu (в
-        // отличие от -1..1 у OpenGL); у glam это `_rh`, а не `_rh_gl`.
+        // Perspective with the depth range 0..1 — the one wgpu expects (unlike
+        // -1..1 of OpenGL); in glam it is `_rh`, not `_rh_gl`.
         Mat4::perspective_rh((FOV_Y_DEG as f32).to_radians(), aspect, near, far)
             * turn_to(self.basis())
     }
 
-    /// Оси кадра: вправо, вверх и вперёд. Одни на всех, кому нужна ориентация
-    /// камеры, — матрицу вида и луч под курсором иначе пришлось бы выводить
-    /// порознь, а сойтись им обязательно.
+    /// The frame axes: right, up and forward. One for everyone who needs the
+    /// camera orientation — otherwise the view matrix and the ray under the
+    /// cursor would have to be derived separately, and they must agree.
     ///
-    /// Взгляд идёт в центр эллипсоида, а не по нормали, поэтому «вверх» кадра
-    /// не совпадает с хранимым `up` в точности: их разводит наклон нормали к
-    /// радиусу-вектору, те самые 0.19° сжатия. Расходиться им негде — оба
-    /// выводятся здесь.
+    /// The view goes to the center of the ellipsoid, not along the normal, so
+    /// the "up" of the frame does not coincide with the stored `up` exactly:
+    /// they are parted by the tilt of the normal to the radius vector — the very
+    /// 0.19° of flattening. They have nowhere to diverge — both are derived
+    /// here.
     fn basis(&self) -> (DVec3, DVec3, DVec3) {
         let forward = -geodesy::world(self.geodetic()).normalize();
         let side = forward.cross(self.up).normalize();
@@ -632,102 +670,110 @@ impl Camera {
     }
 }
 
-/// Смещение точки кадра от середины — в тангенсы осей кадра.
+/// The offset of a frame spot from the center — into tangents of the frame
+/// axes.
 ///
-/// Одно место на всех, кому нужна геометрия кадра: кадр отстоит от камеры на
-/// единицу вдоль взгляда, поэтому полкадра по вертикали — это тангенс половины
-/// угла обзора. Луч под курсором приводит сюда доли области, приближение — доли
-/// высоты; посчитанные порознь, эти двое разошлись бы молча, а увидеть
-/// расхождение можно было бы только по картинке.
+/// One place for everyone who needs the frame geometry: the frame stands off
+/// the camera by one along the view, so half a frame vertically is the tangent
+/// of half the field of view. The ray under the cursor brings area shares here,
+/// zooming — height shares; computed separately, the two would silently
+/// diverge, and the divergence could be seen only in the picture.
 fn frame_offset(right_share: f64, above_share: f64) -> (f64, f64) {
     let half = (FOV_Y_DEG * 0.5).to_radians().tan();
     (2.0 * right_share * half, 2.0 * above_share * half)
 }
 
-/// «Север кверху» для этой подкамерной точки: составляющая оси мира,
-/// перпендикулярная взгляду. `None` — камера над самым полюсом, и такого
-/// направления там нет: все меридианы сходятся, и любой поворот кадра равно
-/// хорош.
+/// "North up" for this point under the camera: the component of the world axis
+/// orthogonal to the view. `None` — the camera is right over the pole, and no
+/// such direction exists there: all meridians converge, and any turn of the
+/// frame is equally good.
 fn north_up(at: DVec3) -> Option<DVec3> {
     let up = DVec3::Z.reject_from_normalized(at);
     (up.length_squared() > 1e-12).then(|| up.normalize())
 }
 
-/// Верх кадра для этого направления взгляда: север, а над самой макушкой —
-/// то, что осталось от прежнего верха.
+/// The top of the frame for this view direction: north, and right over the very
+/// top — what is left of the previous top.
 ///
-/// Пара обязана выйти ортонормальной, и это не придирка: из неё выводится
-/// поворот кадра ([`orientation`]), а у косой пары поворота нет — матрица из
-/// неё не ортогональна, и кватернион по ней получается неизвестно какой.
+/// The pair must come out orthonormal, and this is not a quirk: the frame turn
+/// ([`orientation`]) is derived from it, and a skewed pair has no turn — the
+/// matrix from it is not orthogonal, and the quaternion from it comes out
+/// unknown which.
 fn frame_up(at: DVec3, previous: DVec3) -> DVec3 {
     north_up(at).unwrap_or_else(|| {
         let up = previous.reject_from_normalized(at);
         match up.length_squared() > 1e-12 {
             true => up.normalize(),
-            // Прежний верх смотрел туда же, куда взгляд: над полюсом любой
-            // поворот кадра равно хорош, и годится первый попавшийся.
+            // The previous top looked the same way as the view: over the pole
+            // any turn of the frame is equally good, and the first one at hand
+            // will do.
             false => at.any_orthonormal_vector(),
         }
     })
 }
 
-/// Ориентация кадра кватернионом — тем же, из которого её потом достают.
+/// The orientation of the frame as a quaternion — the same one it is later
+/// taken out of.
 ///
-/// Столбцы матрицы это оси кадра: вправо, вверх и на камеру. Рамка
-/// ортонормальна (см. [`Camera::settle`]), поэтому матрица — поворот, а у
-/// поворота кватернион однозначен с точностью до знака, и знак slerp'у
-/// безразличен: он сам выбирает короткую дугу.
+/// The columns of the matrix are the frame axes: right, up and toward the
+/// camera. The frame is orthonormal (see [`Camera::settle`]), so the matrix is
+/// a rotation, and a rotation has a quaternion unique up to sign, and slerp
+/// does not care about the sign: it picks the short arc itself.
 fn orientation(at: DVec3, up: DVec3) -> DQuat {
     DQuat::from_mat3(&DMat3::from_cols(up.cross(at), up, at))
 }
 
-/// Точка мира в пространство отсечения. Здесь, а не у того, кто спрашивает:
-/// раскладка матрицы — дело этого файла, и второе такое умножение однажды
-/// разошлось бы с ним по столбцам.
+/// A world point into clip space. Here, not at the one asking: the matrix
+/// layout is this file's business, and a second such multiplication would once
+/// diverge from it in the columns.
 ///
-/// Глаз вычитается здесь, а не сидит в матрице: матрица вида его переноса не
-/// несёт (см. [`Camera::view_projection`]). Половин тут не надо — отбор видимого
-/// решает попадание в кадр, а восемь десятых метра на расстоянии до пола дают
-/// чуть больше пикселя из тысячи.
+/// The eye is subtracted here, not kept in the matrix: the view matrix carries
+/// no translation (see [`Camera::view_projection`]). Halves are not needed here
+/// — visibility selection decides frame hits, and eight tenths of a meter at
+/// the distance to the floor give a bit more than a pixel in a thousand.
 ///
-/// Отдаёт четвёрку как есть, не деля на w. Делить можно только при `w > 0`, и
-/// здесь оно так всегда: матрица — чистый поворот, взгляд идёт в центр
-/// эллипсоида, отчего `w = |глаз| − ê·точка ≥ (H − вынос)/a`, то есть у самого
-/// пола ещё тысяча квантов `f32`. Спрашивающий всё же смотрит на знак сам —
-/// связь этих величин нигде не объявлена (см. `overlay::on_screen`).
+/// Returns the four-vector as is, without dividing by w. Division is only legal
+/// at `w > 0`, and it is always so here: the matrix is a pure rotation, the
+/// view goes to the center of the ellipsoid, whence
+/// `w = |eye| − ê·point ≥ (H − lift)/a`, that is, at the very floor there are
+/// still a thousand quanta of `f32`. The caller still checks the sign itself —
+/// the relation of these quantities is declared nowhere (see
+/// `overlay::on_screen`).
 pub fn project(view_proj: &Mat4, point: geodesy::World, eye: geodesy::World) -> Vec4 {
     *view_proj * (Vec3::from(point) - Vec3::from(eye)).extend(1.0)
 }
 
-/// Высота, с которой видно круг такого углового радиуса, — обратное к
-/// [`Camera::visible_deg`].
+/// The height from which a circle of this angular radius is visible — the
+/// inverse of [`Camera::visible_deg`].
 ///
-/// Мерой берётся вертикаль: угол обзора задан по ней, а место под шар шире, чем
-/// выше, поэтому поместившееся по вертикали помещается и поперёк.
+/// The vertical is taken as the measure: the field of view is set by it, while
+/// the ground under the globe is wider than it is tall, so what fits vertically
+/// fits across as well.
 fn height_for(radius_deg: f64) -> f64 {
     let half = (FOV_Y_DEG * 0.5).to_radians();
-    // Больше, чем полкадра до горизонта, не просят: за этой отметкой луч края
-    // кадра мимо Земли уже не приходит, и отойти ещё дальше значит не увидеть
-    // больше, а получить тот же шар мельче — при `radius_deg` в 90° Земля
-    // занимала восьмую часть кадра, потому что высота уходила в свой потолок.
-    // На самой отметке лимб Земли ровно по краю кадра, и видно всё, что вообще
-    // видно с одной стороны.
+    // No more than half a frame to the horizon is ever asked for: past this
+    // mark the frame edge ray no longer comes to the Earth at all, and stepping
+    // back further means seeing no more, only getting the same globe smaller —
+    // at `radius_deg` of 90° the Earth would fill an eighth of the frame,
+    // because the height ran into its ceiling. Right at the mark the limb of the
+    // Earth sits exactly at the frame edge, and everything visible at all from
+    // one side is visible.
     let arc = radius_deg.clamp(0.0, (std::f64::consts::FRAC_PI_2 - half).to_degrees())
         .to_radians();
     let radius = mesh::drawn_radius() * (arc + half).sin() / half.sin();
     (radius - 1.0) * geodesy::SEMI_MAJOR_M
 }
 
-/// Поворот кадра по готовым осям — без переноса: мир приезжает в шейдер уже
-/// отсчитанным от глаза, и переносить его некуда (см.
-/// [`Camera::view_projection`]).
+/// The frame turn from ready axes — without translation: the world arrives at
+/// the shader already counted off the eye, and there is nowhere to translate it
+/// (see [`Camera::view_projection`]).
 ///
-/// Оси ложатся строками, а не столбцами: матрица вида переводит мир в систему
-/// камеры, то есть обращает её ориентацию, а обратное к повороту — это его
-/// транспонирование.
+/// The axes go into the rows, not the columns: the view matrix takes the world
+/// into the camera frame, that is, inverts its orientation, and the inverse of
+/// a rotation is its transpose.
 ///
-/// В `f32` переводится здесь и только здесь: дальше матрица уезжает в шейдер,
-/// где другой точности и нет.
+/// The conversion to `f32` happens here and only here: further on the matrix
+/// travels to the shader, where there is no other precision.
 fn turn_to((side, up, forward): (DVec3, DVec3, DVec3)) -> Mat4 {
     let rotation = DMat3::from_cols(side, up, -forward).transpose();
     DMat4::from_cols(
@@ -737,781 +783,4 @@ fn turn_to((side, up, forward): (DVec3, DVec3, DVec3)) -> Mat4 {
         DVec3::ZERO.extend(1.0),
     )
     .as_mat4()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Камера, поставленная где сказано и на какой сказано высоте.
-    fn at(lat_deg: f64, lon_deg: f64, height_m: f64) -> Camera {
-        let at = geodesy::unit(lat_deg, lon_deg);
-        Camera { at, up: frame_up(at, DVec3::Z), height_m, flight: None }
-    }
-
-    /// Соотношение сторон доезжает до матрицы как есть, без «безопасного»
-    /// знаменателя.
-    ///
-    /// Проверяется отдельно от круговой пары ниже, потому что через неё это
-    /// не поймать: у очень узкого кадра доля кадра стои́т сотых долей метра
-    /// земли, и на такой мерке круговой ход упирается не в матрицу, а в
-    /// собственную погрешность обратного хода к широте.
-    ///
-    /// А поймать надо: подправь соотношение одна половина пары, и щелчок
-    /// начнёт называть не то место, что нарисовано, — ровно там, где панель
-    /// узка́, то есть там, где на это никто не смотрит.
-    #[test]
-    fn the_frame_shape_reaches_the_matrix_unchanged() {
-        let camera = at(45.0, 60.0, 10_000.0);
-        let narrow = camera.view_projection(1.0 / 200.0);
-
-        // Точка, отстоящая от середины по горизонтали: только на ней и видно,
-        // тем ли соотношением сжат кадр.
-        let point = geodesy::position(Geodetic::surface(45.0, 60.1));
-        let clip = project(&narrow, point, camera.eye());
-        let wide = project(&camera.view_projection(16.0 / 9.0), point, camera.eye());
-
-        let ratio = f64::from(clip.x / clip.w) / f64::from(wide.x / wide.w);
-        let expected = (16.0 / 9.0) / (1.0 / 200.0);
-        assert!(
-            (ratio - expected).abs() / expected < 1e-5,
-            "узкий кадр сжал по горизонтали в {:.1} раза вместо {:.1}",
-            ratio, expected
-        );
-    }
-
-    /// Ответ на «куда я ткнул» и то, что в этой точке нарисовано, — одно место.
-    ///
-    /// Луч из точки кадра встречает вынос, а поднятая на вынос точка
-    /// проецируется обратно в ту же точку кадра. Сойдись они не там, и щелчок
-    /// по снимку называл бы соседнее место — тем дальше от увиденного, чем
-    /// ближе к краю кадра. Пара обязана сходиться и на подлёте, и на отлёте:
-    /// расхождение на земле от высоты камеры не зависит вовсе, а в долях кадра
-    /// растёт по мере снижения.
-    #[test]
-    fn a_probe_names_the_place_that_is_drawn_there() {
-        // Спрашивают про углы кадра: в середине расхождения нет ни у кого, оно
-        // растёт по мере удаления от неё. Выше четырёх тысяч километров такой
-        // луч уходит мимо Земли — диагональ кадра шире вертикали, по которой
-        // задан угол обзора, — и спрашивать там нечего.
-        for height_m in [HEIGHT_RANGE_M.0, 10_000.0, 155_000.0, 1_000_000.0] {
-            let camera = at(45.0, 60.0, height_m);
-            let aspect = 16.0 / 9.0;
-            let view_proj = camera.view_projection(aspect);
-            for (x, y) in [(0.9f32, 0.1f32), (0.1, 0.9), (0.85, 0.85), (0.15, 0.2)] {
-                let (lat_deg, lon_deg) = camera.probe(x, y, aspect).expect("луч мимо Земли");
-                let drawn = geodesy::position(Geodetic {
-                    lat_deg,
-                    lon_deg,
-                    height_m: mesh::SURFACE_LIFT_M,
-                });
-                let clip = project(&view_proj, drawn, camera.eye());
-                let back = (
-                    (clip.x / clip.w + 1.0) * 0.5,
-                    (1.0 - clip.y / clip.w) * 0.5,
-                );
-                let residual = f64::from((back.0 - x).hypot(back.1 - y));
-                // Промах, который дал бы луч, пересекающий сам эллипсоид: точка
-                // кадра отходит от середины во столько раз, во сколько высота
-                // камеры больше её же за вычетом выноса.
-                let offset = f64::from((x - 0.5).hypot(y - 0.5));
-                let missed = offset * mesh::SURFACE_LIFT_M / (height_m - mesh::SURFACE_LIFT_M);
-                assert!(
-                    residual * 5.0 < missed,
-                    "с высоты {} м точка кадра {:?} вернулась как {:?}: расхождение {:.3e} \
-                     против {:.3e} у промаха по эллипсоиду",
-                    height_m, (x, y), back, residual, missed
-                );
-            }
-        }
-    }
-
-    /// `visible_deg` и `height_for` — прямая и обратная одна другой; на этом
-    /// стоит и темп жеста, и наводка «чтобы поместился контур». README
-    /// заявляет их парой — здесь пара сходится числом.
-    #[test]
-    fn height_inverts_visible_arc() {
-        // До полукадра от горизонта пара точная.
-        let brim = 90.0 - FOV_Y_DEG * 0.5;
-        for radius_deg in [0.5, 2.0, 10.0, 30.0, 55.0, brim] {
-            let camera = at(0.0, 0.0, height_for(radius_deg));
-            assert!(
-                (camera.visible_deg() - radius_deg).abs() < 1e-6,
-                "радиус {}° увиделся как {}°", radius_deg, camera.visible_deg()
-            );
-        }
-    }
-
-    /// Поворот кадра переноса не несёт: начало координат он оставляет на месте.
-    /// Появись там перенос — вершина, отсчитанная от глаза, уехала бы на его
-    /// длину, то есть на целый радиус Земли, и всё нарисованное разом.
-    #[test]
-    fn the_turn_carries_no_shift() {
-        for (lat, lon, height) in [(0.0, 0.0, 1e6), (45.0, 60.0, HEIGHT_RANGE_M.0), (-80.0, 179.0, 5e7)] {
-            let turn = turn_to(at(lat, lon, height).basis());
-            assert_eq!(turn * glam::Vec4::W, glam::Vec4::W, "{} {} {}", lat, lon, height);
-        }
-    }
-
-    /// У самого пола Земля под камерой плоская, и метры на пиксель обязаны
-    /// сойтись с простой тригонометрией: полкадра — это тангенс половины угла
-    /// обзора, умноженный на расстояние **до нарисованного**.
-    ///
-    /// Проверка независима от того, чем метры считаются: там теорема синусов на
-    /// шаре, здесь прямоугольный треугольник. Мерка до эллипсоида вместо выноса
-    /// дала бы тут одиннадцать процентов лишку.
-    #[test]
-    fn near_the_floor_the_frame_is_plain_trigonometry() {
-        let height_px = 1000;
-        let camera = at(0.0, 0.0, HEIGHT_RANGE_M.0);
-        let to_surface = HEIGHT_RANGE_M.0 - mesh::SURFACE_LIFT_M;
-
-        let want = 2.0 * to_surface * (FOV_Y_DEG * 0.5).to_radians().tan() / f64::from(height_px);
-        let got = camera.metres_per_pixel(height_px);
-        assert!((got - want).abs() < 0.01 * want, "{} м на пиксель против {}", got, want);
-    }
-
-    /// Наводка на снимок во всю Землю не должна отгонять камеру в свой потолок:
-    /// оттуда шар занимает восьмую часть кадра, и «поместилось» превращается в
-    /// «не видно ничего».
-    #[test]
-    fn focusing_on_the_whole_earth_fills_the_frame() {
-        let brim = 90.0 - FOV_Y_DEG * 0.5;
-        // Всё, что просят сверх полукадра до горизонта, даёт одну и ту же
-        // высоту: дальше отходить не за чем.
-        let at_brim = height_for(brim);
-        for asked in [brim, 80.0, 90.0, 117.0, 1000.0] {
-            assert!(
-                (height_for(asked) - at_brim).abs() < 1.0,
-                "радиус {}° увёл камеру на {} м вместо {}", asked, height_for(asked), at_brim
-            );
-        }
-        // На этой высоте лимб ровно по краю кадра — лимб **нарисованного**, а
-        // не эллипсоида: по краю кадра стои́т то, что видно. Собственный лимб
-        // эллипсоида чуть у́же, и ровно на вынос.
-        let camera = at(0.0, 0.0, at_brim);
-        let radius = 1.0 + at_brim / geodesy::SEMI_MAJOR_M;
-        let limb = (mesh::drawn_radius() / radius).asin().to_degrees();
-        assert!(
-            (limb - FOV_Y_DEG * 0.5).abs() < 1e-6,
-            "лимб {}° против полукадра {}°", limb, FOV_Y_DEG * 0.5
-        );
-        let bare = (1.0 / radius).asin().to_degrees();
-        assert!(bare < limb, "лимб эллипсоида у́же нарисованного: {} против {}", bare, limb);
-        assert!((camera.visible_deg() - brim).abs() < 1e-6);
-    }
-
-    /// Рамка остаётся ортонормальной под любым жестом: из неё выводится и
-    /// матрица вида, и луч под курсором, и вырожденная она даёт пустой кадр —
-    /// молча, потому что нормализация нуля возвращает ноль.
-    #[test]
-    fn orbit_keeps_the_frame_orthonormal() {
-        let mut camera = Camera::default();
-        for step in 0..500 {
-            // Жест нарочно косой и меняющий знак: именно диагональ копит крен,
-            // и именно на ней рамка теряет ортогональность быстрее всего.
-            let sign = if step % 7 < 3 { -1.0 } else { 1.0 };
-            camera.orbit(0.37 * sign, 0.29);
-            assert!((camera.at.dot(camera.at) - 1.0).abs() < 1e-9, "шаг {}", step);
-            assert!((camera.up.dot(camera.up) - 1.0).abs() < 1e-9, "шаг {}", step);
-            assert!(camera.at.dot(camera.up).abs() < 1e-9, "шаг {}", step);
-            let (side, up, forward) = camera.basis();
-            for (name, axis) in [("side", side), ("up", up), ("forward", forward)] {
-                assert!((axis.dot(axis) - 1.0).abs() < 1e-6, "{} на шаге {}", name, step);
-            }
-        }
-    }
-
-    /// Жест переносит подкамерную точку ровно на ту дугу, о которой просили, —
-    /// на любой широте, включая приполярную. Разгона по косинусу широты здесь
-    /// нет и быть не может: горизонтальный жест поворачивает рамку вокруг
-    /// собственной вертикали, а не прибавляет долготу.
-    #[test]
-    fn a_drag_moves_the_arc_it_promises() {
-        for lat in [0.0, 45.0, 80.0, 89.5] {
-            let mut camera = at(lat, 10.0, 1_000_000.0);
-            let span = 2.0 * camera.visible_deg();
-            let before = camera.at;
-            camera.orbit(0.25, 0.0);
-            let moved = before.dot(camera.at).clamp(-1.0, 1.0).acos().to_degrees();
-            assert!(
-                (moved - span * 0.25).abs() < 1e-6,
-                "на {}° жест сдвинул на {}° вместо {}°", lat, moved, span * 0.25
-            );
-        }
-    }
-
-    /// Через полюс камера переезжает, а не упирается в него: протаскивание
-    /// вверх переносит её на противоположный меридиан и ведёт дальше вниз по
-    /// той стороне. Дуга при этом складывается вся, без потерь на макушке:
-    /// кламп широты погасил бы там остаток жеста.
-    #[test]
-    fn a_drag_carries_the_camera_over_the_pole() {
-        let mut camera = at(80.0, 30.0, 1_000_000.0);
-        let span = 2.0 * camera.visible_deg();
-        // Столько шагов, чтобы заведомо перевалить за макушку.
-        let steps = (20.0 / span).ceil() as usize;
-        for _ in 0..steps {
-            camera.orbit(0.0, 1.0);
-        }
-
-        let travelled = span * steps as f64;
-        let (lat, lon) = geodesy::angles(camera.at);
-        assert!(travelled > 10.0, "жест не дотянул до полюса: {}°", travelled);
-        // За полюсом широта снова убывает, а меридиан — противоположный.
-        assert!((lat - (180.0 - (80.0 + travelled))).abs() < 1e-6, "широта {}", lat);
-        assert!(
-            (geodesy::unwind(210.0, lon) - 210.0).abs() < 1e-6,
-            "меридиан после перелёта {} вместо 210", lon
-        );
-        // И кадр за полюсом честно перевёрнут: север там книзу.
-        assert!(camera.up.dot(north_up(camera.at).expect("не полюс")) < 0.0);
-    }
-
-    /// Обратное протаскивание возвращает камеру туда, откуда её увели: жест —
-    /// поворот, и петля у него замыкается. Пара приращений в градусах широты и
-    /// долготы этим свойством не обладает.
-    #[test]
-    fn the_gesture_is_a_rotation_and_undoes_itself() {
-        let mut camera = at(60.0, -20.0, 2_000_000.0);
-        let before = camera.at;
-        for _ in 0..8 {
-            camera.orbit(0.3, 0.0);
-        }
-        for _ in 0..8 {
-            camera.orbit(-0.3, 0.0);
-        }
-        assert!(
-            before.dot(camera.at) > 1.0 - 1e-9,
-            "петля не замкнулась: {:?} против {:?}", before, camera.at
-        );
-    }
-
-    /// Косой жест снимается обратным точно, а не в пределе мелкого шага. Это и
-    /// есть разница между одним поворотом и парой: у пары обратный жест
-    /// поворачивает вокруг уже повёрнутых осей, и петля не сходится.
-    #[test]
-    fn an_oblique_gesture_undoes_itself() {
-        let mut camera = at(60.0, -20.0, 14_000_000.0);
-        let (at_before, up_before) = (camera.at, camera.up);
-        camera.orbit(0.37, 0.29);
-        camera.orbit(-0.37, -0.29);
-        assert!(
-            at_before.dot(camera.at) > 1.0 - 1e-12,
-            "точка не вернулась: {:?} против {:?}", at_before, camera.at
-        );
-        assert!(
-            up_before.dot(camera.up) > 1.0 - 1e-12,
-            "кадр остался подкрученным: {:?} против {:?}", up_before, camera.up
-        );
-    }
-
-    /// Перелёт кончается ровно там, куда просили, а не рядом: конец — это цель,
-    /// а не то, что осталось от округлений на последнем шаге.
-    #[test]
-    fn a_flight_lands_exactly_where_asked() {
-        let mut camera = Camera::default();
-        camera.focus(-33.9, 151.2, 0.5);
-
-        let mut ticks = 0;
-        while camera.advance(1.0 / 60.0) {
-            ticks += 1;
-            assert!(ticks < 1000, "перелёт не кончился");
-        }
-        assert!(ticks > 1, "перелёт уложился в один кадр: {}", ticks);
-
-        let (lat, lon) = geodesy::angles(camera.at);
-        assert!((lat + 33.9).abs() < 1e-9, "широта {}", lat);
-        assert!((lon - 151.2).abs() < 1e-9, "долгота {}", lon);
-        assert_eq!(camera.height_m, height_for(0.5 * FRAME_MARGIN));
-        assert!(camera.at.dot(camera.up).abs() < 1e-12, "рамка не ортогональна");
-        // И камера, доехав, встаёт: ещё один тик вести уже нечего.
-        assert!(!camera.advance(1.0 / 60.0));
-    }
-
-    /// На середине перелёта камера между началом и целью, а не у одного из
-    /// концов: высота ведётся долями, поэтому середина — среднее геометрическое.
-    #[test]
-    fn a_flight_passes_between_its_ends() {
-        let mut camera = at(0.0, 0.0, 10_000_000.0);
-        let target = height_for(1.0 * FRAME_MARGIN);
-        camera.focus(0.0, 40.0, 1.0);
-        camera.advance((FLIGHT_S * 0.5) as f32);
-
-        // Допуск не на арифметику, а на долю: шаг приезжает в f32, и полсекунды
-        // в нём не полсекунды ровно.
-        let (lat, lon) = geodesy::angles(camera.at);
-        assert!(lat.abs() < 1e-9, "перелёт по экватору не должен уводить с него: {}", lat);
-        assert!((lon - 20.0).abs() < 1e-4, "середина дуги: {}", lon);
-        let middle = (10_000_000.0_f64 * target).sqrt();
-        assert!(
-            (camera.height_m / middle - 1.0).abs() < 1e-5,
-            "{} против среднего геометрического {}", camera.height_m, middle
-        );
-    }
-
-    /// Повторная наводка на ту же цель перелёт не перезапускает: приходи она
-    /// каждый кадр, камера возвращалась бы в начало пути и не приезжала никогда.
-    #[test]
-    fn a_repeated_focus_does_not_restart_the_flight() {
-        let mut camera = Camera::default();
-        camera.focus(-33.9, 151.2, 0.5);
-        for _ in 0..30 {
-            camera.advance(1.0 / 60.0);
-            camera.focus(-33.9, 151.2, 0.5);
-        }
-        // Полсекунды пути пройдено — значит перелёт шёл, а не начинался заново.
-        assert!(camera.advance(0.2), "перелёт кончился раньше времени");
-        assert!(!camera.advance(0.01), "перелёт не кончился за свой срок");
-
-        let (lat, lon) = geodesy::angles(camera.at);
-        assert!((lat + 33.9).abs() < 1e-9 && (lon - 151.2).abs() < 1e-9, "{} {}", lat, lon);
-    }
-
-    /// Жест перехватывает управление: доводить прежнюю наводку, пока камеру
-    /// тащат руками, значит тянуть её в две стороны разом.
-    #[test]
-    fn a_gesture_calls_off_the_flight() {
-        let mut camera = Camera::default();
-        camera.focus(-33.9, 151.2, 0.5);
-        camera.advance(0.1);
-        camera.orbit(0.1, 0.0);
-        assert!(!camera.advance(1.0), "перелёт пережил жест");
-
-        camera.focus(-33.9, 151.2, 0.5);
-        camera.zoom_at(1.0, 0.0, 0.0);
-        assert!(!camera.advance(1.0), "перелёт пережил колесо");
-    }
-
-    #[test]
-    fn zoom_respects_height_range() {
-        let mut camera = Camera::default();
-        camera.zoom_at(1e4, 0.0, 0.0);
-        assert_eq!(camera.height_m, HEIGHT_RANGE_M.0);
-        camera.zoom_at(-1e4, 0.0, 0.0);
-        assert_eq!(camera.height_m, HEIGHT_RANGE_M.1);
-    }
-
-    /// Угол между двумя ортами, радианы.
-    ///
-    /// Не `angle_between`: тот берёт арккосинус скалярного произведения, а у
-    /// почти сонаправленных ортов оно жмётся к единице, и разрешения остаётся
-    /// два десятка нанорадиан. Сносы, которые здесь меряют, бывают мельче.
-    fn apart(from: DVec3, to: DVec3) -> f64 {
-        from.cross(to).length().atan2(from.dot(to))
-    }
-
-    /// Сколько пикселей кадра в единице тангенса оси: половина кадра по
-    /// вертикали — это тангенс половины угла обзора.
-    fn pixels_per_tangent(rows: f64) -> f64 {
-        rows * 0.5 / (FOV_Y_DEG * 0.5).to_radians().tan()
-    }
-
-    /// Место на выносе, видимое в точке кадра, и его же смещение от середины.
-    fn held_at(camera: &Camera, hold_x: f64, hold_y: f64) -> (DVec3, (f64, f64)) {
-        let (right, above) = frame_offset(hold_x, -hold_y);
-        let point = geodesy::intersect_at(
-            geodesy::world(camera.geodetic()),
-            camera.look(right, above),
-            mesh::SURFACE_LIFT_M,
-        )
-        .expect("луч мимо Земли");
-        (point, (right, above))
-    }
-
-    /// Приближение держит место под курсором, а не середину кадра.
-    ///
-    /// Мерка здесь не `project`: он считает в f32, и у пола его квант — восемь
-    /// десятых метра, то есть у пола больше пикселя кадра. Мерить им невязку в
-    /// сотые доли пикселя значит взять линейку толще измеряемого. Обе стороны —
-    /// и место, и его точка кадра — берутся поэтому в f64 и теми же осями
-    /// рамки, которыми кадр рисуется.
-    ///
-    /// Середина кадра в наборе не для полноты: приближение в неё тоже уводит
-    /// вид вбок — высота отмеряется по нормали, а кадр смотрит в центр, — и
-    /// снимает этот снос тот же доворот по месту.
-    #[test]
-    fn zoom_keeps_the_place_under_the_cursor() {
-        let scale = pixels_per_tangent(1300.0);
-        let mut worst: f64 = 0.0;
-
-        // Не с самого пола: там щелчок внутрь съедается клампом, и проверка
-        // мерила бы неподвижную камеру.
-        for height_m in [HEIGHT_RANGE_M.0 * 2.0, 10_000.0, 1_000_000.0, 14_000_000.0] {
-            // Дальше от середины кадра, чем сюда вписано, на отлёте лежит уже
-            // лимб: на умолчательной высоте он приходится на 0,35 высоты.
-            for (hold_x, hold_y) in [(0.0, 0.0), (0.2, 0.0), (-0.1, 0.15), (0.12, -0.18)] {
-                for steps in [1.0f32, -1.0, 3.0] {
-                    let mut camera = at(45.0, 60.0, height_m);
-                    let (held, (right, above)) = held_at(&camera, hold_x, hold_y);
-
-                    camera.zoom_at(steps, hold_x as f32, hold_y as f32);
-
-                    let (now_right, now_above) = camera.seen_at(held).expect("место за спиной");
-                    let missed = (now_right - right).hypot(now_above - above) * scale;
-                    worst = worst.max(missed);
-                    assert!(
-                        missed < 0.01,
-                        "с {height_m} м на {steps} щелчков место в ({hold_x}, {hold_y}) \
-                         уехало на {missed:.4} пикселя"
-                    );
-                }
-            }
-        }
-        // Ноль означал бы, что мерка не считает вовсе: точным удержание не
-        // бывает ни в одном из случаев набора.
-        assert!(worst > 0.0, "невязка нулевая — мерка не считает");
-    }
-
-    /// У кромки силуэта удержание слабеет, а не обрывается.
-    ///
-    /// Ради этого оно и слабеет: без него щелчок в пяти пикселях от кромки
-    /// разворачивал бы шар на шестую часть кадра, а пикселем дальше — уже ни на
-    /// сколько, потому что там луч уходит мимо Земли. Проверяется и то, и
-    /// другое: поворот у самой кромки меньше, чем в глубине диска, а место,
-    /// которое всё-таки держат, держится по-прежнему точно.
-    #[test]
-    fn the_hold_lets_go_at_the_limb() {
-        let scale = pixels_per_tangent(1300.0);
-        // Кромка одинаково далека от середины во все стороны, поэтому и мерить
-        // её надо не по одной оси: обе они меряются высотой, и подмена одной
-        // другой видна только здесь.
-        for (dx, dy) in [(1.0, 0.0), (0.0, 1.0), (0.6, -0.8)] {
-            let swing = |reach: f64, steps: f32| {
-                let before = Camera::default();
-                let mut camera = before;
-                let (held, (right, above)) = held_at(&camera, reach * dx, reach * dy);
-                camera.zoom_at(steps, (reach * dx) as f32, (reach * dy) as f32);
-                let (now_right, now_above) = camera.seen_at(held).expect("место за спиной");
-                (
-                    apart(before.at, camera.at).to_degrees(),
-                    (now_right - right).hypot(now_above - above) * scale,
-                )
-            };
-
-            // Умолчательная высота: шар занимает семь десятых полукадра, и
-            // кромка приходится на 0,353 высоты кадра — за неё набор и не заходит,
-            // потому что эллипсоид делает её слегка неровной. Колено сюда не вписано
-            // нарочно — оно выводится из угла обзора, высоты и `GRAZE_LIMIT`, и
-            // вписанное числом устарело бы от правки любого из трёх. Проверяется
-            // форма: поворот растёт, пока держат целиком, и сходит к кромке.
-            let turns: Vec<f64> =
-                [0.1, 0.2, 0.3, 0.33, 0.345, 0.348, 0.35].iter().map(|r| swing(*r, 1.0).0)
-                    .collect();
-            let peak = turns
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.total_cmp(b.1))
-                .map(|(at, _)| at)
-                .expect("поворотов нет");
-            assert!(peak > 0, "поворот наибольший у самой середины кадра: {turns:.1?}");
-            assert!(peak + 1 < turns.len(), "поворот растёт до самой кромки: {turns:.1?}");
-            assert!(
-                turns[turns.len() - 1] < turns[peak] * 0.5,
-                "у кромки поворот не сошёл на нет: {turns:.1?}"
-            );
-
-            // Пока держат целиком, держат точно — иначе «слабеет» означало бы
-            // «врёт везде».
-            let missed = swing(0.30, 1.0).1;
-            assert!(missed < 0.02, "в глубине диска место уехало на {missed:.3} пикселя");
-
-            // Наружу кромка едет навстречу: отдаляясь, камера уменьшает диск, и
-            // место, которое держалось, оказывается за силуэтом. Слабеть
-            // удержание обязано и здесь — спроси хватку по одной высоте, и
-            // щелчок наружу перестал бы доворачивать разом, а пикселем ближе
-            // доворачивал бы на десяток градусов.
-            // Кромка при отдалении проходит по 0,2974 высоты кадра: дальше
-            // держать нечего, и поворот там законно нулевой. Стеречь надо
-            // подступ к ней — поворот обязан сойти на нет ДО обрыва, а не на
-            // нём.
-            let outward: Vec<f64> = [0.20, 0.25, 0.27, 0.28, 0.29, 0.295, 0.2974]
-                .iter()
-                .map(|r| swing(*r, -1.0).0)
-                .collect();
-            let (rise, edge) = (
-                outward.iter().cloned().fold(0.0, f64::max),
-                outward[outward.len() - 2],
-            );
-            assert!(
-                edge < rise * 0.25,
-                "у кромки щелчок наружу поворачивает на {edge:.2}° при вершине {rise:.2}°: \
-                 {outward:.2?}"
-            );
-        }
-    }
-
-    /// Щелчок назад отменяет щелчок вперёд: место под курсором то же, значит и
-    /// камера возвращается туда, откуда пришла.
-    ///
-    /// Высоты берутся вдали от обоих клампов нарочно: у пола щелчок внутрь
-    /// обрезается, а щелчок наружу — нет, и пара перестаёт быть парой.
-    ///
-    /// Второй случай — у кромки силуэта, и он не про клампы. Там пара
-    /// начинается со щелчка **наружу**: отдаляясь, камера уменьшает диск, и
-    /// место, которое держалось, оказывается за силуэтом — держать его больше
-    /// нельзя. Спроси хватку по одной высоте, и щелчок наружу остался бы без
-    /// поправки вовсе, тогда как обратный ему щелчок внутрь её получит.
-    #[test]
-    fn a_notch_back_undoes_a_notch_in() {
-        for (before, hold_x, first) in [
-            (at(45.0, 60.0, 1_000_000.0), 0.2, 1.0),
-            (Camera::default(), 0.32, -1.0),
-        ] {
-            let mut camera = before;
-            camera.zoom_at(first, hold_x, -0.1);
-            camera.zoom_at(-first, hold_x, -0.1);
-
-            // Мерка — пиксель кадра, а не метр: у кромки поворот за щелчок
-            // идёт градусами, и метры там значат совсем не то, что у земли.
-            let drift = apart(before.at, camera.at) * geodesy::SEMI_MAJOR_M
-                / before.metres_per_pixel(1300);
-            assert!(
-                drift < 0.25,
-                "с {} м камера вернулась на {drift:.3} пикселя мимо", before.height_m
-            );
-            let times = camera.height_m / before.height_m;
-            assert!((times - 1.0).abs() < 1e-9, "высота вернулась в {times} раза мимо");
-        }
-    }
-
-    /// Что камера взялась держать, то она и держит — во всей полосе высот и по
-    /// всему кадру.
-    ///
-    /// Держит она не всегда то, на что указали: у кромки силуэта хватка
-    /// подтягивает точку к середине, и проверять надо именно оставшееся, иначе
-    /// утверждение начнёт спорить с затуханием вместо того, чтобы стеречь
-    /// поправку. Хватка здесь считается той же арифметикой, что и в камере, —
-    /// это цена того, чтобы мерить настоящее удержание; за саму хватку
-    /// отвечают `the_hold_lets_go_at_the_limb` и `a_notch_back_undoes_a_notch_in`.
-    ///
-    /// Перебор нужен потому, что ломается это не в середине поля: невязку
-    /// переводит в дугу отставание, а оно у кромки растёт без предела, и
-    /// точечные тесты не смотрят туда, где отдаляются вдали от середины кадра
-    /// на высотах между парой и десятком тысяч километров.
-    #[test]
-    fn a_zoom_holds_whatever_it_took_hold_of() {
-        let scale = pixels_per_tangent(1300.0);
-        let mut checked = 0;
-        for height_m in [
-            800.0, 2_000.0, 20_000.0, 100_000.0, 500_000.0, 1_500_000.0, 3_000_000.0,
-            4_500_000.0, 6_000_000.0, 9_000_000.0, 14_000_000.0, 30_000_000.0, 80_000_000.0,
-        ] {
-            for lat_deg in [0.0, 45.0, 89.0] {
-                // Мелкие смещения — не для полноты: на восьмидесяти тысячах
-                // километров кромка лежит в восьми сотых высоты кадра, и без
-                // них весь верх полосы проверялся бы одной серединой.
-                for hold_x in [-0.8, -0.4, -0.1, -0.03, 0.0, 0.03, 0.1, 0.4, 0.8] {
-                    for hold_y in [-0.5, -0.2, -0.04, 0.0, 0.3, 0.5] {
-                        for steps in [1.0f32, -1.0] {
-                            let start = at(lat_deg, 60.0, height_m);
-                            let (right, above) = frame_offset(hold_x, -hold_y);
-                            let alpha_seen = right.hypot(above).atan();
-                            let far = Camera {
-                                height_m: (height_m * ZOOM_PER_STEP.powf(f64::from(steps)))
-                                    .clamp(HEIGHT_RANGE_M.0, HEIGHT_RANGE_M.1),
-                                ..start
-                            };
-                            let share = start.grip(alpha_seen).min(far.grip(alpha_seen));
-                            let (right, above) = (right * share, above * share);
-
-                            let held = geodesy::intersect_at(
-                                geodesy::world(start.geodetic()),
-                                start.look(right, above),
-                                mesh::SURFACE_LIFT_M,
-                            )
-                            .expect("хватка оставила место за краем Земли");
-                            let mut camera = start;
-                            camera.zoom_at(steps, hold_x as f32, hold_y as f32);
-
-                            let (now_right, now_above) =
-                                camera.seen_at(held).expect("место за спиной");
-                            let slipped = (now_right - right).hypot(now_above - above) * scale;
-                            checked += 1;
-                            assert!(
-                                slipped < 0.005,
-                                "с {height_m} м на {lat_deg}° при удержании \
-                                 ({hold_x}, {hold_y}) и {steps} щелчках место уехало на \
-                                 {slipped:.4} пикселя"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        assert!(checked > 1000, "перебор обошёл всего {checked} случаев");
-    }
-
-    /// Щелчок приезжает не разом, а сотней долей: инерция прокрутки растягивает
-    /// его примерно на секунду. Разложенный ею, он обязан привести камеру туда
-    /// же, куда привёл бы целиком.
-    ///
-    /// Обязан там, где место держат целиком. У самой кромки силуэта это неверно
-    /// и неверно законно: хватка меряется высотой, а высота внутри щелчка
-    /// меняется — место, которое в начале щелчка держать было нечем, к концу
-    /// отходит от кромки, и камера берётся за него, как только может. Целого
-    /// щелчка живой путь и не присылает ни разу, поэтому спрашивать с него там
-    /// нечего; спрашивать надо другое — чтобы вид не зависел от частоты кадров,
-    /// то есть от того, на сколько долей щелчок порезали.
-    #[test]
-    fn a_notch_arrives_whole_or_in_a_hundred_parts() {
-        for (start, hold_x) in [(at(45.0, 60.0, 3_000_000.0), 0.2), (Camera::default(), 0.2)] {
-            let (mut once, mut parts) = (start, start);
-            once.zoom_at(1.0, hold_x, -0.15);
-            for _ in 0..100 {
-                parts.zoom_at(0.01, hold_x, -0.15);
-            }
-
-            // Мерка — пиксель кадра: метры на разных высотах значат разное, и
-            // порог в метрах держался бы только на той высоте, где выбран.
-            let apart = apart(once.at, parts.at) * geodesy::SEMI_MAJOR_M
-                / start.metres_per_pixel(1300);
-            assert!(
-                apart < 0.05,
-                "с {} м при удержании {hold_x} целый щелчок и сто долей \
-                 разошлись на {apart:.4} пикселя",
-                start.height_m
-            );
-
-            let times = parts.height_m / once.height_m;
-            assert!((times - 1.0).abs() < 1e-7, "высоты разошлись в {times} раза");
-        }
-
-        // А у кромки — то, что и вправду сравнимо: два разреза одного щелчка,
-        // какие дают шестьдесят и полтораста кадров в секунду.
-        let start = Camera::default();
-        let cut = |parts: u32| {
-            let mut camera = start;
-            for _ in 0..parts {
-                camera.zoom_at(1.0 / parts as f32, 0.34, -0.15);
-            }
-            camera
-        };
-        let (slow, fast) = (cut(112), cut(266));
-        let apart = apart(slow.at, fast.at) * geodesy::SEMI_MAJOR_M
-            / start.metres_per_pixel(1300);
-        assert!(apart < 1.0, "разная частота кадров развела вид на {apart:.3} пикселя");
-    }
-
-    /// Щелчок наружу и щелчок внутрь отменяют друг друга и приехав долями.
-    ///
-    /// Долями — потому что только так они и приезжают, а у кромки это меняет
-    /// дело: хватка, померенная приехавшей долей, почти не отличается от
-    /// прежней высоты и обрывается уже в середине щелчка, вместо того чтобы
-    /// ослабнуть заранее. Мерка целого щелчка на то и заведена.
-    #[test]
-    fn a_notch_in_parts_is_undone_by_a_notch_in_parts() {
-        let start = Camera::default();
-        let mut camera = start;
-        for steps in [-0.01f32, 0.01] {
-            for _ in 0..100 {
-                camera.zoom_at(steps, 0.32, -0.1);
-            }
-        }
-
-        let drift = apart(start.at, camera.at) * geodesy::SEMI_MAJOR_M
-            / start.metres_per_pixel(1300);
-        assert!(drift < 0.5, "камера вернулась на {drift:.3} пикселя мимо");
-        let times = camera.height_m / start.height_m;
-        assert!((times - 1.0).abs() < 1e-7, "высота вернулась в {times} раза мимо");
-    }
-
-    /// Курсор приходит в пикселях области, а камера считает доли высоты от
-    /// середины кадра. Половину этого соглашения держит своя проверка на той
-    /// стороне провода (`data-browser::handlers::globe::hold`), а здесь — вторая
-    /// половина: что мерка удержания и мерка луча под курсором сходятся.
-    ///
-    /// Отсюда и мерка: не своё же удержание, а `probe` — тот самый ответ, каким
-    /// шар отвечает на щелчок. Ошибись перевод в множителе, в знаке или в
-    /// стороне, которой меряется горизонталь, — и место под курсором уехало бы
-    /// на километры, а не на метры.
-    #[test]
-    fn a_pointer_holds_the_place_the_probe_names() {
-        let (width, height) = (2048.0f32, 1334.0f32);
-        let aspect = width / height;
-        for (px, py) in [(1400.0f32, 500.0f32), (600.0, 1000.0), (1024.0, 667.0)] {
-            let mut camera = at(45.0, 60.0, 3_000_000.0);
-            let before = camera.probe(px / width, py / height, aspect).expect("луч мимо Земли");
-            // Ровно то, что считает `data-browser::handlers::globe`: обе оси
-            // меряются высотой области, счёт идёт от середины кадра.
-            camera.zoom_at(1.0, (px - width / 2.0) / height, (py - height / 2.0) / height);
-            let after = camera.probe(px / width, py / height, aspect).expect("луч мимо Земли");
-
-            let slipped = geodesy::separation(before, after).to_radians() * geodesy::SEMI_MAJOR_M;
-            assert!(slipped < 20.0, "место под ({px}, {py}) уехало на {slipped:.1} м");
-        }
-    }
-
-    /// Упор в кламп — это несостоявшееся приближение, и доворачивать под него
-    /// нечего: иначе колесо у пола и у потолка крутило бы Землю вбок.
-    #[test]
-    fn zoom_at_the_edges_only_stops_moving() {
-        for (height_m, steps) in [(HEIGHT_RANGE_M.0, 3.0f32), (HEIGHT_RANGE_M.1, -3.0)] {
-            let before = at(45.0, 60.0, height_m);
-            let mut camera = before;
-            camera.zoom_at(steps, 0.3, 0.2);
-            assert_eq!(camera.at, before.at, "с высоты {height_m} м шар повернулся");
-            assert_eq!(camera.up, before.up, "с высоты {height_m} м кадр накренился");
-            assert_eq!(camera.height_m, height_m);
-        }
-    }
-
-    /// Под курсором нет Земли — держать нечего, и приближение остаётся
-    /// приближением в середину кадра. На умолчательной высоте это не
-    /// редкость: шар занимает семь десятых полукадра, а вокруг него пусто.
-    #[test]
-    fn zoom_past_the_limb_holds_the_middle() {
-        let scale = pixels_per_tangent(1300.0);
-        let before = Camera::default();
-        let mut camera = before;
-        let (middle, (right, above)) = held_at(&camera, 0.0, 0.0);
-        camera.zoom_at(1.0, 0.45, 0.0);
-
-        assert!(camera.height_m < before.height_m, "приближение не состоялось");
-        let (now_right, now_above) = camera.seen_at(middle).expect("середина за спиной");
-        let missed = (now_right - right).hypot(now_above - above) * scale;
-        assert!(missed < 0.01, "середина кадра уехала на {missed:.4} пикселя");
-    }
-
-    /// Поток мелких приближений туда-обратно возвращает камеру на место.
-    ///
-    /// Мелких потому, что один щелчок колеса приезжает не разом: инерция
-    /// прокрутки растягивает его на сотню долей, а раскачка колеса взад-вперёд
-    /// эти доли чередует. Каждая снимается своей встречной, и снимается точно,
-    /// а не в среднем: хватка у пары та же, потому что высоты у неё те же.
-    ///
-    /// Ортонормальность рамки этим потоком не проверить, хотя доворотов в нём
-    /// две с половиной тысячи: поворот держит её с точностью до последних цифр
-    /// мантиссы, и пятьсот приближений подряд не портят рамку настолько, чтобы
-    /// отличить работающую `settle` от снятой.
-    #[test]
-    fn alternating_parts_bring_the_camera_back() {
-        let start = at(45.0, 60.0, 1_000_000.0);
-        let mut camera = start;
-        for step in 0..500 {
-            let sign = if step % 2 == 0 { 1.0 } else { -1.0 };
-            camera.zoom_at(0.02 * sign, 0.2, -0.15);
-        }
-
-        let drift = apart(start.at, camera.at) * geodesy::SEMI_MAJOR_M
-            / start.metres_per_pixel(1300);
-        assert!(drift < 0.01, "камера вернулась на {drift:.4} пикселя мимо");
-        let times = camera.height_m / start.height_m;
-        assert!((times - 1.0).abs() < 1e-9, "высота вернулась в {times} раза мимо");
-    }
-
-    /// Наводка ставит названную точку в середину кадра и севером кверху — в том
-    /// числе у самого полюса, где предохранитель от вырожденного «севера»
-    /// увёл бы цель на целый градус.
-    #[test]
-    fn focus_reaches_the_pole() {
-        let mut camera = Camera::default();
-        camera.orbit(0.4, 0.4);
-        camera.focus(89.7, 15.0, 0.2);
-        camera.advance(10.0);
-        let (lat, lon) = geodesy::angles(camera.at);
-        assert!((lat - 89.7).abs() < 1e-9, "широта {}", lat);
-        assert!((lon - 15.0).abs() < 1e-9, "долгота {}", lon);
-        assert!(camera.at.dot(camera.up).abs() < 1e-9, "рамка не ортогональна");
-    }
 }

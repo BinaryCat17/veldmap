@@ -461,7 +461,7 @@ it": placeable first — the variable has coordinates of its own, a
 not the image of this granule whatever it measures: in a Sentinel-5P L1B
 granule the instrument's wavelength table — fractional, not angular, at the
 same depth — wins over the viewing angles by every other argument; the test
-is `место_спрашивается_раньше_всех_прочих_доводов`); then closer to the root
+is `place_is_asked_before_all_other_arguments`); then closer to the root
 (`depth`: details of the computation lie in subgroups); floating point before
 integer (`real`: an integer in CF is a counter, a code, an index); not angular
 before angular (`angular`: degrees, deg, degrees_t, radians, rad — a closed

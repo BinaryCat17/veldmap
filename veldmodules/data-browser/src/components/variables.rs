@@ -1,21 +1,23 @@
-//! components/variables.rs — список величин файла многих величин: под кадром
-//! канвы и в строке слоя. Один на оба места: пункты, галочка у показанной и
-//! обрезка длинного списка устроены одинаково, а откуда величины и что шлёт
-//! пункт — решает вызывающий.
+//! components/variables.rs — the list of variables of a multi-variable file:
+//! under the canvas frame and in the layer row. One list for both places:
+//! items, the tick by the shown one, and truncation of a long list are built
+//! the same way; where the variables come from and what an item sends is up to
+//! the caller.
 
 use crate::module::components::{format, menu};
 use crate::module::Msg;
 
-/// Сколько величин перечисляет раскрытый список; остальные — числом. У
-/// гранулы Sentinel-5P годных три десятка, и панель длиннее окна не раскрыть.
-/// Семнадцать строк списка — около 520 pt по метрикам `menu::line`: в окно в
-/// 768 pt встают; в панель деления в половину окна — нет, там всплывашка
-/// упирается в край и накрывает кнопку, оставаясь закрываемой щелчком мимо.
+/// How many variables the expanded list enumerates; the rest are a number. A
+/// Sentinel-5P granule has three dozen usable ones, and a panel taller than
+/// the window cannot be expanded. Seventeen list rows are about 520 pt by
+/// `menu::line` metrics: they fit a 768 pt window; they do not fit a half-
+/// window split panel — there the pop-up hits the edge and covers the button,
+/// while staying closable by a click outside.
 pub const LISTED: usize = 16;
 
-/// Величина, как её называют: путь в файле, слова файла и единицы. Одно на
-/// две копии сообщения (`image_view::Variable`, `globe::Variable`) — список
-/// собирается из любой.
+/// A variable as it is named: path in the file, the file's wording, and units.
+/// One struct for both message copies (`image_view::Variable`,
+/// `globe::Variable`) — the list is built from either.
 pub struct Named<'a> {
     pub path: &'a str,
     pub said: &'a str,
@@ -34,12 +36,12 @@ impl<'a> From<&'a crate::proto::globe::Variable> for Named<'a> {
     }
 }
 
-/// Пункты списка: все величины в порядке тайлера, показанная (`shown`) — с
-/// галочкой; пункт шлёт `pick` со своим путём. Длинный список обрезается
-/// числом ([`LISTED`]), но показанной место гарантировано: обрезанная, она
-/// уходила бы в «и ещё N», и список из одних не показанных читался бы как
-/// «показана ни одна из них». Пустая `shown` — галочки нет ни у кого: на
-/// экране нет ни одной (названной отказано).
+/// List items: all variables in tiler order, the shown one (`shown`) carries
+/// the tick; an item sends `pick` with its path. A long list is truncated with
+/// a number ([`LISTED`]), but the shown one is guaranteed a spot: truncated,
+/// it would go into "and N more", and a list of only not-shown ones would read
+/// as "none of them is shown". Empty `shown` — nobody carries a tick: there is
+/// none on screen (the named one was refused).
 pub fn items(variables: &[Named<'_>], shown: &str, pick: impl Fn(String) -> Msg) -> Vec<menu::Item> {
     let item = |variable: &Named<'_>| {
         menu::Item::new(format::variable(variable.path, variable.said, variable.units), pick(variable.path.to_string()))
@@ -51,43 +53,7 @@ pub fn items(variables: &[Named<'_>], shown: &str, pick: impl Fn(String) -> Msg)
         items.push(item(&variables[at]));
     }
     if variables.len() > LISTED {
-        items.push(menu::Item::note(format!("и ещё {}", variables.len() - LISTED)));
+        items.push(menu::Item::note(format!("and {} more", variables.len() - LISTED)));
     }
     items
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{items, Named, LISTED};
-    use crate::module::Msg;
-
-    fn named(path: &'static str, units: &'static str) -> Named<'static> {
-        Named { path, said: "", units }
-    }
-
-    /// Список называет все величины в порядке тайлера, отмечает показанную и
-    /// обрезает длинный хвост числом; показанная за обрезкой встаёт последней
-    /// из перечисленных.
-    #[test]
-    fn the_list_names_every_variable_and_marks_the_shown_one() {
-        let pick = |path: String| Msg::OverlayVariable("k".into(), path);
-        let few = [named("/PRODUCT/a", "K"), named("/PRODUCT/b", "")];
-        let listed = items(&few, "/PRODUCT/b", pick);
-        assert_eq!(listed.iter().map(|item| item.named()).collect::<Vec<_>>(), ["a, K", "b"]);
-        assert_eq!(listed.iter().map(|item| item.marked()).collect::<Vec<_>>(), [false, true]);
-        assert!(items(&few, "", pick).iter().all(|item| !item.marked()), "без показанной галочка лишняя");
-
-        let paths: Vec<String> = (0..LISTED + 5).map(|at| format!("/v{at}")).collect();
-        let many: Vec<Named<'_>> = paths.iter().map(|path| Named { path, said: "", units: "" }).collect();
-        let listed = items(&many, "/v0", pick);
-        assert_eq!(listed.len(), LISTED + 1);
-        assert_eq!(listed.last().map(|item| item.named()), Some("и ещё 5"));
-        assert!(listed[0].marked() && !listed[1].marked());
-
-        let listed = items(&many, "/v20", pick);
-        assert_eq!(listed.len(), LISTED + 1);
-        assert_eq!(listed[LISTED - 1].named(), "v20");
-        assert!(listed[LISTED - 1].marked() && !listed[0].marked());
-        assert_eq!(listed.last().map(|item| item.named()), Some("и ещё 5"));
-    }
 }

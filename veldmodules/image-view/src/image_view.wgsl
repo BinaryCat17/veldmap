@@ -1,9 +1,10 @@
-// Квады тайлов: позиции приходят уже в NDC, текстура — sRGB-тайл.
+// Tile quads: positions arrive already in NDC, the texture is an sRGB tile.
 //
-// Таргет — UNORM с sRGB-числами (разметка сэмплит его как обычную картинку и
-// линеаризует сама, см. SURFACE_FORMAT у владельца), а сэмплер sRGB-текстуры
-// отдаёт линейное — поэтому фильтрация идёт в линейном пространстве, а перед
-// записью значение кодируется обратно в sRGB здесь.
+// The target is UNORM carrying sRGB numbers (the layout samples it as an
+// ordinary image and linearizes it itself, see SURFACE_FORMAT at the owner),
+// while the sampler of an sRGB texture returns linear values — so filtering
+// happens in linear space, and the value is encoded back to sRGB here before
+// the write.
 
 struct VsIn {
     @location(0) pos: vec2<f32>,
@@ -35,16 +36,17 @@ fn encode_srgb(linear: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, linear <= vec3<f32>(0.0031308));
 }
 
-// Синева грузящегося — та же, что у шара (globe.wgsl): работа одна и та же, и
-// два разных цвета для неё читались бы как два разных события. Через
-// encode_srgb она не проходит: он только для сэмплированного.
+// The loading tint is the same as on the globe (globe.wgsl): the work is the
+// same, and two different colors for it would read as two different events. It
+// does not go through encode_srgb: that one is only for sampled values.
 const LOADING = vec3<f32>(0.247, 0.443, 0.643); // #3F71A4
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sampled = textureSample(tile_texture, tile_sampler, in.uv);
-    // Сила приходит уже с волной внутри: сетка канвы переписывается каждым
-    // кадром, и печь волну дешевле на месте (см. gpu::Vertex::glow).
+    // The strength arrives with the wave already baked in: the canvas mesh is
+    // rewritten every frame, and baking the wave on the spot is cheaper (see
+    // gpu::Vertex::glow).
     let rgb = mix(encode_srgb(sampled.rgb), LOADING, in.glow);
     return vec4<f32>(rgb, sampled.a);
 }

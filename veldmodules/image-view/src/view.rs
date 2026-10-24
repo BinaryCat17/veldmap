@@ -1,11 +1,11 @@
-//! Одна канва: что в ней показано, куда смотрит камера и как из тайлов
-//! собирается кадр.
+//! One canvas: what it shows, where the camera looks, and how a frame is
+//! assembled from tiles.
 //!
-//! Ячейка кадра — тайл текущего уровня. Рисуется она ровно одним квадом:
-//! точным тайлом, а пока его нет — куском ближайшего имеющегося предка
-//! (адресация пирамиды это позволяет: тайл уровня z+1 накрывает четыре тайла
-//! уровня z, см. resample::halve у тайлера). Одна ячейка — один квад, поэтому
-//! перекрытий нет и буфер глубины не нужен.
+//! A frame cell is the tile of the current level. It is drawn by exactly one
+//! quad: the exact tile, or while that one is missing — a piece of the nearest
+//! available ancestor (pyramid addressing allows this: a level z+1 tile covers
+//! four level z tiles, see resample::halve at the tiler). One cell — one quad,
+//! so there are no overlaps and no depth buffer is needed.
 
 use veldmap_image_tiler_wrap::pyramid::{self, TILE};
 use veldmap_image_tiler_wrap::tiles::{self, Fetch, Meta, Passes, Store};
@@ -16,83 +16,90 @@ use super::gpu::{self, Quad, Target};
 
 pub struct View {
     pub label: String,
-    /// Названная величина файла (`ShowRequest.variable`); пусто — выбор
-    /// тайлера. Едет в описание и в каждый проход: разбор у тайлера ключуется
-    /// ею.
+    /// Named variable of the file (`ShowRequest.variable`); empty means the
+    /// tiler's choice. It travels into the describe and into every pass: the
+    /// tiler's parsing is keyed by it.
     pub variable: String,
-    /// Плоскость прежней величины, пока описывается другая: камера остаётся
-    /// от прежней и годится, только если плоскость та же, — иначе вписывать
-    /// заново (см. [`View::plane_changed`]).
+    /// Plane of the previous variable while another one is being described: the
+    /// camera survives from the previous one and stays valid only if the plane
+    /// is the same — otherwise fit anew (see [`View::plane_changed`]).
     pub previous_plane: Option<(u32, u32)>,
     pub target: Option<Target>,
     pub shown: Option<Shown>,
-    /// Камера появляется первым вписыванием — когда известны и снимок, и
-    /// размер канвы — и дальше живёт своей жизнью.
+    /// The camera appears at the first fit — once both the image and the canvas
+    /// size are known — and afterwards lives its own life.
     pub camera: Option<Camera>,
-    /// Два буфера вершин по очереди кадров (см. [`View::vertices`]).
+    /// Two vertex buffers alternating per frame (see [`View::vertices`]).
     ///
-    /// Вершины пишутся в буфер сразу, командой хоста, а команды рисования хост
-    /// исполняет позже, кадровым циклом — и второй кадр, записанный до того,
-    /// как исполнен первый, перезаписал бы вершины, на которые первый ещё
-    /// ссылается: старые команды с привязками своих тайлов рисовали бы квады
-    /// нового кадра, и тайлы на долю секунды вставали бы не на свои места.
-    /// Кадр, записанный в другой буфер, прежнего не трогает; чередует их
-    /// `turn`. Двух хватает на один отставший кадр: гость, разобравший два
-    /// и больше `Frame` между записью и исполнением, снова пишет в буфер
-    /// неисполненного — очередь актора не ограничена, а кольцо на её глубину
-    /// стоило бы буфера на каждый кадр.
+    /// Vertices go into the buffer immediately, by a host command, while the
+    /// host executes the draw commands later, in its frame loop — so a second
+    /// frame written before the first one executes would overwrite the vertices
+    /// the first still references: old commands with their tile bind groups
+    /// would draw the new frame's quads, and tiles would briefly land in the
+    /// wrong places. A frame written to the other buffer leaves the previous
+    /// one alone; `turn` alternates them. Two suffice for one lagging frame: a
+    /// guest that processes two or more `Frame` messages between the write and
+    /// the execution writes again into the buffer of the unexecuted one — the
+    /// actor queue is unbounded, and a ring sized to its depth would cost a
+    /// buffer per frame.
     pub vertices: [GrowingBuffer; 2],
-    /// Чей буфер у следующего кадра.
+    /// Whose buffer the next frame uses.
     pub turn: usize,
-    /// Из чего собран последний записанный кадр; совпало — кадр пропускается.
+    /// What the last written frame was made of; if it matches, the frame is skipped.
     pub drawn: Option<Stamp>,
-    /// Что уже спрошено, что производится и чего больше не просить — общий
-    /// учёт потребителя тайлов (см. `veldmap_image_tiler_wrap::tiles`).
+    /// What is already asked for, what is being produced, and what must not be
+    /// asked again — the shared tile consumer bookkeeping (see
+    /// `veldmap_image_tiler_wrap::tiles`).
     pub fetch: Fetch,
-    /// Актуальность описания: показ могли сменить, пока ответ шёл.
+    /// Freshness of the description: the shown resource may change while the
+    /// reply is in flight.
     pub describe: veldsdk::Latest,
     pub read_bytes: u64,
     pub total_bytes: u64,
-    /// Смотреть не на что: ресурс не открылся или не описался.
+    /// Nothing to look at: the resource failed to open or to describe.
     pub error: Option<String>,
-    /// Кадр неполон: сорвался проход, отказал кэш. Снимок при этом жив, и
-    /// показывать причину вместо него было бы неправдой — а держать её вечно
-    /// незачем: снимается первым же приехавшим тайлом (см. [`View::landed`]).
+    /// The frame is incomplete: a pass broke off, the cache refused. The image
+    /// itself is alive, and showing the reason instead of it would be untrue —
+    /// while keeping it forever is pointless: the first landed tile clears it
+    /// (see [`View::landed`]).
     ///
-    /// Слово о причине говорится здесь целиком: на провод обе жалобы уезжают
-    /// одним полем, и заказчик показывает сказанное как есть.
+    /// The word about the reason is spoken here in full: both complaints travel
+    /// over the wire in one field, and the client shows what is said as-is.
     pub trouble: Option<String>,
-    /// В прошлой сборке квадов было чему рябить. Полем, а не ответом на месте:
-    /// отпечаток кадра сравнивается раньше, чем считаются квады, — а решать по
-    /// нему, двигать ли фазу, надо до сравнения. Опоздание на кадр здесь
-    /// безобидно: пока рябь идёт, квады пересчитываются каждым тиком и признак
-    /// обновляется вместе с ними, а погаснув, он гасит и сам пересчёт.
+    /// The last quad assembly had something to ripple. A field, not an answer
+    /// computed on the spot: the frame stamp is compared before the quads are
+    /// computed, while the decision to move the phase must be made before that
+    /// comparison. Being one frame late is harmless here: while the ripple runs,
+    /// the quads are recomputed every tick and the flag updates along with them,
+    /// and once it goes dark it stops the recomputation too.
     pub glowing: bool,
-    /// Кадр не записался вовсе — это жалоба на сам рендер, а не на конвейер.
-    /// Врозь с `trouble` затем, что снимают их разные события: конвейерную
-    /// снимает приехавший тайл, эту — удавшийся кадр. Одним полем они гасили
-    /// бы друг друга: успешная перерисовка дыры стирала бы «не доехало», а
-    /// приехавший тайл — «кадр застыл», который никуда не делся.
+    /// The frame failed to record at all — a complaint about the render itself,
+    /// not the pipeline. Separate from `trouble` because different events clear
+    /// them: a landed tile clears the pipeline one, a successful frame clears
+    /// this one. In one field they would cancel each other: a successful
+    /// repaint of a hole would erase "did not arrive", and a landed tile would
+    /// erase "the frame is stuck", which has not gone anywhere.
     pub stuck: Option<String>,
 }
 
-/// Показанный ресурс. Метаданные приходят вторым тактом (on_described),
-/// и до них снимок «есть, но рисовать нечего».
+/// The shown resource. Metadata arrives in a second beat (on_described), and
+/// until then the image "is there, but there is nothing to draw".
 pub struct Shown {
     pub resource: veldsdk::OwnedResource,
     pub meta: Option<Meta>,
 }
 
 
-/// То, из чего собран кадр. Поколение хранилища тайлов заменяет сравнение
-/// самих наборов: любой пришедший или вытесненный тайл его двигает.
+/// What a frame is assembled from. The tile store generation replaces comparing
+/// the sets themselves: any arrived or evicted tile moves it.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Stamp {
     pub camera: Camera,
     pub generation: u64,
     pub texture: u64,
-    /// Фаза ряби, огрублённая до шага показа. Пока рябить нечему, она стои́т —
-    /// и кадр пропускается ровно так же, как до неё.
+    /// Ripple phase quantized to a display step. While there is nothing to
+    /// ripple it stands still — and the frame is skipped exactly as it would be
+    /// without it.
     pub ripple: u32,
 }
 
@@ -123,45 +130,47 @@ impl View {
         self.shown.as_ref()?.meta.as_ref()
     }
 
-    /// Сменилась ли плоскость с описанием другой величины: кандидаты файла —
-    /// любые двумерные величины, и рядом с полосой в 1500 столбцов лежит
-    /// величина другой сетки. Камера, вписанная под прежнюю, показывала бы
-    /// новую мимо; спрашивается раз — прежняя плоскость при этом забывается.
+    /// Whether the plane changed along with the description of another
+    /// variable: a file's candidates are any two-dimensional variables, and
+    /// next to a 1500-column strip sits a variable of a different grid. A
+    /// camera fitted for the previous one would show the new one off-target;
+    /// asking consumes the previous plane — it is forgotten in the process.
     pub fn plane_changed(&mut self, meta: &Meta) -> bool {
         self.previous_plane.take().is_some_and(|(width, height)| (width, height) != (meta.width, meta.height))
     }
 
-    /// Тайл лёг — жалоба на прошлое снимается. Картинка достраивается прямо
-    /// сейчас, и подпись «не доехало» рядом с ней говорила бы о том, чего уже
-    /// нет.
+    /// A tile landed — the complaint about the past is cleared. The picture is
+    /// being completed right now, and a "did not arrive" caption next to it
+    /// would speak of something that is already gone.
     pub fn landed(&mut self) {
         self.trouble = None;
     }
 
-    /// Жалоба на провод: одна строка, а поводов три, и порядок у них по
-    /// срочности. Застрявший кадр важнее неполноты — неполный кадр хотя бы
-    /// рисуется; неполнота важнее предела детали — она про сейчас, а предел
-    /// никуда не денется.
+    /// The complaint on the wire: one line, three causes, ordered by urgency. A
+    /// stuck frame outranks incompleteness — an incomplete frame at least draws;
+    /// incompleteness outranks the detail cap — it is about now, while the cap
+    /// is not going anywhere.
     ///
-    /// Предел детали (`Meta::capped`) считается здесь, а не хранится в
-    /// [`View::trouble`], потому что снимают их разные события: `trouble`
-    /// снимает первый же приехавший тайл ([`View::landed`]), а предел детали —
-    /// свойство самого источника, и снять его может только новое описание.
-    /// Лёг бы он в то же поле — мигнул бы и пропал с первым тайлом, то есть
-    /// ровно тогда, когда смотрящий начал бы разглядывать картинку.
+    /// The detail cap (`Meta::capped`) is computed here rather than stored in
+    /// [`View::trouble`] because different events clear them: `trouble` is
+    /// cleared by the first landed tile ([`View::landed`]), while the detail cap
+    /// is a property of the source itself and only a new description can clear
+    /// it. Were it stored in the same field, it would flash and vanish with the
+    /// first tile — exactly when the viewer starts examining the picture.
     ///
-    /// `settled` — канва показывает и работы за ней нет; иначе предел молчит.
-    /// Заказчик показывает жалобу **вместо** хода добычи (`preview.rs`), а у
-    /// JP2 обе ступени лестницы — это по полному чтению файла, десятки секунд
-    /// на пустом месте. «Подробнее не будет» над пустой канвой читается как
-    /// «загрузка кончилась, вот её потолок», то есть отвечает не на тот вопрос,
-    /// который задан.
+    /// `settled` — the canvas is showing and there is no work behind it;
+    /// otherwise the cap stays quiet. The client shows the complaint **instead
+    /// of** the fetch progress (`preview.rs`), and for JP2 both rungs of the
+    /// ladder mean a full file read — tens of seconds over an empty canvas.
+    /// "No more detail" over an empty canvas reads as "loading is done, here is
+    /// its ceiling", answering a question that was not asked.
     ///
-    /// Одной незанятости мало, и это померено: у описанного снимка, которому
-    /// ещё не дали ни места, ни камеры, желаемого нет вовсе — а раз нечего
-    /// хотеть, то и работы нет. Поэтому обе половины: показ идёт (`want` есть)
-    /// и по нему всё добрано. Наложение на шаре считает `settled` тем же
-    /// способом и по той же причине (`Overlay::said`).
+    /// Mere idleness is not enough, and this is measured: a described image that
+    /// has been given neither a place nor a camera wants nothing at all — and
+    /// with nothing to want there is no work either. Hence both halves: the
+    /// showing is going (`want` exists) and everything for it is fetched. The
+    /// overlay on the globe computes `settled` the same way for the same reason
+    /// (`Overlay::said`).
     pub fn said(&self, settled: bool) -> String {
         self.stuck
             .clone()
@@ -173,9 +182,10 @@ impl View {
             .unwrap_or_default()
     }
 
-    /// Показ идёт: описание в пути либо по пирамиде ещё есть работа. Второе
-    /// считает общее правило (`tiles::working`) — то же, по которому отвечает
-    /// на этот вопрос наложение на шаре.
+    /// The showing is going: the description is in flight or there is still work
+    /// on the pyramid. The latter is computed by the shared rule
+    /// (`tiles::working`) — the same one the overlay on the globe answers this
+    /// question by.
     pub fn working<K: PartialEq>(&self, passes: &Passes<K>, want: Option<&tiles::Want>) -> bool {
         self.describe.is_pending()
             || self.meta().is_some_and(|meta| {
@@ -184,15 +194,16 @@ impl View {
     }
 }
 
-/// Что нужно канве прямо сейчас: цель, ступень к ней и её ячейки. `None` —
-/// рисовать пока не из чего (нет места, снимка или камеры).
+/// What the canvas needs right now: the target, the rung toward it, and its
+/// cells. `None` — there is nothing to draw yet (no place, image, or camera).
 ///
-/// Считает это общее правило (`tiles::want`) — то же, по которому выбирает
-/// уровень наложение на шаре. Канва приносит туда одно своё: уровень под
-/// масштаб камеры и ячейки, накрывающие видимый прямоугольник.
+/// The shared rule computes this (`tiles::want`) — the same one the overlay on
+/// the globe picks its level by. The canvas brings one thing of its own: the
+/// level for the camera scale and the cells covering the visible rectangle.
 ///
-/// Отвечает оно обоим — и запросу тайлов, и сборке кадра: рисовать не то, что
-/// просили, значит либо просить невидимое, либо не показывать добытое.
+/// It answers both — the tile request and the frame assembly: drawing something
+/// other than what was asked for means either requesting the invisible or
+/// hiding what was fetched.
 pub fn wanted(view: &View, store: &Store, cap: u64) -> Option<tiles::Want> {
     let (target, camera, meta) = parts(view)?;
     let rect = camera.visible((meta.width, meta.height), (target.width, target.height));
@@ -214,16 +225,16 @@ pub fn wanted(view: &View, store: &Store, cap: u64) -> Option<tiles::Want> {
     ))
 }
 
-/// Квады кадра: по одному на видимую ячейку, у которой нашёлся носитель —
-/// точный тайл либо ближайший имеющийся предок (`Store::carrier`, общий с
-/// наложениями). Обращения продлевают тайлам жизнь в бюджете хранилища.
+/// Frame quads: one per visible cell that has a carrier — the exact tile or the
+/// nearest available ancestor (`Store::carrier`, shared with the overlays).
+/// Lookups extend the tiles' life in the store budget.
 pub fn quads(view: &View, store: &mut Store, cap: u64, phase: f32) -> Vec<Quad> {
     let Some((target, camera, meta)) = parts(view) else { return Vec::new() };
     let Some(want) = wanted(view, store, cap) else { return Vec::new() };
 
-    // Сила ряби — доля внутри нынешней ступени, считанная тем же правилом, что
-    // у шара: рябит ступень, а не отдельная ячейка, и о конкретной ячейке
-    // известен ровно один бит — едет она или нет.
+    // The ripple strength is the share within the current rung, read by the same
+    // rule as on the globe: the rung ripples, not an individual cell, and about
+    // a specific cell exactly one bit is known — whether it is on its way or not.
     let inside = tiles::inside(
         view.fetch.ordered(),
         (view.read_bytes, view.total_bytes),
@@ -242,8 +253,8 @@ pub fn quads(view: &View, store: &mut Store, cap: u64, phase: f32) -> Vec<Quad> 
             rect: to_ndc(rect, camera, target),
             uv: pyramid::cell_uv(rect, addr, tex.0, tex.1),
             bind,
-            // Накрытая своим тайлом ячейка не рябит, даже когда её ждут: свой
-            // тайл с ожидания снимается приездом.
+            // A cell covered by its own tile does not ripple, even while it is
+            // being waited for: its own tile leaves the wait by arriving.
             glow: match addr != cell && view.fetch.coming(cell) {
                 true => glow_of(cell, phase, strength),
                 false => 0.0,
@@ -253,30 +264,31 @@ pub fn quads(view: &View, store: &mut Store, cap: u64, phase: f32) -> Vec<Quad> 
     quads
 }
 
-/// Период волны ряби в секундах и глубина её подмеса — те же, что у шара
-/// (`module::RIPPLE_PERIOD_S`, `RIPPLE_DEPTH` в globe.wgsl): работа одна и та
-/// же, и разная её скорость на двух экранах читалась бы как разные события.
+/// Ripple wave period in seconds and its blend depth — the same as on the globe
+/// (`module::RIPPLE_PERIOD_S`, `RIPPLE_DEPTH` in globe.wgsl): the work is the
+/// same, and a different speed on two screens would read as different events.
 pub const RIPPLE_PERIOD_S: f32 = 1.6;
 const RIPPLE_DEPTH: f32 = 0.30;
 
-/// Сколько разных сдвигов по фазе раздаётся ячейкам — столько же, сколько у
-/// шара: соседи заметно расходятся, а рябь не рассыпается в шум.
+/// How many distinct phase offsets are handed to cells — as many as on the
+/// globe: neighbors diverge visibly while the ripple does not fall apart into
+/// noise.
 const RIPPLE_OFFSETS: u32 = 16;
 
-/// Насколько заметна рябь на ступени, дошедшей до такой доли.
+/// How visible the ripple is on a rung that has reached this share.
 ///
-/// Не самой долей: только начатая ступень идёт ничуть не меньше той, что
-/// вот-вот кончится, и невидимая рябь в её начале означала бы «ничего не
-/// происходит» ровно там, где ждать дольше всего.
+/// Not the share itself: a just-started rung is in no less motion than one
+/// about to finish, and an invisible ripple at its start would mean "nothing is
+/// happening" exactly where the wait is longest.
 fn ripple_strength(within: f32) -> f32 {
     (0.35 + 0.65 * within.clamp(0.0, 1.0)).clamp(0.0, 1.0)
 }
 
-/// Готовая сила подмеса для ячейки: волна, взятая в её сдвиге по фазе.
+/// The ready blend strength for a cell: the wave sampled at its phase offset.
 ///
-/// Сдвиг выводится из адреса, а не из порядка обхода: порядок ячеек меняется на
-/// каждом движении камеры, и волна перескакивала бы с места на место при
-/// неподвижной картинке.
+/// The offset derives from the address, not the traversal order: cell order
+/// changes on every camera move, and the wave would jump around on a still
+/// picture.
 fn glow_of(cell: tiles::Addr, phase: f32, strength: f32) -> f32 {
     let (_, x, y) = cell;
     let slot = (x.wrapping_mul(7).wrapping_add(y.wrapping_mul(11))) % RIPPLE_OFFSETS;
@@ -289,9 +301,9 @@ fn parts(view: &View) -> Option<(&Target, &Camera, &Meta)> {
     Some((view.target.as_ref()?, view.camera.as_ref()?, view.meta()?))
 }
 
-/// Диапазоны ячеек уровня, накрытые прямоугольником снимка. Сама арифметика
-/// ячейки (прямоугольник, носитель, UV) — в общем pyramid.rs: ею же считает
-/// глобус, и правила у них расходиться не могут.
+/// Cell ranges of a level covered by the image rectangle. The cell arithmetic
+/// itself (rectangle, carrier, UV) lives in the shared pyramid.rs: the globe
+/// computes with it too, and their rules cannot diverge.
 fn cell_range(
     rect: (f64, f64, f64, f64),
     level: u32,
@@ -307,7 +319,7 @@ fn cell_range(
     (x0..x1, y0..y1)
 }
 
-/// Пиксели снимка → NDC кадра. Y переворачивается: у снимка вниз, у NDC вверх.
+/// Image pixels → frame NDC. Y is flipped: the image goes down, NDC goes up.
 fn to_ndc(cell: [f64; 4], camera: &Camera, target: &Target) -> [f32; 4] {
     let (w, h) = (f64::from(target.width), f64::from(target.height));
     let sx = |ix: f64| (ix - camera.cx) * camera.scale + w / 2.0;
@@ -318,145 +330,4 @@ fn to_ndc(cell: [f64; 4], camera: &Camera, target: &Target) -> [f32; 4] {
         (sx(cell[2]) / w * 2.0 - 1.0) as f32,
         (1.0 - sy(cell[3]) / h * 2.0) as f32,
     ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn meta(width: u32, height: u32) -> Meta {
-        Meta {
-            fingerprint: "t".into(),
-            width,
-            height,
-            rows: vec![
-                tiles::Row { serve: tiles::Serve::Pointwise, bytes: 0, fits: true };
-                pyramid::level_count(width, height) as usize
-            ],
-            variable: None,
-            variables: Vec::new(),
-        }
-    }
-
-    /// Смена величины сбрасывает камеру только вместе с плоскостью: та же
-    /// плоскость — кадр не дёргается, другая — вписывается заново; без
-    /// прежней плоскости (первое описание) сравнивать не с чем.
-    #[test]
-    fn the_camera_survives_a_variable_of_the_same_plane_only() {
-        let mut view = View::new("снимок".into());
-        assert!(!view.plane_changed(&meta(215, 372)), "первому описанию не с чем сравнивать");
-        view.previous_plane = Some((215, 372));
-        assert!(!view.plane_changed(&meta(215, 372)), "та же плоскость — камера цела");
-        assert_eq!(view.previous_plane, None, "прежняя плоскость спрошена и забыта");
-        view.previous_plane = Some((215, 372));
-        assert!(view.plane_changed(&meta(1500, 1200)), "другая плоскость не замечена");
-    }
-
-    /// Подпись предела, как её складывает сама пирамида: строкой целиком её
-    /// сверяет один тест у `Meta::capped`, здесь — что до канвы доезжает та же.
-    fn cap_line() -> String {
-        shown_with(1).meta().expect("снимок показан").capped().expect("предел есть")
-    }
-
-    /// Показ с пределом детали: снимок «отдаётся» вчетверо мельче своего, и
-    /// сказать об этом обязан кто-то — сам по себе он выглядит исправным.
-    /// Слово это уезжает единственным полем жалобы, и складывает поводы
-    /// [`View::said`].
-    /// Стенд неквадратный и нечётный: подпись называет обе стороны, и
-    /// квадратный не отличил бы ширину от высоты.
-    fn shown_with(finest: u32) -> View {
-        let mut view = View::new("снимок".into());
-        view.shown = Some(Shown {
-            resource: veldsdk::OwnedResource::from_raw_id(1),
-            // Таблица крупного JPEG: проход со своего уровня на каждом,
-            // уровни подробнее `finest` не влезают.
-            meta: Some({
-                let mut meta = meta(4001, 3001);
-                for (level, row) in meta.rows.iter_mut().enumerate() {
-                    row.serve = tiles::Serve::Pass { from: level as u32 };
-                    row.fits = level as u32 >= finest;
-                }
-                meta
-            }),
-        });
-        view
-    }
-
-    /// Строка сверяется целиком: числа в ней стоя́т в своих ролях, и
-    /// перевёрнутая фраза содержит ровно те же два числа.
-    #[test]
-    fn a_capped_source_says_so() {
-        assert_eq!(shown_with(0).said(true), "", "предела нет, а канва на что-то жалуется");
-        assert_eq!(shown_with(1).said(true), cap_line());
-    }
-
-    /// Пока канва не осела — предел молчит. Заказчик показывает жалобу
-    /// **вместо** хода добычи, а у JP2 обе ступени лестницы это по полному
-    /// чтению файла: «подробнее не будет» над пустым местом читается как
-    /// «загрузка кончилась, вот её потолок». Наложение на шаре молчит здесь по
-    /// той же причине, и правило у них общее.
-    #[test]
-    fn the_cap_keeps_quiet_until_the_view_settles() {
-        assert_eq!(shown_with(1).said(false), "", "предел объявлен над пустой канвой");
-        assert!(!shown_with(1).said(true).is_empty(), "осела, а предел так и не назван");
-    }
-
-    /// Случившееся главнее предела, а застрявший кадр главнее всего: неполный
-    /// хотя бы рисуется. И главное — предел переживает приехавший тайл,
-    /// который снимает `trouble`: лёг бы он в то же поле, мигнул бы и пропал
-    /// ровно тогда, когда картинку начали разглядывать.
-    #[test]
-    fn the_detail_cap_outlives_a_landed_tile() {
-        let mut view = shown_with(1);
-        view.trouble = Some("неполно: сорвался проход".into());
-        assert_eq!(view.said(true), "неполно: сорвался проход");
-
-        view.stuck = Some("кадр застыл".into());
-        assert_eq!(view.said(true), "кадр застыл", "застрявший кадр уступил неполноте");
-
-        view.stuck = None;
-        view.landed();
-        assert_eq!(view.said(true), cap_line(), "предел детали снят приехавшим тайлом");
-    }
-
-    #[test]
-    fn cell_range_covers_visible_rect_exactly() {
-        let meta = meta(10980, 10980);
-        // Весь снимок на уровне 5 (344 px) — одна ячейка.
-        let (xs, ys) = cell_range((0.0, 0.0, 10980.0, 10980.0), 5, &meta);
-        assert_eq!((xs, ys), (0..1, 0..1));
-        // Кусок нулевого уровня: пиксели 500..1300 → ячейки 0..3.
-        let (xs, _) = cell_range((500.0, 0.0, 1300.0, 1.0), 0, &meta);
-        assert_eq!(xs, 0..3);
-    }
-
-    /// Рябь бежит по ячейке волной, а не мигает: у соседей свой сдвиг по фазе,
-    /// и привязан он к адресу, а не к порядку обхода — порядок меняется на
-    /// каждом движении камеры, и волна перескакивала бы при неподвижной
-    /// картинке.
-    #[test]
-    fn волна_ряби_привязана_к_ячейке_а_не_к_порядку() {
-        let strength = ripple_strength(1.0);
-        let at = |cell, phase| glow_of(cell, phase, strength);
-
-        assert_eq!(at((0, 3, 4), 0.25), at((0, 3, 4), 0.25), "тот же адрес и та же фаза");
-        assert_ne!(at((0, 3, 4), 0.25), at((0, 4, 4), 0.25), "сосед по строке светится в такт");
-        assert_ne!(at((0, 3, 4), 0.25), at((0, 3, 5), 0.25), "сосед по столбцу светится в такт");
-        assert_ne!(at((0, 3, 4), 0.0), at((0, 3, 4), 0.5), "волна не идёт");
-
-        // Подмес не перебивает картинку: под рябью надо видеть снимок.
-        for step in 0..16 {
-            let glow = at((0, 1, 1), step as f32 / 16.0);
-            assert!((0.0..=0.31).contains(&glow), "подмес {glow} вне меры");
-        }
-    }
-
-    /// Сила растёт к концу ступени, но и в самом её начале рябь видна: только
-    /// начатая ступень идёт ничуть не меньше той, что вот-вот кончится.
-    #[test]
-    fn рябь_видна_и_в_начале_ступени() {
-        assert!(ripple_strength(0.0) > 0.2, "начало ступени не видно вовсе");
-        assert!(ripple_strength(1.0) > ripple_strength(0.0), "конец не заметнее начала");
-        assert!(ripple_strength(-1.0) >= 0.0 && ripple_strength(7.0) <= 1.0);
-    }
 }

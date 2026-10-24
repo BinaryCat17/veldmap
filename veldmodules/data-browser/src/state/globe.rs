@@ -1,8 +1,8 @@
-//! Что относится к шару: вкладка, показывающая его, и то, что на нём очерчено.
+//! What belongs to the globe: the tab that shows it, and what is outlined on it.
 //!
-//! Камеры здесь нет: она принадлежит тому, кто рисует. Здесь ровно то, чего он
-//! знать не может, — место, выделенное под него, идущий жест и связь контуров с
-//! теми снимками, из которых они взялись.
+//! No camera here: it belongs to whoever draws. Here is exactly what that one
+//! cannot know — the slot allocated for it, the gesture in progress, and the link
+//! of outlines to the snapshots they came from.
 
 use veldsdk::surface::Delegated;
 
@@ -10,37 +10,41 @@ use crate::proto::data_provider::Ring;
 
 #[derive(Default)]
 pub struct GlobeState {
-    /// Текстура под вид: наша, отдана глобусу на запись и ui-service на чтение.
-    /// Освобождается вместе с вкладкой — владеет ею `Delegated`.
+    /// The texture under the view: ours, given to the globe for writing and to
+    /// ui-service for reading. Released together with the tab — `Delegated` owns
+    /// it.
     pub surface: Option<Delegated>,
-    /// Жест с зажатой кнопкой. `None` — кнопка не нажата, и считать не от чего.
+    /// A gesture with the button held. `None` — the button is not pressed, and
+    /// there is nothing to track.
     pub dragging: Option<Drag>,
 }
 
 pub struct Drag {
-    /// Где был указатель, когда мы в прошлый раз посчитали смещение.
+    /// Where the pointer was when we last computed the offset.
     pub last: (f32, f32),
-    /// Сколько он прошёл с нажатия, в пикселях. По нему щелчок отличается от
-    /// протаскивания — иначе дрожь руки при отпускании выбирала бы снимок.
+    /// How far it has travelled since the press, in pixels. By it a click is
+    /// distinguished from a drag — otherwise a hand tremor on release would select
+    /// a snapshot.
     pub travelled: f32,
 }
 
-/// Снимок, очерченный на шаре.
+/// A snapshot outlined on the globe.
 ///
-/// Набор их собирается из просьб (`State::outlines`, см. handlers::outline) и
-/// живёт в состоянии модуля, а не вкладки: шар один, и очерченное на нём —
-/// свойство приложения. Здесь лежит уже нарисованное: просьба, на которую
-/// каталог ещё не ответил, сюда не попадает.
+/// The set of them is assembled from requests (`State::outlines`, see
+/// handlers::outline) and lives in the module state, not the tab's: the globe is
+/// one, and what is outlined on it is an application-wide property. What is
+/// already drawn lies here: a request the catalog has not answered yet does not
+/// make it in.
 pub struct Outlined {
-    /// Ключ провайдера — им снимок и просят очертить, и им же его узнаёт щелчок
-    /// по шару.
+    /// The provider key — the snapshot is requested to be outlined by it, and a
+    /// click on the globe recognizes it by the same key.
     pub key: String,
-    /// Чем подписать его в полосе под шаром.
+    /// What to sign it with in the bar under the globe.
     pub label: String,
-    /// Лежит ли снимок в хранилище каталогом: по нему выбирается, каким
-    /// способом его смотреть (см. `handlers::preview`).
+    /// Whether the snapshot lies in the catalog's storage: it selects the way to
+    /// view it (see `handlers::preview`).
     pub folder: bool,
-    /// Геометрия съёмки. Колец бывает несколько — снимок через 180-й меридиан
-    /// каталог отдаёт разрезанным.
+    /// The acquisition geometry. There may be several rings — the catalog gives
+    /// out a snapshot across the 180th meridian cut into pieces.
     pub rings: Vec<Ring>,
 }

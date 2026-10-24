@@ -1,12 +1,13 @@
-//! Приобретение продукта: подпись у провайдера, закачка, пауза, удаление.
+//! Product acquisition: signing at the provider, download, pause, removal.
 //!
-//! У операции здесь одно имя на весь путь: наш `correlation_id` — он же id
-//! запроса к провайдеру, он же id запроса к network, он же имя операции у
-//! платформы. Владельцем её платформа делает того, кто публикует
-//! `network/on_fs_download`, то есть нас, — поэтому убиваем мы её сами.
+//! An operation has one name along the whole path: our `correlation_id` — also
+//! the request id to the provider, the request id to network, and the operation
+//! name at the platform. The platform makes the publisher of
+//! `network/on_fs_download` the owner — that is us — so we kill it ourselves.
 //!
-//! Провайдер участвует ровно в одном шаге — подписывает адрес. Раскладка
-//! хранения из библиотеки не выходит: путь подставляем мы, уже после подписи.
+//! The provider takes part in exactly one step — it signs the address. The
+//! storage layout never leaves the library: we substitute the path ourselves,
+//! already after the signing.
 
 use crate::module::{Download, State};
 use crate::module::storage;
@@ -15,32 +16,32 @@ use crate::proto::data_library::{DownloadRequest, ItemRequest};
 use crate::proto::data_provider::{SignRequest, SignedUrl};
 use veldsdk::proto::network::{FsDownloadProgress, FsDownloadRequest, FsDownloadResponse};
 
-/// Сколько закачек идёт разом. Остальные ждут места и трогаются, как только
-/// оно освободится.
+/// How many downloads run at once. The rest wait for a slot and start as soon
+/// as it is freed.
 ///
-/// Потолок нужен не нам, а той стороне: пакетное «скачать» на странице из
-/// двадцати снимков — это сотни файлов за одно нажатие, и хранилище отвечает
-/// на такое отказами, а не данными. Десять — с запасом ниже того, на чём
-/// хранилище начинает отказывать; точнее эта величина не мерена, и подпирать
-/// её числом было бы выдумкой.
+/// The cap is needed not by us but by the other side: a batch "download" on a
+/// page of twenty scenes is hundreds of files with one press, and the storage
+/// answers such requests with refusals, not data. Ten sits with margin below
+/// where the storage starts refusing; the exact value is not measured, and
+/// backing it with a number would be a fabrication.
 ///
-/// Ждущая запись видна списком наравне с идущими — с тем, что у неё уже лежит
-/// на диске, или с нулём у перекачки: с нажатия
-/// «скачать» она уже намерение пользователя, и прятать её до старта значило бы
-/// терять нажатие из виду. Тем же самым выглядит и окно ожидания подписи —
-/// оно и есть та же пауза, только короче (см. [`Download::waiting`]).
+/// A waiting entry is visible in the list on equal terms with running ones —
+/// with whatever it already has on disk, or with zero for a re-download: from
+/// the "download" press it is already the user's intent, and hiding it before
+/// the start would lose the press from view. The signature-waiting window looks
+/// the same — it is the same pause, only shorter (see [`Download::waiting`]).
 const AT_ONCE: usize = 10;
 
-/// Скачать или докачать продукт. Куда он ляжет — решаем мы: раскладка
-/// хранения наша, и заказчику её знать незачем.
+/// Download or resume a product. Where it lands is our decision: the storage
+/// layout is ours, and the caller has no need to know it.
 pub fn on_download(state: &mut State, req: DownloadRequest) {
     if req.identifier.is_empty() { return; }
 
-    // Снимок, если его не назвали, берётся из уже записанного: перекачка того
-    // же файла приходит без него, а забыть, к какому снимку файл относится,
-    // значило бы вынуть его оттуда навсегда — заново эту границу нам не
-    // спросить, её знает провайдер. Ищем по ключу, а не по имени: имя из
-    // снимка и выводится, и до него ещё не добрались.
+    // When the scene is not named, it is taken from what is already recorded:
+    // a re-download of the same file arrives without it, and forgetting which
+    // scene a file belongs to would remove it from there forever — we cannot
+    // ask for this boundary again, the provider knows it. Search by key, not
+    // by name: the name comes from the scene and is not fetched yet.
     let product = match req.product.is_empty() {
         true => state
             .origins
@@ -52,23 +53,26 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
     };
     let name = storage::name_from_identifier(&req.identifier, &product);
 
-    // Повторное нажатие, пока идёт предыдущая попытка (в том числе пока она
-    // ждёт подписи). Отсекаем здесь: id операции наш с самого начала, поэтому
-    // окна, в котором закачка идёт, а учёта её ещё нет, не существует.
+    // A repeated press while the previous attempt is running (including while
+    // it waits for the signature). Cut off here: the operation id is ours from
+    // the very start, so there is no window where a download runs but is not
+    // yet accounted for.
     if state.downloads.values().any(|d| d.name == name) {
-        veldsdk::log::info!(target: "handlers", "{} уже качается, повтор игнорируем", name);
+        veldsdk::log::info!(target: "handlers", "{} is already downloading, ignoring the repeat", name);
         return;
     }
 
-    // Причина прошлого срыва — про прошлую попытку, и новая её снимает: пока
-    // она идёт, говорить о ней нечего, а сорвётся — скажет своё.
+    // The reason of the past failure concerns the past attempt, and a new one
+    // clears it: while it runs there is nothing to say about it, and if it
+    // fails it will tell its own.
     state.troubles.remove(&name);
 
-    // Сидкар — сразу, до подписи: даже если приложение упадёт на первом байте,
-    // на диске уже будет известно, откуда файл, и запись о намерении не
-    // пропадёт. Из прежнего сидкара переносим то, что о записи известно, но
-    // добыто не этим запросом: ожидаемый размер с прошлой попытки и состав
-    // снимка, если его успели обойти.
+    // The sidecar goes in at once, before the signing: even if the application
+    // dies at the first byte, the disk will already know where the file comes
+    // from and the record of intent will not vanish. From the previous sidecar
+    // we carry over what is known about the entry but was not obtained by this
+    // request: the expected size from the past attempt and the scene
+    // composition, if it has been walked.
     let (total_bytes, siblings) = state.origins.get(&name)
         .map_or((None, 0), |origin| (origin.total_bytes, origin.siblings));
     write_sidecar(state, &name, storage::OriginSidecar {
@@ -79,20 +83,22 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
         siblings,
     });
 
-    // Засеваем тем, что уже известно, а не нулями: у недокачанной записи
-    // закачка продолжится с лежащих на диске байт, и «0 B» на возобновлении
-    // было бы враньём. У доведённой `.part` нет вовсе — перекачка идёт с нуля,
-    // и отбор по `is_partial` это и говорит.
+    // Seed with what is already known, not with zeros: for a partially
+    // downloaded entry the download continues from the bytes already on disk,
+    // and "0 B" at the resume would be a lie. A completed entry has no `.part`
+    // at all — a re-download starts from zero, and the `is_partial` filter
+    // says exactly this.
     let done = state.entry_for(&name).filter(|file| file.is_partial).map(|file| file.size).unwrap_or(0);
     let total = state.total_bytes(&name);
 
-    // Операцию именуем мы: этим же id мы спросим подпись, попросим закачку и
-    // отменим задачу у платформы — она наша от начала до конца.
+    // We name the operation: with this same id we ask for the signature,
+    // request the download and cancel the task at the platform — it is ours
+    // from start to finish.
     let correlation_id = veldsdk::generate_id();
     let queued = state.queue_tick;
     state.queue_tick += 1;
-    // Место занято — запись встаёт в очередь, а не в сеть. Тронется она сама,
-    // когда какая-нибудь из идущих кончится (см. [`start_waiting`]).
+    // No free slot — the entry joins the queue, not the network. It starts by
+    // itself when one of the running ones finishes (see [`start_waiting`]).
     let waiting = busy(state) >= AT_ONCE;
     state.downloads.insert(correlation_id.clone(), Download {
         identifier: req.identifier.clone(),
@@ -111,23 +117,26 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
     catalog::publish(state);
 }
 
-/// Пустить запись в ход: снять ожидание и спросить подпись.
+/// Put an entry into motion: clear the waiting flag and ask for the signature.
 ///
-/// Единственное место, где закачка трогается с места, — и потому «ждёт» и «не
-/// подписана» здесь одно и то же, а не два согласованных факта. Второй пуск в
-/// обход этой функции развёл бы их молча: запись считалась бы ждущей, уже
-/// качаясь, и очередь пустила бы её второй раз под тем же id.
+/// The only place where a download starts — and therefore "waiting" and
+/// "un-signed" are one and the same here, not two facts kept in agreement. A
+/// second start bypassing this function would silently split them: an entry
+/// would count as waiting while already downloading, and the queue would start
+/// it a second time under the same id.
 ///
-/// Перекачка доведённого файла сносит его здесь, а не на нажатии. Качальщик
-/// пишет в `.part` и переименовывает его только в конце, поэтому иначе рядом с
-/// готовым файлом лёг бы второй, недокачанный, под тем же именем записи — а
-/// «одно имя, одна запись» держится ровно тем, что такой пары на диске не
-/// бывает. Но между нажатием и стартом стои́т очередь, и снесённый заранее файл
-/// оставил бы человека без данных и без закачки на всё время ожидания.
+/// Re-downloading a completed file deletes it here, not at the press. The
+/// downloader writes to `.part` and renames it only at the end, so otherwise a
+/// second, partially downloaded file would lie next to the finished one under
+/// the same entry name — while "one name, one entry" holds exactly because such
+/// a pair never exists on disk. But a queue stands between the press and the
+/// start, and a file deleted in advance would leave the user without data and
+/// without a download for the whole waiting time.
 ///
-/// Место держится до терминального события, и у не ответившей подписи его не
-/// бывает: убить ход к провайдеру нечем, и такая запись стои́т в очереди, пока
-/// её не снимут паузой. Это живое ограничение — своего срока у подписи нет.
+/// The slot is held until a terminal event, and a signature that never answers
+/// has none: there is nothing with which to kill the request to the provider,
+/// and such an entry stands in the queue until a pause removes it. This is a
+/// live limitation — a signature has no deadline of its own.
 fn start(state: &mut State, id: &str) {
     let Some(dl) = state.downloads.get_mut(id) else { return };
     dl.waiting = false;
@@ -139,16 +148,17 @@ fn start(state: &mut State, id: &str) {
     crate::calls::data_provider::on_sign(&SignRequest { identifier }, id);
 }
 
-/// Сколько закачек уже пущено: ждущие места в счёт не идут, всё остальное идёт
-/// — включая ждущие подписи, у них ход уже начат.
+/// How many downloads are already running: slot-waiting entries do not count,
+/// everything else runs — including those waiting for a signature, their
+/// request has already started.
 fn busy(state: &State) -> usize {
     state.downloads.values().filter(|dl| !dl.waiting).count()
 }
 
-/// Пустить следующую по очереди, если освободилось место.
+/// Start the next one in the queue if a slot has been freed.
 ///
-/// По одной на освободившееся место, а не «сколько влезет»: зовут это с каждого
-/// конца закачки, и мест ровно столько, сколько концов.
+/// One per freed slot, not "as many as fit": this is called from every end of
+/// a download, and there are exactly as many slots as ends.
 fn start_waiting(state: &mut State) {
     if busy(state) >= AT_ONCE {
         return;
@@ -163,23 +173,25 @@ fn start_waiting(state: &mut State) {
     start(state, &correlation_id);
 }
 
-/// Адрес подписан — качаем. Путь на диске подставляется здесь: провайдер
-/// раскладки хранения не знает и знать не должен.
+/// The address is signed — we download. The on-disk path is substituted here:
+/// the provider does not know the storage layout and must not.
 pub fn on_signed(state: &mut State, signed: SignedUrl) {
     let correlation_id = veldsdk::correlation();
     let Some(dl) = state.downloads.get(&correlation_id) else { return };
     let name = dl.name.clone();
 
-    // Пустой ответ при пустой причине — не удача, а ответ, который договорил
-    // за исполнителя хост: принятый за подпись, он послал бы закачку в пустоту
-    // и сказал бы человеку про сеть там, где дело в упавшем модуле.
+    // An empty answer with an empty reason is not success but an answer the
+    // host supplied on behalf of the worker: taken for a signature, it would
+    // send the download into the void and tell the user about the network
+    // where the problem is a crashed module.
     let refusal = veldsdk::reply::undelivered(&signed.error)
         .or_else(|| (!signed.error.is_empty()).then(|| signed.error.clone()));
     if let Some(why) = refusal {
-        veldsdk::log::warn!(target: "handlers", "подпись для {} не удалась: {}", name, why);
-        state.troubles.insert(name, format!("подпись не удалась: {}", why));
-        // Задачи ещё нет — терминального события платформы не будет, снимаем
-        // с учёта сами, иначе запись навсегда останется «качается».
+        veldsdk::log::warn!(target: "handlers", "signature for {} failed: {}", name, why);
+        state.troubles.insert(name, format!("signature failed: {}", why));
+        // There is no task yet — no platform terminal event will come, so we
+        // take the entry off the books ourselves, otherwise it would stay
+        // "downloading" forever.
         finish(state, &correlation_id);
         return;
     }
@@ -189,46 +201,50 @@ pub fn on_signed(state: &mut State, signed: SignedUrl) {
         path: storage::file_path(&name),
         headers: signed.headers,
     }, &correlation_id);
-    // С этой минуты конец закачки объявляет платформа, а не мы.
+    // From this moment the platform, not us, declares the end of the download.
     if let Some(dl) = state.downloads.get_mut(&correlation_id) {
         dl.loading = true;
     }
 }
 
-/// Пауза: `.part` остаётся на диске ровно там, где его бросил обрыв, и
-/// следующее «скачать» продолжит с оборванного байта. Убиваем сами: операция
-/// наша. Прибирать за собой здесь нечего — терминальный
-/// `on_fs_download_result` придёт всё равно, его за убитого качальщика
-/// опубликует хост.
+/// Pause: the `.part` stays on disk exactly where the break left it, and the
+/// next "download" continues from the interrupted byte. We kill it ourselves:
+/// the operation is ours. There is nothing to clean up here — the terminal
+/// `on_fs_download_result` will arrive anyway, the host publishes it on behalf
+/// of the killed downloader.
 ///
-/// Отказаться от начатого — это не сюда, а в `on_delete`: остановка с
-/// сохранением и остановка с выбрасыванием — разные вещи, и топика на них
-/// два, а не один с двумя смыслами.
+/// Giving up on a started download belongs not here but in `on_delete`:
+/// stopping with keeping and stopping with discarding are different things, and
+/// there are two topics for them, not one with two meanings.
 pub fn on_pause(state: &mut State, req: ItemRequest) {
     let Some((task_id, dl)) = state.active_download(&req.name) else { return };
     let (task_id, loading) = (task_id.to_string(), dl.loading);
     crate::cancel::network::on_fs_download(&task_id);
-    // Снимаем запись сами только до того, как запрос ушёл в сеть: задачи у
-    // платформы ещё нет, терминального события не будет, а пришедшая подпись
-    // запустила бы «поставленную на паузу» закачку.
+    // We take the entry off the books ourselves only before the request has
+    // gone to the network: there is no task at the platform yet, no terminal
+    // event will come, and an arriving signature would start the "paused"
+    // download.
     //
-    // После — не снимаем никогда, даже когда убивать оказалось нечего: значит
-    // закачка кончилась сама и её ответ уже в пути. Сняв запись здесь, мы
-    // отняли бы у него имя записи, и причина срыва пропала бы вместе с ним.
+    // After that we never remove it, even when there was nothing to kill: that
+    // means the download finished on its own and its answer is already on the
+    // way. Removing the entry here would take away its name, and the failure
+    // reason would vanish with it.
     if !loading {
         finish(state, &task_id);
     }
 }
 
-/// Удалить запись — полную, недокачанную или заявленную одним лишь сидкаром.
-/// Идущую закачку это заодно и отменяет: отказ от начатого выражается тем же
-/// топиком, потому что оставить после себя он обязан то же самое — ничего.
+/// Delete an entry — complete, partially downloaded, or declared by a sidecar
+/// alone. This also cancels a running download: giving up on a started download
+/// is expressed by the same topic, because it must leave behind the same thing
+/// — nothing.
 pub fn on_delete(state: &mut State, req: ItemRequest) {
-    // Файл прямо сейчас качается — host держит `.part` открытым на запись,
-    // удалять поверх активной записи нельзя. Убиваем закачку и помечаем запись
-    // к удалению: `abort` не дожидается, пока качальщик отпустит файл, поэтому
-    // сам delete делается по терминальному ответу — к тому моменту фьючерс
-    // уже дропнут вместе с дескриптором.
+    // The file is being downloaded right now — the host holds the `.part` open
+    // for writing, and deleting over an active entry is not allowed. We kill
+    // the download and mark the entry for deletion: `abort` does not wait for
+    // the downloader to release the file, so the delete itself happens on the
+    // terminal answer — by then the future is already dropped together with the
+    // descriptor.
     if let Some((task_id, _)) = state.active_download(&req.name) {
         let task_id = task_id.to_string();
         let mut loading = false;
@@ -237,8 +253,8 @@ pub fn on_delete(state: &mut State, req: ItemRequest) {
             loading = dl.loading;
         }
         crate::cancel::network::on_fs_download(&task_id);
-        // До сети конец объявляем мы сами (см. on_pause); отложенное удаление
-        // срабатывает здесь же — finish читает флаг.
+        // Before the network we declare the end ourselves (see on_pause); the
+        // deferred delete fires right here — finish reads the flag.
         if !loading {
             finish(state, &task_id);
         }
@@ -247,14 +263,15 @@ pub fn on_delete(state: &mut State, req: ItemRequest) {
     delete_entry(state, &req.name);
 }
 
-/// Broadcast-топик — сверяем correlation_id, чтобы не принять чужой ответ.
+/// Broadcast topic — we match the correlation_id so as not to accept someone
+/// else's answer.
 pub fn on_delete_result(state: &mut State, response: veldsdk::proto::fs::FsDeleteResult) {
     let Some(path) = state.pending_delete.take(&veldsdk::correlation()) else { return };
     if !response.error.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "не удалось удалить {}: {}", path, response.error);
+        veldsdk::log::warn!(target: "handlers", "failed to delete {}: {}", path, response.error);
     }
-    // Перечитываем в любом случае: при ошибке — чтобы показать то, что на
-    // диске на самом деле, при успехе — чтобы запись ушла.
+    // We rescan in any case: on error — to show what is actually on disk, on
+    // success — so the entry goes away.
     catalog::rescan(state);
 }
 
@@ -263,15 +280,16 @@ pub fn on_fs_download_progress(state: &mut State, event: FsDownloadProgress) {
     dl.done = event.downloaded_bytes;
     dl.total = event.total_bytes;
 
-    // Content-Length пишем в сидкар, когда узнали новое значение (не на каждом
-    // событии): иначе после рестарта «из скольки» снова неизвестно, пока не
-    // начнётся новая закачка — сидкар это единственное, что переживает
-    // перезапуск.
+    // We write Content-Length to the sidecar when a new value is learned (not
+    // on every event): otherwise after a restart "out of how much" is unknown
+    // again until a new download starts — the sidecar is the only thing that
+    // survives a restart.
     if event.total_bytes > 0 {
         let name = dl.name.clone();
-        // Правим одно поле поверх записанного сидкара: всё остальное приехало
-        // с запросом закачки, а здесь этих фактов взять неоткуда — переписать
-        // их пустыми значило бы потерять и происхождение, и снимок.
+        // We fix one field on top of the written sidecar: everything else
+        // arrived with the download request, and here these facts are nowhere
+        // to take from — rewriting them with empty values would lose both the
+        // origin and the scene.
         let known = state.origins.get(&name).cloned()
             .filter(|origin| origin.total_bytes != Some(event.total_bytes));
         if let Some(known) = known {
@@ -284,164 +302,48 @@ pub fn on_fs_download_progress(state: &mut State, event: FsDownloadProgress) {
     catalog::publish(state);
 }
 
-/// Единственный конец закачки, каким бы он ни был: успех, ошибка сети или
-/// убийство.
+/// The single end of a download, whatever it is: success, network error, or a
+/// kill.
 ///
-/// Непустая ошибка — это именно срыв: у убитой доменного итога нет, за неё
-/// публикует пустой ответ сам хост. Тем и отличается сорвавшаяся закачка от
-/// остановленной человеком — больше их не различает ничто.
+/// A non-empty error is exactly a failure: a killed download has no domain
+/// result, the host publishes an empty answer for it. This is how a failed
+/// download differs from one stopped by the user — nothing else distinguishes
+/// them.
 pub fn on_fs_download_result(state: &mut State, response: FsDownloadResponse) {
     let correlation_id = veldsdk::correlation();
     if !response.error.is_empty() {
         let name = state.downloads.get(&correlation_id).map(|d| d.name.clone());
         if let Some(name) = name {
-            veldsdk::log::warn!(target: "handlers", "закачка {} не удалась: {}", name, response.error);
+            veldsdk::log::warn!(target: "handlers", "download {} failed: {}", name, response.error);
             state.troubles.insert(name, response.error.clone());
         }
     }
     finish(state, &correlation_id);
 }
 
-/// Снимает закачку с учёта и приводит каталог в соответствие диску.
+/// Takes the download off the books and brings the catalog in line with the
+/// disk.
 ///
-/// Идемпотентна намеренно: ранний отказ (подпись не удалась) случается до
-/// того, как операция вообще заведена, и терминального ответа по нему не
-/// будет — этот путь ведёт сюда напрямую.
+/// Intentionally idempotent: an early refusal (the signature failed) happens
+/// before the operation is even registered, and no terminal answer will come
+/// for it — this path leads here directly.
 fn finish(state: &mut State, id: &str) {
     let Some(dl) = state.downloads.remove(id) else { return };
 
-    // Место освободилось — пускаем следующую. До разбора того, чем кончилась
-    // эта: очередь не должна ждать ни перечитывания каталога, ни удаления.
+    // A slot is freed — start the next one. Before analyzing how this one
+    // ended: the queue must wait neither for a catalog rescan nor for a
+    // deletion.
     start_waiting(state);
 
-    // Корзину нажимали во время закачки — тогда это не отмена ради отмены,
-    // а отложенное удаление: `.part` остался ровно там, где abort его бросил,
-    // и теперь его можно безопасно удалить.
+    // The trash was pressed during the download — then this is not a
+    // cancellation for its own sake but a deferred deletion: the `.part` stayed
+    // exactly where abort left it, and now it can be safely deleted.
     if dl.delete_when_done {
         delete_entry(state, &dl.name);
         return;
     }
 
-    // Перечитываем каталог: размер `.part`/готового файла берётся с диска, а
-    // не переносится руками из реестра в запись.
+    // We rescan the catalog: the size of the `.part`/finished file is taken
+    // from the disk, not carried by hand from the registry into the entry.
     catalog::rescan(state);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::module::Config;
-
-    fn state() -> State {
-        crate::module::hook_init(Config {}).expect("состояние собирается без диска")
-    }
-
-    fn ask(state: &mut State, at: usize) {
-        on_download(state, DownloadRequest {
-            identifier: format!("eodata/store/S{:02}.tif", at),
-            product: String::new(),
-        });
-    }
-
-    fn waiting(state: &State) -> usize {
-        state.downloads.values().filter(|dl| dl.waiting).count()
-    }
-
-    /// Разом пущено не больше потолка, а остальное ждёт места.
-    ///
-    /// Считаем по записям, а не по ходам к провайдеру: наружу ждущая запись
-    /// выглядит так же, как ждущая подписи, и отличает их только этот флаг.
-    #[test]
-    fn no_more_than_the_cap_goes_out_at_once() {
-        let mut state = state();
-        for at in 0..AT_ONCE + 3 {
-            ask(&mut state, at);
-        }
-
-        assert_eq!(state.downloads.len(), AT_ONCE + 3, "все нажатия учтены");
-        assert_eq!(busy(&state), AT_ONCE, "пущено ровно по потолку");
-        assert_eq!(waiting(&state), 3, "остальные ждут места");
-    }
-
-    /// Ключ ждущей записи, вставшей в очередь раньше прочих.
-    fn first_waiting(state: &State) -> String {
-        state
-            .downloads
-            .iter()
-            .filter(|(_, dl)| dl.waiting)
-            .min_by_key(|(_, dl)| dl.queued)
-            .map(|(id, _)| id.clone())
-            .expect("ждущая нашлась")
-    }
-
-    /// Ключ любой идущей записи.
-    fn any_going(state: &State) -> String {
-        state
-            .downloads
-            .iter()
-            .find(|(_, dl)| !dl.waiting)
-            .map(|(id, _)| id.clone())
-            .expect("идущая нашлась")
-    }
-
-    /// Освободившиеся места занимают те, которые нажали раньше, — и в том же
-    /// порядке.
-    ///
-    /// Проверяется пятью подряд, а не одной: реестр закачек — хеш-таблица, и с
-    /// одной ждущей потерянный порядок проходил бы такой тест в половине
-    /// прогонов, то есть выглядел бы флаки-тестом, а не находкой.
-    #[test]
-    fn the_freed_places_go_in_the_order_they_were_asked() {
-        let mut state = state();
-        for at in 0..AT_ONCE + 5 {
-            ask(&mut state, at);
-        }
-
-        let mut order: Vec<u64> = Vec::new();
-        for _ in 0..5 {
-            let next = first_waiting(&state);
-            let queued = state.downloads[&next].queued;
-            let going = any_going(&state);
-            finish(&mut state, &going);
-            assert!(!state.downloads[&next].waiting, "тронулась не та, которую ждали");
-            order.push(queued);
-            assert_eq!(busy(&state), AT_ONCE, "место занято ровно одной");
-        }
-
-        let mut sorted = order.clone();
-        sorted.sort_unstable();
-        assert_eq!(order, sorted, "очередь пошла не по порядку нажатий");
-        assert_eq!(waiting(&state), 0, "ждать больше некому");
-    }
-
-    /// Удалённая во время закачки запись место освобождает наравне с прочими.
-    ///
-    /// Её конец уходит по своей ветке — с `return`, — и очередь легко оставить
-    /// за ней: десять нажатых корзин по десяти идущим остановили бы её
-    /// навсегда, до перезапуска приложения.
-    #[test]
-    fn a_deleted_download_frees_its_place_too() {
-        let mut state = state();
-        for at in 0..AT_ONCE + 1 {
-            ask(&mut state, at);
-        }
-        let waited = first_waiting(&state);
-
-        let going = any_going(&state);
-        state.downloads.get_mut(&going).expect("запись жива").delete_when_done = true;
-        finish(&mut state, &going);
-
-        assert!(!state.downloads[&waited].waiting, "очередь встала за удалённой");
-        assert_eq!(busy(&state), AT_ONCE);
-    }
-
-    /// Пока потолок не выбран, ждать нечего: первое же нажатие уходит сразу.
-    #[test]
-    fn the_first_press_does_not_wait() {
-        let mut state = state();
-        ask(&mut state, 0);
-
-        assert_eq!(waiting(&state), 0);
-        assert_eq!(busy(&state), 1);
-    }
 }

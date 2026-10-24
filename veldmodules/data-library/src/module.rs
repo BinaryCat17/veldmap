@@ -1,17 +1,19 @@
-//! data-library: каталог скачанного.
+//! data-library: the catalog of downloaded files.
 //!
-//! Владеет всем локальным хранением — каталогом, суффиксом `.part`,
-//! сидкарами `.origin` — и отдаёт наружу только выведенное состояние
-//! (см. types.proto). Ни один потребитель не знает, как это лежит на диске.
+//! Owns all local storage — the catalog, the `.part` suffix, the `.origin`
+//! sidecars — and exposes only derived state (see types.proto). No consumer
+//! knows how this lies on disk.
 //!
-//! Состояние выводится, а не накапливается. Три независимых источника фактов:
-//! снимок диска (fs/on_list), сидкары (что откуда взялось) и идущие закачки.
-//! Ни один не патчится «оптимистично»: снимок перечитывается на каждом
-//! терминальном событии. Хранить строки материализованно значит править их из
-//! четырёх мест, и каждый пропущенный патч врёт в UI до следующего листинга.
+//! The state is derived, not accumulated. Three independent sources of facts:
+//! the disk snapshot (fs/on_list), the sidecars (where things came from) and
+//! the running downloads. None is patched "optimistically": the snapshot is
+//! reread on every terminal event. Storing rows materialized would mean editing
+//! them from four places, and every missed patch would lie to the UI until the
+//! next listing.
 //!
-//! module.rs — фасад: State, init и реэкспорты обработчиков. Логика —
-//! в catalog.rs (снимок и сидкары), download.rs (закачки) и open.rs.
+//! module.rs is the facade: State, init, and re-exports of the handlers. The
+//! logic lives in catalog.rs (the snapshot and sidecars), download.rs (the
+//! downloads) and open.rs.
 
 pub mod storage;
 pub mod catalog;
@@ -25,116 +27,125 @@ use storage::{LocalFile, OriginSidecar};
 pub struct Config {}
 
 pub struct State {
-    /// Что лежит на диске: имя записи → что под ним найдено. Единственный
-    /// писатель — catalog::on_list_result.
+    /// What lies on disk: entry name → what was found under it. The single
+    /// writer is catalog::on_list_result.
     ///
-    /// Ключ — имя записи, а не имя файла: `foo` и `foo.part` — это одна запись
-    /// каталога в двух состояниях, и держать их двумя строками значит завести
-    /// два ответа на вопрос «что с этой записью», выбираемых порядком обхода
-    /// каталога.
+    /// The key is the entry name, not the file name: `foo` and `foo.part` are
+    /// one catalog entry in two states, and keeping them as two rows would
+    /// create two answers to the question "what is with this entry", selected
+    /// by the catalog walk order.
     pub snapshot: HashMap<String, LocalFile>,
-    /// Содержимое сидкаров по имени записи. Кэш диска, а не отдельная истина:
-    /// листинг подрезает его под то, что реально лежит в каталоге, поэтому
-    /// удалённый мимо приложения файл не воскреснет записью о намерении.
+    /// Sidecar contents by entry name. A disk cache, not a separate truth: the
+    /// listing trims it to what actually lies in the catalog, so a file deleted
+    /// outside the application will not resurrect as a record of intent.
     pub origins: HashMap<String, OriginSidecar>,
-    /// Идущие закачки — доменный реестр, а не таблица корреляции: у записи
-    /// есть прогресс, два возможных терминальных события и своё место в
-    /// выводимом состоянии. Ключ — id операции, он же task_id задачи у
-    /// платформы: операцию именуем мы, потому что мы же её и владелец
-    /// (см. download.rs). Запись живёт от нажатия «скачать» до терминального
-    /// события — включая окно ожидания подписи, когда задачи ещё нет.
+    /// Running downloads — a domain registry, not a correlation table: an entry
+    /// has progress, two possible terminal events and its own place in the
+    /// derived state. The key is the operation id, also the task_id of the task
+    /// at the platform: we name the operation because we are also its owner
+    /// (see download.rs). The entry lives from the "download" press to the
+    /// terminal event — including the signature-waiting window, when the task
+    /// does not exist yet.
     pub downloads: HashMap<String, Download>,
-    /// Следующий номер в очереди закачек. Растёт и не переиспользуется: номер
-    /// нужен только чтобы сравнить две записи между собой.
+    /// The next number in the download queue. It grows and is never reused: the
+    /// number is only needed to compare two entries with each other.
     pub queue_tick: u64,
-    /// Почему сорвалась последняя попытка, по имени записи. Живёт здесь, а не
-    /// в сидкаре: причина — про попытку, а не про файл, и переживать
-    /// перезапуск ей незачем. Перечитывание каталога переживает: обход диска
-    /// про отказы ничего не знает и молча стёр бы их все.
+    /// Why the last attempt failed, by entry name. It lives here, not in the
+    /// sidecar: the reason concerns the attempt, not the file, and it has no
+    /// need to survive a restart. It does survive a catalog rescan: the disk
+    /// walk knows nothing about failures and would silently erase them all.
     pub troubles: HashMap<String, String>,
 
-    /// Ожидание fs/on_list — гасит устаревший ответ. Запрос здесь всегда
-    /// один: обходов диска ровно столько, сколько нужно, чтобы состояние было
-    /// верным, а не сколько было поводов перечитать (см. `catalog::rescan`).
+    /// Waiting for fs/on_list — cancels a stale answer. There is always
+    /// exactly one request here: disk walks happen only as many as needed for
+    /// the state to be correct, not as many as there were reasons to rescan
+    /// (see `catalog::rescan`).
     pub pending_list: veldsdk::Correlator<()>,
-    /// Повод перечитать, пришедший, пока обход шёл. Один флаг, а не счётчик:
-    /// сколько бы их ни набежало, догоняет их всех один обход — он видит диск
-    /// целиком.
+    /// A reason to rescan that arrived while a walk was running. One flag, not
+    /// a counter: no matter how many accumulate, one walk catches up with all
+    /// of them — it sees the whole disk.
     pub list_again: bool,
-    /// Вопрос провайдеру «к каким снимкам относятся эти ключи». Актуален только
-    /// последний: сидкары дочитываются по одному, и каждый прочитанный делает
-    /// вопрос полнее — отвечать по устаревшему списку незачем.
+    /// A question to the provider: "which scenes do these keys belong to".
+    /// Only the last one is current: sidecars are read one by one, and each one
+    /// read makes the question more complete — there is no point in answering
+    /// from a stale list.
     pub pending_roots: veldsdk::Latest,
-    /// Отданные fs чтения, ещё не отвеченные. Одна таблица на топик, а не по
-    /// таблице на назначение (см. [`veldsdk::Correlator`]): назначение
-    /// различает `ReadPurpose`.
+    /// fs reads handed out and not yet answered. One table per topic, not a
+    /// table per purpose (see [`veldsdk::Correlator`]): the purpose is
+    /// distinguished by `ReadPurpose`.
     pub pending_reads: veldsdk::Correlator<ReadPurpose>,
-    /// Ожидание fs/on_write сидкара.
+    /// Waiting for fs/on_write of a sidecar.
     pub pending_sidecar_writes: veldsdk::Correlator<SidecarWrite>,
-    /// Сидкары, ждущие, пока допишется предыдущий той же записи. По имени, а
-    /// не очередью: сидкар пишется целиком, и промежуточные состояния диску не
-    /// нужны — ждёт всегда последнее (см. `catalog::write_sidecar`).
+    /// Sidecars waiting for the previous one of the same entry to finish
+    /// writing. By name, not as a queue: a sidecar is written whole, and
+    /// intermediate states are of no use to the disk — it is always the latest
+    /// one that waits (see `catalog::write_sidecar`).
     pub queued_sidecars: HashMap<String, OriginSidecar>,
-    /// Открытия, пришедшие раньше первого обхода каталога: отвечать им
-    /// «такой записи нет» значило бы отказать за то, что мы не успели
-    /// прочитать диск (см. `open::resume`).
+    /// Opens that arrived before the first catalog walk: answering them "no
+    /// such entry" would refuse them for our not having read the disk in time
+    /// (see `open::resume`).
     pub deferred_opens: Vec<crate::module::open::Deferred>,
-    /// Ожидание fs/on_delete — контекст: путь удаляемого файла.
+    /// Waiting for fs/on_delete — the context is the path of the deleted file.
     pub pending_delete: veldsdk::Correlator<String>,
 }
 
-/// Зачем библиотека читает файл. Оба чтения идут одним топиком fs/read и
-/// возвращаются одним `core.ResourceOpened` — различает их только это.
+/// Why the library reads a file. Both reads go over one fs/read topic and
+/// return one `core.ResourceOpened` — only this distinguishes them.
 pub enum ReadPurpose {
-    /// Сидкар записи; контекст — её имя.
+    /// A sidecar of an entry; the context is its name.
     Sidecar(String),
-    /// Файл, открываемый заказчику: кому уйдёт владение и на какой запрос
-    /// отвечаем.
+    /// A file opened for the caller: who receives the ownership and which
+    /// request we answer.
     File(open::OpenFor),
 }
 
-/// Одна идущая закачка — единственный источник байтового прогресса, пока она
-/// жива. После неё прогресс берётся с диска (размер `.part` в снимке).
+/// One running download — the only source of byte progress while it is alive.
+/// After it, progress is taken from the disk (the `.part` size in the snapshot).
 pub struct Download {
     pub identifier: String,
     pub name: String,
     pub done: u64,
-    /// 0, если сервер не прислал Content-Length.
+    /// 0 if the server did not send Content-Length.
     pub total: u64,
-    /// Корзину нажали во время закачки. Удалить `.part` поверх активной записи
-    /// нельзя (хост держит файл открытым), поэтому сначала убиваем закачку, а
-    /// delete срабатывает по её терминальному ответу. Флаг здесь, а не
-    /// отдельной таблицей: ключ у неё был бы тот же самый и читалась бы она на
-    /// том же топике — то есть на один топик приходилось бы две таблицы, ровно
-    /// то, от чего защищает правило у `pending_reads`.
+    /// The trash was pressed during the download. Deleting a `.part` over an
+    /// active entry is not allowed (the host holds the file open), so we kill
+    /// the download first, and the delete fires on its terminal answer. The
+    /// flag is here, not in a separate table: its key would be the same and it
+    /// would be read on the same topic — that is, one topic would carry two
+    /// tables, exactly what the rule at `pending_reads` protects against.
     pub delete_when_done: bool,
-    /// Место в очереди: чем меньше, тем раньше нажали. Порядок пуска берётся
-    /// отсюда, а не из обхода реестра — он хеш-таблица, и один и тот же выбор
-    /// уезжал бы качаться то в одном порядке, то в другом.
+    /// Place in the queue: the smaller, the earlier the press. The start order
+    /// is taken from here, not from walking the registry — it is a hash table,
+    /// and the same selection would go downloading in one order one time and
+    /// another the next.
     pub queued: u64,
-    /// Ждёт места: запись заведена, а подпись ещё не спрошена. Отличается от
-    /// «ждёт подписи» ровно этим — своим ходом никуда не тронется, её пускает
-    /// освободившееся место (см. `download::AT_ONCE`).
+    /// Waiting for a slot: the entry is created but the signature has not been
+    /// requested yet. It differs from "waiting for the signature" in exactly
+    /// this — it will not move on its own, a freed slot starts it (see
+    /// `download::AT_ONCE`).
     pub waiting: bool,
-    /// Запрос ушёл в сеть. До этого закачки у платформы нет вовсе — ни задачи,
-    /// ни терминального события, — и снимать запись с учёта приходится самим;
-    /// после — за нас это делает терминальный ответ, каким бы он ни был.
+    /// The request has gone to the network. Before that there is no download
+    /// at the platform at all — no task, no terminal event — and taking the
+    /// entry off the books is up to us; after that the terminal answer does it
+    /// for us, whatever it is.
     ///
-    /// Тем и различаются два вида «убивать нечего»: закачка ещё ждёт подписи —
-    /// или уже кончилась сама, и её ответ в пути. Сняв запись во втором
-    /// случае, мы теряем причину срыва: пришедшему ответу некуда её приписать.
+    /// This is how the two kinds of "nothing to kill" differ: the download is
+    /// still waiting for the signature — or it has already finished on its own
+    /// and its answer is on the way. Removing the entry in the second case
+    /// loses the failure reason: the arriving answer has nowhere to attribute
+    /// it.
     pub loading: bool,
 }
-// Доли (`progress` из DownloadProgress) здесь нет намеренно: она полностью
-// выводится из done/total, а хранить её рядом значит завести два числа,
-// которые могут разойтись.
+// The share (`progress` from DownloadProgress) is intentionally absent here: it
+// is fully derived from done/total, and storing it alongside would mean keeping
+// two numbers that can diverge.
 
-/// Сидкар, отданный в fs/on_write и ещё не подтверждённый.
+/// A sidecar handed to fs/on_write and not yet confirmed.
 pub struct SidecarWrite {
-    /// CPU-регион с телом сидкара — освобождается по ответу хоста.
+    /// CPU region holding the sidecar body — released on the host's answer.
     pub region: u64,
-    /// Имя записи: пока запись в полёте, сидкара на диске может ещё не быть,
-    /// и подрезка `origins` по листингу не должна принять его за удалённый.
+    /// Entry name: while the write is in flight the sidecar may not be on disk
+    /// yet, and the `origins` trim by the listing must not treat it as deleted.
     pub name: String,
 }
 
@@ -158,56 +169,59 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
 }
 
 impl State {
-    /// Запись на диске с данным именем (полная или недокачанная).
+    /// The on-disk entry with the given name (complete or partially
+    /// downloaded).
     pub fn entry_for(&self, name: &str) -> Option<&LocalFile> {
         self.snapshot.get(name)
     }
 
-    /// Забывает причины срыва у записей, которых больше нет.
+    /// Forgets failure reasons of entries that no longer exist.
     ///
-    /// Причина принадлежит записи, а не имени: пережившая саму запись, она
-    /// однажды приписалась бы новой под тем же именем — сорвавшейся не в этом
-    /// запуске.
+    /// The reason belongs to the entry, not the name: having outlived the entry
+    /// itself, it would one day be attributed to a new one under the same name
+    /// — one that failed not in this run.
     pub fn forget_gone_troubles(&mut self) {
         let (origins, snapshot) = (&self.origins, &self.snapshot);
         self.troubles.retain(|name, _| origins.contains_key(name) || snapshot.contains_key(name));
     }
 
-    /// Лежат ли байты записи под `.part`. Ответ один на всех спрашивающих:
-    /// удаление и показ в файловом менеджере спрашивают одно и то же, и два
-    /// умолчания у одного вопроса однажды разъехались бы.
+    /// Whether the entry's bytes lie under `.part`. One answer for all askers:
+    /// deletion and the file-manager reveal ask the same thing, and two
+    /// defaults for one question would one day diverge.
     ///
-    /// Чего в снимке нет вовсе — это `.part`: единственное, что могло
-    /// остаться от закачки, сорвавшейся между обходами диска.
+    /// What is missing from the snapshot entirely counts as `.part`: the only
+    /// thing that could remain from a download that failed between disk walks.
     pub fn is_partial(&self, name: &str) -> bool {
         self.entry_for(name).map_or(true, |file| file.is_partial)
     }
 
-    /// Идущая закачка записи вместе с её task_id (нужен для отмены).
+    /// The entry's running download along with its task_id (needed for
+    /// cancellation).
     pub fn active_download(&self, name: &str) -> Option<(&str, &Download)> {
         self.downloads.iter()
             .find(|(_, d)| d.name == name)
             .map(|(id, d)| (id.as_str(), d))
     }
 
-    /// Ключ провайдера для записи, если сидкар прочитан.
+    /// The provider key of the entry, if the sidecar has been read.
     pub fn identifier_of(&self, name: &str) -> Option<&str> {
         self.origins.get(name).map(|o| o.identifier.as_str())
     }
 
-    /// Снимок, к которому относится запись. Знает об этом только сидкар: имя на
-    /// диске о снимке не говорит ничего.
+    /// The scene the entry belongs to. Only the sidecar knows this: the on-disk
+    /// name says nothing about the scene.
     pub fn product_of(&self, name: &str) -> Option<&str> {
         self.origins.get(name).map(|o| o.product.as_str())
     }
 
-    /// Сколько файлов в снимке этой записи; 0 — снимок целиком не обходили,
-    /// и о его полноте сказать нечего.
+    /// How many files are in this entry's scene; 0 — the scene has not been
+    /// walked in full, and nothing can be said about its completeness.
     pub fn siblings_of(&self, name: &str) -> u32 {
         self.origins.get(name).map(|o| o.siblings).unwrap_or(0)
     }
 
-    /// Ожидаемый полный размер из сидкара; 0 — Content-Length ещё не видели.
+    /// The expected full size from the sidecar; 0 — Content-Length has not
+    /// been seen yet.
     pub fn total_bytes(&self, name: &str) -> u64 {
         self.origins.get(name).and_then(|o| o.total_bytes).unwrap_or(0)
     }
@@ -216,9 +230,10 @@ impl State {
 // -- Input handlers --
 pub use catalog::{on_list, on_list_result, on_product_roots_result, on_snapshot, on_write_result};
 
-/// fs/on_read_result — топик один, назначений два: каталог дочитывает сидкары,
-/// open отдаёт файл заказчику. Развилка здесь, а не в схеме, потому что
-/// различает их не контракт шины, а назначение, записанное при запросе.
+/// fs/on_read_result — one topic, two purposes: the catalog finishes reading
+/// sidecars, open hands the file to the caller. The fork is here, not in the
+/// schema, because what distinguishes them is not the bus contract but the
+/// purpose recorded at the request.
 pub fn on_read_result(state: &mut State, opened: veldsdk::proto::core::ResourceOpened) {
     match state.pending_reads.take(&veldsdk::correlation()) {
         Some(ReadPurpose::Sidecar(name)) => catalog::on_sidecar_read(state, name, &opened),

@@ -177,7 +177,7 @@ with it) and passes it as `DescribeRequest.geolocation`. The tiler asks it
 (`describe` in `veldmodules/image-tiler/src/module.rs`) and does not put it
 in the memo: it is a property of the pair, not of the raster. A failure does
 not fail the description — the raster is left without a binding, and the
-reason travels in `binding_trouble` prefixed "файл координат".
+reason travels in `binding_trouble` prefixed "coordinate file".
 
 `netcdf::geolocation` takes the densest pair of `northing`/`easting` planes
 of one shape, unique per shape (the file holds altitude beside latitude, and
@@ -377,7 +377,7 @@ the descriptions are over (`on_described` in `veldmodules/globe/src/module.rs`):
 a layer still on a Quad gets a log line only — a quicklook or a picture
 without geokeys lying by the footprint is the normal outcome; a layer none of
 whose rasters described gets the collected reasons as its error; a frame
-without extent, an error; a Rough frame, the error "привязки нет" with
+without extent, an error; a Rough frame, the error "no binding" with
 `binding_trouble` in brackets (`said_with`). Refusing earlier, at the
 footprint, would be too early: the binding lives in the raster more often
 than in the catalogue — a Sentinel-5P granule carries per-sample
@@ -439,7 +439,7 @@ that was taken, and in this field it would tell the viewer "place unknown" of
 a scene lying in its place. A NetCDF words its reasons separately (`ties`):
 nodes that make no lattice (`nodes_unfit`, one text for the raster's
 own grid and for the coordinate file), or no coordinates at all for the named
-variable — and its coordinate file adds its own, prefixed "файл координат".
+variable — and its coordinate file adds its own, prefixed "coordinate file".
 When nothing was placed, both halves travel, each naming its file; when
 something was, none does. A JPEG 2000 does not complain: a GML grid it cannot
 use is silence, and the raster falls back to the catalogue footprint without

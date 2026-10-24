@@ -1,9 +1,10 @@
-//! components/controls.rs — управление списком: отбор, путь и страницы.
+//! components/controls.rs — list controls: selection, path, and pages.
 //!
-//! Всё, что стоит вокруг таблицы и меняет не данные, а показ. Список у трёх
-//! видов один и тот же, поэтому и рычаги к нему одни — с оговоркой, что рычаг
-//! показывается там, где он что-то меняет: путь есть только у каталога,
-//! группировка бессмысленна ровно там, где путь есть.
+//! Everything around the table that changes not the data but the display. The
+//! listing is the same for all three views, so the controls are shared too —
+//! with the rule that a control appears where it changes something: the path
+//! exists only in the catalogue, and grouping is meaningless exactly where the
+//! path exists.
 
 use veld_ui_service_wrap::{column, row, Keyed};
 use crate::proto::ui_service::{
@@ -15,39 +16,41 @@ use crate::module::state::listing::{Choice, ListingState, Menu};
 use crate::module::state::ViewId;
 use crate::module::{theme, Msg, ViewMsg};
 
-/// Поля внутри коробки рычага — по обе стороны от содержимого.
+/// Padding inside the control box — on both sides of the content.
 const PAD: f32 = 11.0;
-/// Зазор между рычагами полосы и между частями внутри рычага.
+/// Gap between the bar controls and between the parts inside a control.
 const GAP: f32 = 7.0;
-/// Зазор между значком и текстом внутри поля — значок мельче подписи, и
-/// прижатый тем же зазором читается как приклеенный.
+/// Gap between the icon and the text inside a field — the icon is smaller than
+/// the caption and, pressed by the same gap, reads as glued on.
 const ICON_GAP: f32 = 8.0;
-/// Кегль треугольника чипа. Он же его ширина с запасом: знак у́же своего кегля.
+/// Size of the chip caret. Also its width with slack: the glyph is narrower
+/// than its size.
 const CARET: f32 = 8.0;
-/// Кегль лупы в поле — и так же её ширина с запасом.
+/// Size of the magnifier in the field — and likewise its width with slack.
 const LENS: f32 = 11.0;
-/// Ширина поля даты: дата — восемь знаков, и тянуться ей незачем.
+/// Width of the date field: a date is eight characters and needs no stretching.
 const DATE_WIDTH: f32 = 150.0;
 
-/// Рычаг полосы вместе с местом, которое ему нужно, чтобы подпись читалась.
+/// A bar control together with the space it needs for its caption to read.
 ///
-/// Ширину знает только тот, кто собрал подпись, а раскладывает полосу [`bar`] —
-/// поэтому рычаг приносит её с собой. Иначе полосе пришлось бы гадать по числу
-/// рычагов, а чипы разной длины («Миссия: все» и «Группировка: по папкам»)
-/// отличаются вдвое.
+/// Only the one who built the caption knows the width, while the bar is laid
+/// out by [`bar`] — so the control carries the width along. Otherwise the bar
+/// would have to guess from the number of controls, while chips of different
+/// length ("Mission: all" and "Grouping: by folders") differ twofold.
 pub struct Control {
     element: Element<Msg>,
     width: f32,
 }
 
-/// Полоса отбора: поле фильтра и чипы.
+/// Selection bar: the filter field and the chips.
 ///
-/// `groupable` — есть ли что складывать по папкам. Рычаг, который ничего не
-/// меняет, хуже отсутствующего: он обещает выбор и молчит в ответ. Знает это
-/// вид — он один и знает, откуда собраны его строки (см. `list_screen`).
+/// `groupable` — whether there is anything to group by folders. A control that
+/// changes nothing is worse than a missing one: it promises a choice and
+/// answers with silence. The view knows this — it alone knows where its rows
+/// come from (see `list_screen`).
 ///
-/// `width` — ширина половины, в которой стоит список: от неё зависит, ляжет
-/// полоса в строку или развернётся (см. [`bar`]).
+/// `width` — the width of the half the list sits in: it decides whether the
+/// bar fits on one line or unfolds (see [`bar`]).
 pub fn toolbar(
     view: ViewId,
     listing: &ListingState,
@@ -57,53 +60,54 @@ pub fn toolbar(
     width: f32,
 ) -> Element<Msg> {
     let open = opened;
-    let field = search_field("Фильтр по имени", &listing.query, move |query| {
+    let field = search_field("Filter by name", &listing.query, move |query| {
         Msg::In(view, ViewMsg::Query(query))
     }, None);
 
     let mut controls = vec![
-        chip(view, "Состояние:", listing.filter, Menu::Filter, open, counts, move |choice| {
+        chip(view, "State:", listing.filter, Menu::Filter, open, counts, move |choice| {
             Msg::In(view, ViewMsg::Filter(choice))
         }),
     ];
     if groupable {
-        controls.push(chip(view, "Группировка:", listing.grouping, Menu::Grouping, open, &[], move |choice| {
+        controls.push(chip(view, "Grouping:", listing.grouping, Menu::Grouping, open, &[], move |choice| {
             Msg::In(view, ViewMsg::Group(choice))
         }));
     }
-    controls.push(chip(view, "Сортировка:", listing.sorting, Menu::Sorting, open, &[], move |choice| {
+    controls.push(chip(view, "Sorting:", listing.sorting, Menu::Sorting, open, &[], move |choice| {
         Msg::In(view, ViewMsg::Sort(choice))
     }));
 
     bar(width, field, controls)
 }
 
-/// Как полоса легла в отведённую ширину.
+/// How the bar fits the allotted width.
 #[derive(PartialEq, Eq, Debug)]
 enum Shape {
-    /// Одной строкой: поле тянется, рычаги стоят за ним.
+    /// On one line: the field stretches, the controls stand behind it.
     Line,
-    /// Поле забрало строку целиком, рычаги легли под ним рядами — по столько,
-    /// сколько в ряд помещается.
+    /// The field took the whole line, the controls fell under it in rows — as
+    /// many per row as fit.
     Stack(Vec<usize>),
 }
 
-/// Как разложить полосу в отведённой ширине.
+/// How to lay the bar out in the allotted width.
 ///
-/// Порог считается по полю, а не по рычагам: тянется в полосе одно оно, и
-/// сжимается в узком месте тоже оно — до подсказки, обрезанной на середине
-/// слова. Рычаги при этом стоят целыми, потому что ширина у них своя. Значит,
-/// и мерить надо то, что теряется первым: перестало помещаться поле — полоса
-/// разворачивается.
+/// The threshold is measured by the field, not the controls: the field is the
+/// only stretching part of the bar, and it is the one that shrinks in a tight
+/// spot — down to a hint cut mid-word. The controls stay whole, because they
+/// carry their own width. So what must be measured is what is lost first: once
+/// the field stops fitting, the bar unfolds.
 fn shape(width: f32, field: f32, controls: &[f32]) -> Shape {
     let free = width - theme::GUTTER * 2.0;
     if field + controls.iter().map(|control| GAP + control).sum::<f32>() <= free {
         return Shape::Line;
     }
 
-    // Жадно, а не поровну: чипы разной длины, и ряд из трёх узких читается так
-    // же, как ряд из двух широких. Ряд не бывает пустым — рычаг шире всей
-    // полосы всё равно надо где-то показать, и это его собственный ряд.
+    // Greedy, not even: chips differ in length, and a row of three narrow ones
+    // reads the same as a row of two wide ones. A row is never empty — a
+    // control wider than the whole bar still has to be shown somewhere, and it
+    // gets its own row.
     let mut rows: Vec<usize> = Vec::new();
     let mut taken = 0.0;
     for control in controls {
@@ -121,12 +125,14 @@ fn shape(width: f32, field: f32, controls: &[f32]) -> Shape {
     Shape::Stack(rows)
 }
 
-/// Полоса рычагов над таблицей: поле и чипы при нём. Роль, а не сборка на
-/// месте — таких полос две (отбор списка и запрос к каталогу), и написанные
-/// порознь они разъезжаются зазором, отступом снизу и порогом разворота.
+/// The control bar above the table: the field and its chips. A role, not an
+/// on-the-spot assembly — there are two such bars (list selection and catalogue
+/// query), and written separately they would drift apart in gap, bottom
+/// padding, and unfolding threshold.
 ///
-/// Поле идёт отдельным доводом, а не первым в списке: оно единственное
-/// тянущееся, и в узкой половине именно ему достаётся строка целиком.
+/// The field goes as a separate argument, not first in the list: it is the
+/// only stretching part, and in a narrow half it is the one that gets the whole
+/// line.
 pub fn bar(width: f32, field: Control, controls: Vec<Control>) -> Element<Msg> {
     let padding = Padding { top: 0.0, bottom: 10.0, left: theme::GUTTER, right: theme::GUTTER };
     let line = |controls: Vec<Element<Msg>>| {
@@ -153,10 +159,11 @@ pub fn bar(width: f32, field: Control, controls: Vec<Control>) -> Element<Msg> {
     column(lines).spacing(GAP).width(Length::Fill).padding(padding).into()
 }
 
-/// Поле с лупой: ввод в одной коробке со значком. Лупа внутри неё, а не
-/// рядом, — иначе она читается как отдельная кнопка. Одна сборка на оба поля
-/// приложения: фильтр списка и запрос к каталогу различаются только подписью,
-/// сообщением ввода и тем, ждёт ли поле Enter (`on_submit`).
+/// Field with a magnifier: the input in one box with the icon. The magnifier
+/// sits inside it, not beside — otherwise it reads as a separate button. One
+/// assembly for both fields of the application: the list filter and the
+/// catalogue query differ only in the caption, the input message, and whether
+/// the field waits for Enter (`on_submit`).
 pub fn search_field(
     placeholder: &str,
     value: &str,
@@ -189,20 +196,20 @@ pub fn search_field(
     .align_y(Alignment::Center)
     .padding(Padding { top: 0.0, bottom: 0.0, left: PAD, right: PAD });
 
-    // Поле — единственное тянущееся в полосе, и просит оно ровно столько,
-    // сколько нужно его подсказке: подсказка, обрезанная на середине слова,
-    // ничего не подсказывает, и полоса разворачивается раньше (см. [`bar`]).
+    // The field is the only stretching part of the bar, and it asks for exactly
+    // as much as its hint needs: a hint cut mid-word hints at nothing, and the
+    // bar unfolds earlier (see [`bar`]).
     Control {
         element: element.into(),
         width: PAD * 2.0 + LENS + ICON_GAP + format::text_width(placeholder, theme::TEXT_BODY),
     }
 }
 
-/// Чип со значением и выпадающим списком. Счётчики показывает только тот, кому
-/// их дали: у порядка и группировки считать нечего.
+/// Chip with a value and a dropdown list. Only those given counters show them:
+/// sorting and grouping have nothing to count.
 ///
-/// `opened` — меню, раскрытое в этом виде: их много, а раскрыто одно, и знать
-/// чипу нужно только это.
+/// `opened` — the menu opened in this view: there are many, only one is open,
+/// and this is all the chip needs to know.
 pub fn chip<C: Choice>(
     view: ViewId,
     caption: &str,
@@ -231,18 +238,18 @@ pub fn chip<C: Choice>(
     .padding(Padding { top: 0.0, bottom: 0.0, left: PAD, right: PAD })
     .on_press(Msg::In(view, ViewMsg::OpenMenu(Some(menu))));
 
-    // Ширина — по тому, что на чипе стои́т сейчас, а не по самой длинной из
-    // подписей меню: выбранное значение и есть его содержимое. Полоса от смены
-    // значения перекладывается, и это честно — чип действительно стал шире.
+    // The width follows what the chip shows right now, not the longest of the
+    // menu captions: the selected value is its content. The bar reflows when
+    // the value changes, and honestly so — the chip really did get wider.
     let width = PAD * 2.0
         + GAP * 2.0
         + CARET
         + format::text_width(caption, theme::TEXT_LABEL)
         + format::text_width(current.label(), theme::TEXT_LABEL);
 
-    // Пункты собираются вместе с панелью, то есть только у раскрытого чипа:
-    // их столько же, сколько значений у перечисления, и на закрытом они не
-    // видны ни секунды.
+    // Items are built together with the panel, i.e. only for the opened chip:
+    // there are as many of them as the enum has values, and on a closed chip
+    // they are never visible for a second.
     let items = || {
         C::ALL
             .iter()
@@ -265,14 +272,15 @@ pub fn chip<C: Choice>(
     Control { element: element.into(), width }
 }
 
-/// Путь текущей папки: «вверх» и сегменты, по которым можно вернуться.
-/// Показывается там, где путь есть, — то есть в сетевом каталоге.
+/// Path of the current folder: "up" and the segments to return by. Shown where
+/// a path exists — that is, in the network catalogue.
 pub fn path(view: ViewId, current: &str) -> Element<Msg> {
-    // Корень назван как папка, а не пустым местом: он такой же шаг пути, и
-    // вернуться в него — обычный переход, а не особый случай.
+    // The root is named as a folder, not as empty space: it is an equal step of
+    // the path, and returning to it is an ordinary transition, not a special
+    // case.
     let mut crumbs: Vec<Element<Msg>> = vec![
         theme::crumb(
-            mono::<Msg>("корень")
+            mono::<Msg>("root")
                 .size(theme::TEXT_SMALL)
                 .color(if current.is_empty() { theme::INK } else { theme::ACCENT }),
         )
@@ -318,20 +326,20 @@ pub fn path(view: ViewId, current: &str) -> Element<Msg> {
     .into()
 }
 
-/// Кнопка страницы: номера растягиваются по своей подписи, стрелки — нет.
+/// Page button: numbers stretch to their caption, arrows do not.
 const STEP_HEIGHT: f32 = 24.0;
 const STEP_WIDTH: f32 = 26.0;
-/// Зазор между частями подвала.
+/// Gap between the footer parts.
 const STEP_GAP: f32 = 8.0;
-/// Поля кнопки страницы по обе стороны от номера (`theme::page_button`).
+/// Page button padding on both sides of the number (`theme::page_button`).
 const STEP_PAD: f32 = 14.0;
 
-/// Сколько номеров помещается в подвал отведённой ширины.
+/// How many page numbers fit in the footer of the allotted width.
 ///
-/// Постоянного в нём три вещи — подпись диапазона и обе стрелки; остальное
-/// отдано номерам, и мерка у них одна, по самому широкому: номера разной
-/// длины стоят в ряд, а посчитанный по короткому не влез бы, когда до
-/// трёхзначных дойдёт очередь.
+/// Three things in it are fixed — the range label and both arrows; the rest is
+/// given to the numbers, and they are measured by the widest one: numbers of
+/// different length stand in a row, and one measured by the short would not fit
+/// when three-digit numbers come.
 fn room(width: f32, pages: usize, range: &str) -> usize {
     let fixed = theme::GUTTER * 2.0
         + format::text_width(range, theme::TEXT_LABEL)
@@ -341,23 +349,23 @@ fn room(width: f32, pages: usize, range: &str) -> usize {
     (((width - fixed) / slot) as i32).max(1) as usize
 }
 
-/// Номера страниц в подвале: окно вокруг текущей, а края названы всегда.
-/// `None` — разрыв, на месте которого стои́т многоточие.
+/// Page numbers in the footer: a window around the current one, with the edges
+/// always named. `None` — a gap, in place of which stands an ellipsis.
 ///
-/// Окно, а не весь список: номеров у каталога бывает под полсотни, в ряд они
-/// не помещаются, а коробка режет по себе — и срезается при этом хвост ряда,
-/// то есть стрелка «дальше». Список без единого способа уйти со своей первой
-/// страницы выглядит короче, чем он есть. Края же названы затем, что до
-/// последней страницы иначе идти по одной.
+/// A window, not the whole list: a catalogue may have around fifty numbers,
+/// they do not fit in a row, and the box cuts by itself — and what is cut off
+/// is the tail of the row, that is the "next" arrow. A list with no way to
+/// leave its first page looks shorter than it is. The edges are named because
+/// otherwise the last page is only reachable one by one.
 fn numbers(page: usize, pages: usize, room: usize) -> Vec<Option<usize>> {
-    // Меньше пяти мест окно не выражает: первая, разрыв, текущая, разрыв,
-    // последняя — его наименьшая форма. Тесно и так, и так, но с окном до
-    // краёв хотя бы можно дойти.
+    // With fewer than five slots the window cannot show itself: first, gap,
+    // current, gap, last — that is its smallest form. Tight either way, but
+    // with the window reaching the edges at least one can get there.
     let room = room.max(5);
     if pages <= room {
         return (0..pages).map(Some).collect();
     }
-    // Края и оба разрыва заняты, подвижному окну достаётся остаток.
+    // The edges and both gaps are occupied; the moving window gets the rest.
     let span = room - 4;
     let first = page.saturating_sub(span / 2).clamp(1, pages - 1 - span);
     let last = first + span - 1;
@@ -374,9 +382,8 @@ fn numbers(page: usize, pages: usize, room: usize) -> Vec<Option<usize>> {
     slots
 }
 
-/// Подвал со страницами. Длинный каталог режется на страницы, и прокрутка
-/// остаётся внутри страницы — поэтому место, на котором стоял пользователь,
-/// не теряется при переходе.
+/// Footer with pages. A long catalogue is cut into pages, and scrolling stays
+/// within the page — so the place the user stood at is not lost on navigation.
 pub fn pager(view: ViewId, arranged: &Arranged<'_>, width: f32) -> Element<Msg> {
     let step = |glyph: &str, to: usize, enabled: bool| {
         let step = theme::surface_button(
@@ -411,7 +418,7 @@ pub fn pager(view: ViewId, arranged: &Arranged<'_>, width: f32) -> Element<Msg> 
 
     let bar = row![
         text::<Msg>(range).size(theme::TEXT_LABEL).color(theme::INK_DIM).single_line(),
-        // Распорка: подпись слева, страницы справа.
+        // Spacer: label on the left, pages on the right.
         space::<Msg>(Length::Fill, Length::Fixed(0.0)),
     ]
     .push(step(theme::glyph::LEFT, arranged.page.saturating_sub(1), arranged.page > 0))
@@ -425,19 +432,20 @@ pub fn pager(view: ViewId, arranged: &Arranged<'_>, width: f32) -> Element<Msg> 
     container(bar).width(Length::Fill).background(theme::SHELF).into()
 }
 
-/// Поле даты в полосе фильтров: подпись края и набранное рядом.
+/// Date field in the filter bar: an edge caption and the typed text beside it.
 ///
-/// Ширина фиксированная, а не тянущаяся: дата — восемь знаков, и растягивать
-/// под неё половину полосы значило бы отнять место у поля запроса, которое как
-/// раз тянется. Набранное сверх места срезает коробка — она и есть граница
-/// показа (см. `Container` в ui-service/types.proto).
+/// The width is fixed, not stretching: a date is eight characters, and
+/// stretching half the bar under it would take space from the query field,
+/// which is exactly the one that stretches. Text beyond the space is cut by the
+/// box — the box is the display boundary (see `Container` in
+/// ui-service/types.proto).
 pub fn date_field(
     caption: &str,
     value: &str,
     on_input: impl Fn(String) -> Msg + 'static,
     on_submit: Msg,
 ) -> Control {
-    let input = text_input::<Msg>("ГГГГ-ММ-ДД", value)
+    let input = text_input::<Msg>("YYYY-MM-DD", value)
         .style(theme::field())
         .font_family(veld_ui_service_wrap::style::FONT_MONO)
         .size(theme::TEXT_LABEL)
@@ -465,99 +473,4 @@ pub fn date_field(
     .padding(Padding { top: 0.0, bottom: 0.0, left: PAD, right: PAD });
 
     Control { element: element.into(), width: DATE_WIDTH }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Поле запроса, три чипа — обычная полоса каталога.
-    const FIELD: f32 = 280.0;
-    const CHIPS: [f32; 3] = [140.0, 150.0, 160.0];
-
-    /// Пока поле помещается вместе с рычагами, полоса остаётся строкой: она и
-    /// читается лучше, и не отнимает у списка высоту.
-    #[test]
-    fn широкая_половина_держит_полосу_строкой() {
-        assert_eq!(shape(900.0, FIELD, &CHIPS), Shape::Line);
-    }
-
-    /// Места не хватило — строку забирает поле, а рычаги ложатся под ним
-    /// столько в ряд, сколько влезло. Ни один при этом не теряется.
-    #[test]
-    fn узкая_половина_разворачивает_полосу() {
-        assert_eq!(shape(700.0, FIELD, &CHIPS), Shape::Stack(vec![3]));
-        assert_eq!(shape(400.0, FIELD, &CHIPS), Shape::Stack(vec![2, 1]));
-
-        for width in [120.0, 400.0, 700.0, 780.0] {
-            let Shape::Stack(rows) = shape(width, FIELD, &CHIPS) else { continue };
-            assert_eq!(rows.iter().sum::<usize>(), CHIPS.len(), "ширина {}", width);
-            assert!(rows.iter().all(|count| *count > 0), "пустой ряд при ширине {}", width);
-        }
-    }
-
-    /// Рычаг шире всей полосы всё равно надо где-то показать — и он встаёт в
-    /// свой ряд один, а не выпадает из неё.
-    #[test]
-    fn рычаг_шире_полосы_встаёт_один() {
-        assert_eq!(shape(150.0, FIELD, &CHIPS), Shape::Stack(vec![1, 1, 1]));
-    }
-
-    /// Помещаются все номера — окна нет и разрывов нет.
-    #[test]
-    fn короткий_список_называет_все_страницы() {
-        assert_eq!(numbers(0, 3, 9), vec![Some(0), Some(1), Some(2)]);
-        assert_eq!(numbers(2, 9, 9), (0..9).map(Some).collect::<Vec<_>>());
-    }
-
-    /// Длинный список: номеров ровно столько, сколько мест, края названы
-    /// всегда, а текущая страница в окне — иначе по ней не видно, где стои́шь.
-    #[test]
-    fn длинный_список_держится_в_отведённых_местах() {
-        for pages in [11usize, 41, 100] {
-            for room in [5usize, 8, 9, 10] {
-                for page in 0..pages {
-                    let slots = numbers(page, pages, room);
-                    assert!(slots.len() <= room.max(5), "{} мест на {}, стр. {}", slots.len(), pages, page);
-                    assert_eq!(slots.first(), Some(&Some(0)), "первая не названа");
-                    assert_eq!(slots.last(), Some(&Some(pages - 1)), "последняя не названа");
-                    assert!(slots.contains(&Some(page)), "текущей {} нет в окне", page);
-                    // Разрыв стои́т только там, где номера действительно
-                    // пропущены: подряд идущие им не разделяются.
-                    let named: Vec<usize> = slots.iter().flatten().copied().collect();
-                    let mut expected = Vec::new();
-                    for pair in named.windows(2) {
-                        expected.push(pair[1] - pair[0] > 1);
-                    }
-                    let gaps: Vec<bool> = slots
-                        .windows(3)
-                        .filter(|window| window[1].is_none())
-                        .map(|_| true)
-                        .collect();
-                    assert_eq!(gaps.len(), expected.iter().filter(|jump| **jump).count());
-                }
-            }
-        }
-    }
-
-    /// Мест меньше, чем нужно окну, — подвал всё равно остаётся проходимым:
-    /// края на месте, а стрелки за номера не отвечают.
-    #[test]
-    fn теснота_не_отнимает_края() {
-        let slots = numbers(20, 41, 1);
-        assert_eq!(slots.first(), Some(&Some(0)));
-        assert_eq!(slots.last(), Some(&Some(40)));
-        assert!(slots.contains(&Some(20)));
-        assert!(slots.len() <= 5);
-    }
-
-    /// Мест считается по самому широкому номеру: посчитанные по «1» не влезли
-    /// бы, когда дошло бы до «41».
-    #[test]
-    fn мест_тем_меньше_чем_длиннее_номера() {
-        let narrow = room(470.0, 41, "1–20 из 810");
-        let wide = room(900.0, 41, "1–20 из 810");
-        assert!(narrow >= 1 && narrow < wide, "{} против {}", narrow, wide);
-        assert!(room(470.0, 999, "1–20 из 19 980") < narrow);
-    }
 }

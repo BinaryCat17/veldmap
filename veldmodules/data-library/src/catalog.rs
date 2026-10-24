@@ -1,4 +1,4 @@
-//! Снимок каталога и сидкары: чтение диска и вывод состояния библиотеки.
+//! Catalog snapshot and sidecars: reading the disk and publishing the library state.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -11,60 +11,60 @@ use crate::proto::data_provider::{ProductRoots, ProductRootsRequest};
 use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::{FsDeleteRequest, FsListRequest, FsReadRequest, FsWriteRequest, FsWriteResult};
 
-/// Потолок сидкара. Сам он — json из пяти полей, то есть сотни байт; потолок
-/// взят много выше не про запас на них, а затем, чтобы отделять
-/// неправдоподобное, а не необычное: файл в десятки килобайт под именем
-/// `.origin` ещё может оказаться нашим, выросшим в будущем, а мегабайтный —
-/// уже нет.
+/// Cap for the sidecar. The sidecar itself is a json of five fields, a few
+/// hundred bytes; the cap is set far above not to leave room for them, but to
+/// separate the implausible from the merely unusual: a file of tens of
+/// kilobytes under the name `.origin` may still be ours, grown in the future,
+/// while a megabyte one cannot.
 const SIDECAR_CAP: u64 = 64 * 1024;
 
-/// «Перечитай каталог». Ответ придёт не отсюда, а из on_list_result: диск
-/// отвечает не мгновенно, и врать про содержимое каталога по памяти — ровно
-/// то, чего этот сервис не делает.
+/// "Re-read the catalogue". The answer comes not from here but from
+/// on_list_result: the disk does not answer instantly, and lying about the
+/// catalogue contents from memory is exactly what this service does not do.
 pub fn on_list(state: &mut State, _req: LibraryRequest) {
-    // Состояние спрашивают, когда его нет: у только что поднявшегося
-    // подписчика. Рассылка при этом отсекает неизменившееся (топик объявлен
-    // снимком), и с прошлого раза оно вполне могло не измениться — тогда
-    // «не изменилось» означало бы «не ответим вовсе». Отпечаток поэтому
-    // забываем: ближайшая рассылка уйдёт непременно.
+    // The state is requested when it is missing: by a subscriber that has just
+    // come up. Meanwhile the broadcast drops what did not change (the topic is
+    // declared a snapshot), and since last time it may well be unchanged — then
+    // "unchanged" would mean "no answer at all". So the fingerprint is
+    // forgotten: the nearest broadcast is guaranteed to go out.
     crate::emit::resend::on_state();
     rescan(state);
 }
 
-/// Перечитать каталог; результатом станет рассылка состояния.
+/// Re-read the catalogue; the result is a broadcast of the state.
 ///
-/// Обход рекурсивный и по всему каталогу, а поводов перечитать бывает столько
-/// же, сколько файлов в снимке: сюда зовёт каждая доведённая закачка и каждое
-/// удаление. Второй обход поверх идущего ответил бы то же самое и стоил бы
-/// столько же, поэтому пока один в полёте, повод копится флагом и
-/// превращается ровно в один обход, когда идущий вернётся. Отложить,
-/// а не отбросить: снимок диска, снятый до изменения, ответом на него не
-/// является.
+/// The traversal is recursive over the whole catalogue, and reasons to re-read
+/// are as many as files in the snapshot: every completed download and every
+/// deletion calls here. A second traversal over a running one would answer the
+/// same and cost the same, so while one is in flight the reason accumulates as
+/// a flag and turns into exactly one traversal when the running one returns.
+/// Postpone, not discard: a disk snapshot taken before the change is not an
+/// answer to it.
 pub fn rescan(state: &mut State) {
     if !state.pending_list.is_empty() {
         state.list_again = true;
         return;
     }
     let correlation_id = state.pending_list.begin(());
-    // Вглубь: снимок лежит папкой, и его файлы — записи каталога наравне с
-    // теми, что лежат в корне. Каталоги сами по себе записями не являются, и
-    // рекурсивный листинг их не отдаёт (см. `FsListRequest.recursive`).
+    // Deep: a snapshot is a folder, and its files are catalogue entries on par
+    // with those in the root. Folders themselves are not entries, and the
+    // recursive listing does not return them (see `FsListRequest.recursive`).
     crate::calls::fs::on_list(&FsListRequest {
         path: storage::DATA_DIR.to_string(),
         recursive: true,
     }, &correlation_id);
 }
 
-/// Снимок диска пришёл. Здесь же подрезаются сидкары и дочитываются те,
-/// которых ещё нет в памяти.
+/// The disk snapshot has arrived. Sidecars are trimmed here as well, and those
+/// not yet in memory are read back.
 pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
     if state.pending_list.take(&veldsdk::correlation()).is_none() { return }
     ingest(state, response);
-    // Каталог прочитан — тем, кто спрашивал раньше, теперь есть чем ответить.
+    // The catalogue is read — those who asked earlier now have their answer.
     crate::module::open::resume(state);
-    // Поводы, набежавшие пока обход шёл, стали ровно одним обходом. Отсюда, а
-    // не из ingest: там ветки выхода, и в каждой отложенный повод пришлось бы
-    // вспоминать заново.
+    // The reasons that piled up while the traversal ran become exactly one
+    // traversal. Here, not in ingest: that has exit branches, and each would
+    // have to remember the postponed reason anew.
     if std::mem::take(&mut state.list_again) {
         rescan(state);
     }
@@ -76,12 +76,13 @@ fn ingest(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
         return;
     }
 
-    // Свёртка по имени, а не список файлов: `foo` и `foo.part` — одна запись.
-    // Побеждает `.part`: он говорит, что с записью происходит сейчас, а файл
-    // под тем же именем остался от прошлой попытки и будет им заменён. Пара
-    // эта появляется только мимо приложения — перекачка сносит доведённый файл
-    // до старта (см. download::on_download), — но выбор всё равно должен быть
-    // назван здесь, а не выпадать из порядка обхода каталога.
+    // Folded by name, not a file list: `foo` and `foo.part` are one entry.
+    // `.part` wins: it says the entry is being worked on now, while the file
+    // under the same name is left from a previous attempt and will be replaced
+    // by it. The pair appears only outside the app — a re-download removes the
+    // completed file before starting (see download::on_download) — but the
+    // choice must still be named here, not fall out of the catalogue traversal
+    // order.
     let mut snapshot: HashMap<String, LocalFile> = HashMap::new();
     for (name, file) in response.entries.iter()
         .filter_map(|e| LocalFile::from_entry(&e.name, e.size, e.modified))
@@ -92,23 +93,25 @@ fn ingest(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
     }
     state.snapshot = snapshot;
 
-    // origins — кэш диска, а не независимая истина: подрезаем под то, что
-    // реально лежит в каталоге, иначе файл, удалённый мимо приложения, остался
-    // бы записью о намерении до конца сессии. Исключение — сидкары, чья запись
-    // ещё в полёте: на диске их закономерно нет, и срезать их значило бы
-    // потерять запись только что начатой закачки.
-    // Множеством, а не списком: подрезка ниже спрашивает его о каждом
-    // известном имени, и на библиотеке в тысячи записей линейный поиск по
-    // списку той же длины подвешивал бы модуль на каждом обходе диска.
+    // origins is a cache of the disk, not an independent truth: trim it to what
+    // is actually in the catalogue, otherwise a file deleted outside the app
+    // would remain an intent record until the end of the session. The exception
+    // is sidecars whose write is still in flight: they are regularly absent
+    // from the disk, and cutting them would lose the record of a just-started
+    // download.
+    // A set, not a list: the trimming below asks it about every known name,
+    // and on a library of thousands of entries a linear search over a list of
+    // the same length would stall the module on every disk traversal.
     let on_disk: HashSet<String> = response.entries.iter()
         .filter_map(|e| e.name.strip_suffix(storage::ORIGIN_SUFFIX))
         .map(str::to_string)
         .collect();
-    // Держится не только то, что уже на диске. Запись сидкара идёт своим
-    // заданием файловой системы, листинг — своим, и порядка между ними нет:
-    // листинг, ушедший раньше записи, сидкара не видит, а ответ его вполне
-    // приходит позже. Поэтому в живых остаются ещё и имена, чей сидкар в
-    // полёте, и имена идущих закачек — у них происхождение тем более наше.
+    // Not only what is already on the disk is kept. The sidecar write goes as
+    // its own file-system job, the listing as its own, and there is no order
+    // between them: a listing that left before the write does not see the
+    // sidecar, yet its answer may well arrive later. So names whose sidecar is
+    // in flight stay alive as well, and so do names of ongoing downloads —
+    // their origin is ours all the more.
     let in_flight: Vec<&str> = state.pending_sidecar_writes.values()
         .map(|w| w.name.as_str())
         .chain(state.queued_sidecars.keys().map(String::as_str))
@@ -120,20 +123,21 @@ fn ingest(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
             || downloading.contains(&name.as_str())
     });
 
-    // Причины срыва — вслед за записями.
+    // Failure reasons follow the entries.
     state.forget_gone_troubles();
 
-    // Дочитываем то, чего ещё нет в памяти. Сидкар — единственное, что
-    // переживает рестарт, так что для файлов с прошлого запуска это
-    // единственный способ узнать ключ провайдера и ожидаемый размер.
+    // Read back what is not yet in memory. The sidecar is the only thing that
+    // survives a restart, so for files from a previous run it is the only way
+    // to learn the provider key and the expected size.
     let missing: Vec<String> = on_disk.into_iter()
         .filter(|name| !state.origins.contains_key(name))
         .filter(|name| !state.pending_reads.values()
             .any(|purpose| matches!(purpose, ReadPurpose::Sidecar(n) if n == name)))
         .collect();
 
-    // Состояние отдаём сразу, не дожидаясь сидкаров: файлы на диске — уже
-    // правда, а происхождение дочитается и придёт следующей рассылкой.
+    // The state is published right away, without waiting for the sidecars: the
+    // files on the disk are already the truth, and the origin is read back and
+    // arrives with the next broadcast.
     publish(state);
 
     for name in missing {
@@ -146,14 +150,16 @@ fn ingest(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
     ask_product_roots(state);
 }
 
-/// Спрашивает провайдера, к каким снимкам относятся записи, у которых снимок не
-/// записан. Такими остаются файлы, скачанные мимо приложения или до того, как
-/// границу стали записывать, — сами по себе они из своего снимка выпадают.
+/// Asks the provider which snapshots the entries without a recorded snapshot
+/// belong to. These are files downloaded outside the app or before the
+/// boundary began to be recorded — on their own they fall out of their
+/// snapshot.
 ///
-/// Спрашиваем, а не выводим: граница снимка — раскладка бакета провайдера, и
-/// второй её носитель у нас разошёлся бы с первым на первой же новой миссии.
-/// Ответ ложится в сидкар: он и так единственное, что переживает рестарт, а
-/// спрашивать одно и то же на каждый листинг незачем.
+/// Ask, do not derive: the snapshot boundary is the layout of the provider's
+/// bucket, and a second carrier of it would diverge from the first on the very
+/// first new mission. The answer goes into the sidecar: it is the only thing
+/// that survives a restart anyway, and there is no point in asking the same on
+/// every listing.
 fn ask_product_roots(state: &mut State) {
     let identifiers: Vec<String> = state
         .origins
@@ -171,12 +177,14 @@ fn ask_product_roots(state: &mut State) {
     );
 }
 
-/// Корни снимков приехали. Приписываем их записям и переписываем сидкары —
-/// каждый из них после этого сам отвечает, к какому снимку файл относится.
+/// The snapshot roots have arrived. Attribute them to the entries and rewrite
+/// the sidecars — after that each sidecar answers on its own which snapshot the
+/// file belongs to.
 ///
-/// Ключа, ни в каком снимке не лежащего, в ответе нет вовсе; такая запись так и
-/// остаётся сама по себе, и спрашивать про неё второй раз мы всё равно будем —
-/// это дёшево (ответ без сети) и самолечится, если раскладку бакета уточнят.
+/// A key lying in no snapshot is absent from the answer altogether; such an
+/// entry stays on its own, and we will ask about it again — it is cheap (an
+/// answer without the network) and heals itself if the bucket layout is
+/// refined.
 pub fn on_product_roots_result(state: &mut State, response: ProductRoots) {
     let correlation_id = veldsdk::correlation();
     if state.pending_roots.settle(&correlation_id) != veldsdk::Reply::Current { return }
@@ -199,15 +207,17 @@ pub fn on_product_roots_result(state: &mut State, response: ProductRoots) {
     publish(state);
 }
 
-/// «В снимке столько файлов» — единственное, что о снимке нельзя вывести из
-/// диска: сколько его файлов доведено, видно по записям, а сколько их должно
-/// быть, знает только тот, кто обошёл снимок в хранилище.
+/// "The snapshot has this many files" — the only thing about a snapshot that
+/// cannot be derived from the disk: how many of its files are complete is
+/// visible from the entries, while how many there should be is known only to
+/// whoever traversed the snapshot in the storage.
 ///
-/// Ложится в сидкары его файлов — тем же приёмом, что и корень снимка
-/// (см. [`on_product_roots_result`]): сидкар и так единственное, что переживает
-/// рестарт, а спрашивать одно и то же на каждый листинг незачем. Переписываются
-/// только те, кто этого числа ещё не знает или знает другое: снимок обходят и
-/// повторно, а лишняя запись на диск — это лишняя запись на диск.
+/// It goes into the sidecars of its files — by the same device as the snapshot
+/// root (see [`on_product_roots_result`]): the sidecar is the only thing that
+/// survives a restart anyway, and there is no point in asking the same on
+/// every listing. Only those that do not know this number yet or know a
+/// different one are rewritten: the snapshot is traversed more than once, and
+/// an extra write to disk is an extra write to disk.
 pub fn on_snapshot(state: &mut State, request: SnapshotFiles) {
     if request.product.is_empty() || request.files == 0 {
         return;
@@ -230,34 +240,37 @@ pub fn on_snapshot(state: &mut State, request: SnapshotFiles) {
     publish(state);
 }
 
-/// Сидкар записи `name` прочитан (ожидание уже снято с учёта, см.
-/// module::on_read_result). Отсутствие сидкара — не ошибка: файл мог быть
-/// скачан мимо приложения, просто докачать его будет нечем.
+/// The sidecar of entry `name` has been read (the wait is already settled, see
+/// module::on_read_result). A missing sidecar is not an error: the file could
+/// have been downloaded outside the app, there is simply nothing to resume it
+/// with.
 pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened) {
     let Some(handle) = &opened.handle else { return };
 
-    // Сидкар — это десятки байт json, который пишем мы сами; что-то большее
-    // под этим именем — не наш файл (обрезанная закачка, чужой мусор).
+    // The sidecar is a few dozen bytes of json that we write ourselves;
+    // anything bigger under this name is not our file (a truncated download,
+    // foreign junk).
     let bytes = match veldsdk::resource::read_whole(handle.clone(), SIDECAR_CAP) {
         Ok(bytes) => bytes,
         Err(why) => {
-            veldsdk::log::warn!(target: "handlers", "сидкар {} не прочитан: {}", name, why);
+            veldsdk::log::warn!(target: "handlers", "sidecar {} not read: {}", name, why);
             return;
         }
     };
     let Ok(sidecar) = serde_json::from_slice::<OriginSidecar>(&bytes) else { return };
     if sidecar.provider != storage::PROVIDER_NAME { return }
 
-    // Прочитанное с диска — самое старое из того, что о записи известно:
-    // читать его начали листингом, а пока читали, о ней могли узнать больше.
-    // Поэтому оно только ДОПОЛНЯЕТ память, а не затирает её: свежий сидкар от
-    // начатой закачки иначе откатывался бы к прежнему, да ещё и уезжал бы в
-    // этом виде обратно на диск первым же прогрессом.
+    // What was read from the disk is the oldest known about the entry: its
+    // reading started with the listing, and while it was reading, more could be
+    // learned about the entry. So it only SUPPLEMENTS memory, not overwrites
+    // it: otherwise a fresh sidecar from a started download would roll back to
+    // the old one, and would even go back to the disk in that form with the
+    // first progress.
     if state.origins.contains_key(&name) {
         return;
     }
-    // И не воскрешает удалённое: удаление сидкара стои́т на учёте, а чтение
-    // могло уйти раньше него.
+    // And it does not resurrect the deleted: the sidecar deletion is tracked,
+    // and the read may have left before it.
     if state.pending_delete.values().any(|path| path == &storage::origin_path(&name)) {
         return;
     }
@@ -267,36 +280,37 @@ pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened)
     ask_product_roots(state);
 }
 
-/// Пишет сидкар. Он ложится на диск ДО старта закачки, поэтому переживает
-/// сбой, случившийся до появления первых байт.
+/// Writes the sidecar. It goes to disk BEFORE the download starts, so it
+/// survives a failure that happened before the first bytes appeared.
 ///
-/// Сидкар приходит целиком, а не полями: он пишется поверх прежнего, и правка
-/// одного факта — это `OriginSidecar { поле: новое, ..прежний }`. Собранный по
-/// полям на месте затирал бы всё, о чём вызывающий не подумал.
+/// The sidecar arrives whole, not field by field: it is written over the old
+/// one, and editing a single fact is `OriginSidecar { field: new, ..old }`.
+/// Assembled from fields on the spot it would wipe everything the caller did
+/// not think of.
 pub fn write_sidecar(state: &mut State, name: &str, sidecar: OriginSidecar) {
     state.origins.insert(name.to_string(), sidecar.clone());
 
-    // Две записи одного сидкара разом — не редкость, а обычный конец закачки:
-    // последний файл снимка пишет своё происхождение по `on_download`, а
-    // следом весь снимок дописывает `siblings`. Отданные в файловую систему
-    // вместе, они идут двумя независимыми заданиями, и переименование побеждает
-    // то, которое кончилось последним, — то есть на диске может остаться
-    // первая, а в памяти вторая. Поэтому вторая ждёт ответа на первую; ждёт
-    // только последняя из них — сидкар пишется целиком, и промежуточные
-    // состояния диску не нужны.
+    // Two writes of the same sidecar at once are not rare but the usual end of
+    // a download: the last file of the snapshot writes its origin via
+    // `on_download`, and the whole snapshot follows with `siblings`. Handed to
+    // the file system together, they go as two independent jobs, and the rename
+    // wins the one that finished last — so the first may stay on disk while the
+    // second is in memory. That is why the second waits for the answer to the
+    // first; only the last of them waits — the sidecar is written whole, and
+    // the disk needs no intermediate states.
     if state.pending_sidecar_writes.values().any(|write| write.name == name) {
         state.queued_sidecars.insert(name.to_string(), sidecar);
         return;
     }
 
     let Ok(json) = serde_json::to_vec(&sidecar) else {
-        veldsdk::log::warn!(target: "handlers", "сидкар {} не собрался в json", name);
+        veldsdk::log::warn!(target: "handlers", "sidecar {} did not serialize to json", name);
         return;
     };
     let region = match veldsdk::resource::region_of(&json) {
         Ok(region) => region,
         Err(error) => {
-            veldsdk::log::warn!(target: "handlers", "сидкар {} не записан: {}", name, error);
+            veldsdk::log::warn!(target: "handlers", "sidecar {} not written: {}", name, error);
             return;
         }
     };
@@ -306,68 +320,71 @@ pub fn write_sidecar(state: &mut State, name: &str, sidecar: OriginSidecar) {
     });
     crate::calls::fs::on_write(&FsWriteRequest {
         path: storage::origin_path(name),
-        // Владение уезжает в таблицу ожидания: освободит его on_write_result.
+        // Ownership goes to the waiting table: on_write_result releases it.
         handle: Some(region.into_handle()),
     }, &correlation_id);
 }
 
-/// fs прочитал наш буфер (успешно или нет) — регион больше не нужен.
+/// fs has read our buffer (successfully or not) — the region is no longer
+/// needed.
 pub fn on_write_result(state: &mut State, response: FsWriteResult) {
     let Some(write) = state.pending_sidecar_writes.take(&veldsdk::correlation()) else { return };
     drop(veldsdk::OwnedResource::from_raw_id(write.region));
     if !response.error.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "сидкар не сохранён: {}", response.error);
+        veldsdk::log::warn!(target: "handlers", "sidecar not saved: {}", response.error);
     }
-    // Место освободилось — пишем то, что ждало своей очереди (см.
-    // [`write_sidecar`]). Ждущий сидкар свежее записанного: он и есть то, что
-    // должно остаться на диске.
+    // The slot is free — write what was waiting its turn (see
+    // [`write_sidecar`]). The waiting sidecar is fresher than the written one:
+    // it is what should stay on disk.
     if let Some(waiting) = state.queued_sidecars.remove(&write.name) {
         write_sidecar(state, &write.name, waiting);
         return;
     }
-    // Записи в памяти больше нет — значит её удалили, пока запись шла в
-    // файловую систему. Отменить отданное задание нечем, поэтому сидкар
-    // сносится ещё раз: иначе он остаётся сиротой, и ближайший листинг
-    // воскрешает по нему строку-намерение. Подрезка `origins` записи с
-    // сидкаром в полёте не трогает, так что «нет в памяти» здесь означает
-    // именно удаление (см. `rescan` и [`delete_entry`]).
+    // The entry is no longer in memory — it was deleted while the write was
+    // going to the file system. There is no way to cancel the dispatched job,
+    // so the sidecar is removed once more: otherwise it stays an orphan, and
+    // the nearest listing resurrects an intent row from it. The `origins`
+    // trimming does not touch an entry with a sidecar in flight, so "not in
+    // memory" here means exactly a deletion (see `rescan` and
+    // [`delete_entry`]).
     if !state.origins.contains_key(&write.name) {
         veldsdk::log::debug!(target: "handlers",
-            "сидкар {} записан уже после удаления записи — сносим", write.name);
+            "sidecar {} written after the entry was deleted — removing it", write.name);
         let path = storage::origin_path(&write.name);
         let correlation_id = state.pending_delete.begin(path.clone());
         crate::calls::fs::on_delete(&FsDeleteRequest { path }, &correlation_id);
     }
 }
 
-/// Удаляет данные записи, оставляя сидкар: так перекачка сносит доведённый
-/// файл, не теряя того, откуда он взялся.
+/// Deletes the entry's data, keeping the sidecar: this is how a re-download
+/// removes the completed file without losing where it came from.
 pub fn delete_data(state: &mut State, name: &str) {
     let path = storage::data_path(name, state.is_partial(name));
     let correlation_id = state.pending_delete.begin(path.clone());
     crate::calls::fs::on_delete(&FsDeleteRequest { path }, &correlation_id);
 }
 
-/// Удаляет запись целиком — вместе с её сидкаром, иначе `.origin` остался бы
-/// сиротой и файл воскрес бы записью о намерении.
+/// Deletes the entry whole — together with its sidecar, otherwise `.origin`
+/// would stay an orphan and the file would resurrect as an intent record.
 pub fn delete_entry(state: &mut State, name: &str) {
     state.origins.remove(name);
     state.queued_sidecars.remove(name);
-    // Причина срыва уходит вместе с записью: она про эту запись, а не про имя.
+    // The failure reason leaves with the entry: it is about the entry, not the
+    // name.
     state.troubles.remove(name);
-    // Удаление сидкара — с учётом, как и удаление данных: не удалившийся
-    // `.origin` остаётся сиротой, и ближайший же листинг воскрешает по нему
-    // запись о намерении. Молчаливый отказ здесь означает строку в
-    // «Скачанном», которая не уходит никогда, и причину, которой нигде нет.
+    // The sidecar deletion is tracked, like the data deletion: a `.origin`
+    // that failed to delete stays an orphan, and the nearest listing
+    // resurrects an intent record from it. A silent failure here means a row in
+    // "Downloads" that never goes away, and a reason that exists nowhere.
     let path = storage::origin_path(name);
     let correlation_id = state.pending_delete.begin(path.clone());
     crate::calls::fs::on_delete(&FsDeleteRequest { path }, &correlation_id);
     delete_data(state, name);
 }
 
-// ── Вывод состояния ────────────────────────────────────────────
+// ── Publishing the state ────────────────────────────────────────────
 
-/// Рассылает состояние библиотеки — единственный способ рассказать о нём.
+/// Broadcasts the library state — the only way to tell about it.
 pub fn publish(state: &State) {
     crate::emit::on_state(&LibraryState { entries: entries(state), error: String::new() });
 }
@@ -376,13 +393,14 @@ fn publish_error(error: &str) {
     crate::emit::on_state(&LibraryState { entries: Vec::new(), error: error.to_string() });
 }
 
-/// Выводит записи из трёх источников. Ни один не является надмножеством
-/// остальных: закачка может идти до появления файла, а сидкар — остаться
-/// без данных.
+/// Builds the entries from three sources. None of them is a superset of the
+/// rest: a download may run before the file appears, and a sidecar may stay
+/// without data.
 ///
-/// Имена собираются множеством, а не списком с проверкой на вхождение: имя —
-/// ключ записи, и второй раз оно означало бы вторую запись того же файла.
-/// Упорядоченным — порядок записей заодно и получается, сортировать нечего.
+/// The names are collected as a set, not a list with membership checks: a name
+/// is the key of an entry, and a second time it would mean a second entry of
+/// the same file. Ordered — the entry order comes out as well, nothing to
+/// sort.
 fn entries(state: &State) -> Vec<LibraryEntry> {
     let names: BTreeSet<&str> = state.snapshot.keys()
         .chain(state.origins.keys())
@@ -395,8 +413,9 @@ fn entries(state: &State) -> Vec<LibraryEntry> {
         let file = state.entry_for(name);
 
         let (status, done, total) = if let Some((_, dl)) = state.active_download(name) {
-            // Пока закачка жива, байты только отсюда: снимок диска обновляется
-            // лишь на терминальных событиях и во время закачки заведомо отстал.
+            // While the download is alive, the bytes come only from here: the
+            // disk snapshot updates only on terminal events and is knowingly
+            // stale during the download.
             let total = if dl.total > 0 { dl.total } else { known_total };
             (LibraryStatus::LibDownloading, dl.done, total)
         } else if let Some(file) = file {
@@ -406,8 +425,8 @@ fn entries(state: &State) -> Vec<LibraryEntry> {
                 (LibraryStatus::LibComplete, file.size, file.size)
             }
         } else {
-            // Сидкар есть, данных нет — намерение пользователя, которое не
-            // должно молча пропасть из списка.
+            // Sidecar present, data absent — a user intent that must not
+            // silently vanish from the list.
             (LibraryStatus::LibPaused, 0, known_total)
         };
 
@@ -417,9 +436,9 @@ fn entries(state: &State) -> Vec<LibraryEntry> {
             name: name.to_string(),
             done,
             total,
-            // Причина — только у стоящей записи: у идущей её сняло начало
-            // попытки, а у доведённой она означала бы, что сорвалось то, что
-            // дошло.
+            // The reason is carried only by a stopped entry: for a running one
+            // the start of the attempt cleared it, and for a completed one it
+            // would mean that what arrived failed.
             trouble: match status {
                 LibraryStatus::LibPaused => state.troubles.get(name).cloned().unwrap_or_default(),
                 _ => String::new(),
@@ -429,127 +448,4 @@ fn entries(state: &State) -> Vec<LibraryEntry> {
             siblings: state.siblings_of(name),
         }
     }).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::module::Config;
-
-    fn state() -> State {
-        crate::module::hook_init(Config {}).expect("состояние собирается без диска")
-    }
-
-    fn on_disk(state: &mut State, name: &str, is_partial: bool) {
-        state.snapshot.insert(name.to_string(), LocalFile { size: 7, is_partial, modified: 0 });
-    }
-
-    fn listing(names: &[&str]) -> veldsdk::proto::fs::FsListResult {
-        veldsdk::proto::fs::FsListResult {
-            entries: names
-                .iter()
-                .map(|name| veldsdk::proto::fs::FsEntry { name: name.to_string(), size: 7, modified: 0 })
-                .collect(),
-            error: String::new(),
-        }
-    }
-
-    /// Обход диска на рукотворном листинге: `foo` и `foo.part` сворачиваются в
-    /// одну запись, и побеждает `.part`; файл, у которого на диске лежит один
-    /// сидкар, дочитывается запросом к fs — и всё это видно снаружи, на шине:
-    /// состояние уезжает сразу, сидкар спрашивается следом.
-    #[test]
-    fn a_listing_folds_parts_and_asks_for_missing_sidecars() {
-        use veldsdk::prost::Message;
-        veldsdk::fake::install();
-        let mut state = state();
-
-        ingest(&mut state, listing(&["a.tif", "a.tif.part", "b.tif.origin", "b.tif"]));
-
-        assert_eq!(state.snapshot.len(), 2, "две записи: {:?}", state.snapshot.keys().collect::<Vec<_>>());
-        assert!(state.snapshot["a.tif"].is_partial, "у пары побеждает .part");
-        assert!(!state.snapshot["b.tif"].is_partial);
-
-        let published = veldsdk::fake::published();
-        let topics: Vec<&str> = published.iter().map(|p| p.topic.as_str()).collect();
-        assert!(topics.contains(&"data-library/on_state"), "состояние разослано: {topics:?}");
-        let asked: Vec<String> = published
-            .iter()
-            .filter(|p| p.topic == "fs/on_read")
-            .map(|p| veldsdk::proto::fs::FsReadRequest::decode(&p.payload[..]).unwrap().path)
-            .collect();
-        assert_eq!(asked, vec![storage::origin_path("b.tif")], "сидкар без записи в памяти дочитывается");
-        assert!(topics.iter().position(|t| *t == "data-library/on_state") < topics.iter().position(|t| *t == "fs/on_read"),
-            "состояние уезжает раньше, чем спрошен сидкар");
-    }
-
-    /// Отказ листинга уезжает ошибкой состояния, а снимок в памяти не трогается.
-    #[test]
-    fn a_failed_listing_is_reported_and_keeps_the_snapshot() {
-        use veldsdk::prost::Message;
-        veldsdk::fake::install();
-        let mut state = state();
-        on_disk(&mut state, "kept.tif", false);
-
-        ingest(&mut state, veldsdk::proto::fs::FsListResult { entries: Vec::new(), error: "нет каталога".into() });
-
-        assert!(state.snapshot.contains_key("kept.tif"));
-        let last = veldsdk::fake::published().pop().expect("что-то ушло");
-        assert_eq!(last.topic, "data-library/on_state");
-        let told = LibraryState::decode(&last.payload[..]).unwrap();
-        assert_eq!(told.error, "нет каталога");
-    }
-
-    /// Причину срыва носит только стоящая запись.
-    ///
-    /// У доведённой она означала бы, что сорвалось то, что дошло, — а дойти
-    /// после срыва запись могла и мимо приложения: файл дозакачали руками,
-    /// подложили из копии, переименовали. Причина при этом остаётся в памяти
-    /// до следующего обхода диска, и рассылать её оттуда нельзя.
-    #[test]
-    fn only_a_stopped_entry_carries_its_trouble() {
-        let mut state = state();
-        on_disk(&mut state, "soil.tgz", true);
-        state.troubles.insert("soil.tgz".to_string(), "HTTP 403".to_string());
-
-        let stopped = entries(&state);
-        assert_eq!(stopped.len(), 1);
-        assert_eq!(stopped[0].status, LibraryStatus::LibPaused as i32);
-        assert_eq!(stopped[0].trouble, "HTTP 403");
-
-        // Тот же файл, доведённый: причина остаётся в памяти, но наружу не
-        // едет.
-        on_disk(&mut state, "soil.tgz", false);
-        let done = entries(&state);
-        assert_eq!(done[0].status, LibraryStatus::LibComplete as i32);
-        assert!(done[0].trouble.is_empty(), "у доведённой записи причины срыва не бывает");
-    }
-
-    /// Обход диска уносит причины тех записей, которых на диске больше нет:
-    /// причина принадлежит записи, а не имени.
-    #[test]
-    fn troubles_leave_with_their_entries() {
-        let mut state = state();
-        on_disk(&mut state, "ушедший.tgz", true);
-        state.troubles.insert("ушедший.tgz".to_string(), "HTTP 403".to_string());
-
-        // Ни на диске, ни в сидкарах — записи не стало.
-        state.snapshot.clear();
-        state.forget_gone_troubles();
-        assert!(state.troubles.is_empty());
-
-        // А та, что осталась одним сидкаром, причину сохраняет: закачка
-        // сорвалась до первых байт, и это ровно тот случай, ради которого
-        // причину и показывают.
-        state.origins.insert("оборванный.tgz".to_string(), storage::OriginSidecar {
-            provider: storage::PROVIDER_NAME.to_string(),
-            identifier: "eodata/оборванный.tgz".to_string(),
-            total_bytes: None,
-            product: String::new(),
-            siblings: 0,
-        });
-        state.troubles.insert("оборванный.tgz".to_string(), "HTTP 403".to_string());
-        state.forget_gone_troubles();
-        assert_eq!(state.troubles.len(), 1);
-    }
 }

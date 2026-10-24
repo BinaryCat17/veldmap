@@ -155,7 +155,7 @@ lie; the reason goes into the status line and the first tile that lands
 removes it (`ViewState.error` against `ViewState.trouble`, the same pair on the
 globe). The **detail limit** is a third thing: a fact about the source, not
 about an attempt. `Meta::capped` words it once for both consumers
-("подробнее W×H из W₀×H₀ не будет", computed with `Meta::reachable` through
+("no detail finer than W×H out of W₀×H₀", computed with `Meta::reachable` through
 `pyramid::level_size`, so the caption, the log and the choice of rasters
 cannot disagree by a pixel), and it is shown only when the consumer has
 settled — a show is going on and nothing remains to gather — because the

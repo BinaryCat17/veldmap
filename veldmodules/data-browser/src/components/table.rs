@@ -1,9 +1,9 @@
-//! components/table.rs — таблица списка: шапка, строки, меню строки.
+//! components/table.rs — listing table: header, rows, row menu.
 //!
-//! Одна на все три вида. Что можно сделать со строкой, выводится из неё самой,
-//! а не из вида: папку открывают там, где она есть, скачанное смотрят там, где
-//! оно скачано, — и вкладке нечего к этому добавить. Поэтому и колонки, и
-//! кнопки во всех трёх видах одни и те же.
+//! One table for all three views. What can be done with a row is derived from
+//! the row itself, not from the view: a folder is opened where it exists, a
+//! downloaded item is viewed where it was downloaded — and the tab has nothing
+//! to add. So both the columns and the buttons are the same in all three views.
 
 use veld_ui_service_wrap::{column, row, Keyed, Row as RowBuilder};
 use crate::proto::ui_service::{
@@ -16,18 +16,18 @@ use crate::module::state::overlay::Pace;
 use crate::module::state::ViewId;
 use crate::module::{theme, Msg, ViewMsg};
 
-/// Колонка таблицы. Перечислением, а не списком ширин: колонок столько же,
-/// сколько ячеек в строке, и связывать одно с другим позицией в массиве значит
-/// однажды сдвинуть ячейку на соседнюю колонку.
+/// Table column. An enumeration, not a list of widths: there are as many
+/// columns as cells in a row, and tying one to the other by position in an
+/// array means one day shifting a cell onto a neighboring column.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Column {
-    /// Выбор строки: набор для пакетных действий (см. handlers::outline).
-    /// Своя колонка по той же причине, что у раскрытия, — это отдельное
-    /// действие, и нажимать его надо мимо главного действия строки.
+    /// Row selection: a set for batch actions (see handlers::outline).
+    /// Its own column for the same reason as expansion — it is a separate
+    /// action, and it must be pressed outside the row's main action.
     Check,
-    /// Треугольник раскрытия. Своя колонка, а не значок внутри имени:
-    /// раскрытие — действие, и нажимать его надо мимо самой строки, иначе оно
-    /// спорит с её главным действием.
+    /// Expansion triangle. Its own column, not a glyph inside the name:
+    /// expansion is an action, and it must be pressed outside the row itself,
+    /// otherwise it competes with the row's main action.
     Twist,
     Icon,
     Name,
@@ -39,9 +39,9 @@ pub enum Column {
     Actions,
 }
 
-/// Все колонки в порядке показа. Один список на всю таблицу: сетка у шапки,
-/// заголовка группы и строки обязана совпадать, а три её копии рано или поздно
-/// разъедутся.
+/// All columns in display order. One list for the whole table: the grid of the
+/// header, the group title, and the row must match, and three copies of it
+/// would sooner or later drift apart.
 const COLUMNS: [Column; 10] = [
     Column::Check,
     Column::Twist,
@@ -55,63 +55,65 @@ const COLUMNS: [Column; 10] = [
     Column::Actions,
 ];
 
-/// В каком порядке колонки уступают место, когда его мало. Первыми уходят дата
-/// и размер: это справка о записи, и она никуда не денется — запись такая же и
-/// через час. Загрузка уступает следом, но раньше состояния и формата: она
-/// говорит о том, что происходит прямо сейчас, а из двух соседей один называет
-/// род продукта, второй — где он лежит, и оба различают строки между собой.
-/// Значок уходит последним: род строки виден и по её имени, но пока место есть,
-/// значок читается быстрее.
+/// The order in which columns give up space when it is scarce. Date and size
+/// go first: they are reference facts about the record, and they do not go
+/// away — the record is the same in an hour. Loading yields next, but before
+/// status and format: it tells what is happening right now, while of its two
+/// neighbors one names the product kind and the other where it lies, and both
+/// distinguish rows from one another. The glyph goes last: the row kind is
+/// visible from its name too, but while there is room, the glyph reads faster.
 ///
-/// Уступив колонку, работа не пропадает: её место — полоса под строкой снимка,
-/// и рисуется она ровно там, где колонки нет (см. [`strip_shown`]).
+/// Giving up a column does not lose the work: its place is the strip under the
+/// snapshot row, and it is drawn exactly where the column is absent (see
+/// [`strip_shown`]).
 ///
-/// Имени и кнопок в этом списке нет: имя единственное тянущееся, и сжатие
-/// доводит его до нулевой ширины (см. `Wrapping` в types.proto), а строка без
-/// имени и без действий — не строка.
+/// Name and buttons are absent from this list: the name is the only stretching
+/// one, and squeezing drives it to zero width (see `Wrapping` in types.proto),
+/// while a row without a name and without actions is not a row.
 const DROP_ORDER: [Column; 6] =
     [Column::Date, Column::Size, Column::Progress, Column::Status, Column::Format, Column::Icon];
 
-/// Отметка и треугольник раскрытия — узкие колонки перед значком. Полей у них
-/// нет вовсе (см. [`padding_of`]), поэтому ширина здесь — это ровно то место,
-/// которое достаётся кнопке.
+/// The check and the expansion triangle are narrow columns before the glyph.
+/// They have no padding at all (see [`padding_of`]), so the width here is
+/// exactly the room that goes to the button.
 ///
-/// Мерены они по знаку, а не на глаз: у строки, которой нечего отметить и
-/// нечего раскрыть, обе стоят пустыми, и всё лишнее в них читается как отступ
-/// — будто файл вложен туда, где вложенности нет.
+/// Measured by the glyph, not by eye: a row with nothing to mark and nothing
+/// to expand leaves both empty, and any extra in them reads as indentation —
+/// as if a file were nested where there is no nesting.
 const CHECK: f32 = 20.0;
 const TWIST: f32 = 14.0;
 const ICON: f32 = 34.0;
-/// Под тип продукта, а не под расширение файла: у радара он длинный
-/// (`IW_GRDH_1SDV`), и по трём буквам «png» такую колонку не смеришь.
+/// Sized for the product type, not the file extension: for radar it is long
+/// (`IW_GRDH_1SDV`), and three letters like "png" cannot measure such a column.
 const FORMAT: f32 = 80.0;
 const DATE: f32 = 88.0;
 const SIZE: f32 = 84.0;
 const STATUS: f32 = 104.0;
-/// Под подпись хода, а не под одну полосу: в ячейке стои́т фраза о том, что
-/// именно грузится, и меряна колонка по ней — «ступень 10/12 · 8,6/25 МБ» по
-/// мерке [`format::text_width`].
+/// Sized for the progress caption, not just a bar: the cell holds a phrase
+/// saying exactly what is being loaded, and the column is measured by it —
+/// "step 10/12 · 8.6/25 MB" against [`format::text_width`].
 const PROGRESS: f32 = 148.0;
-/// Сколько кнопок помещается в колонку действий. Больше всего их у снимка,
-/// лежащего папкой: скачать целиком, посмотреть, положить на шар и меню.
+/// How many buttons fit in the actions column. A snapshot stored as a folder
+/// has the most: download whole, view, put on the globe, and the menu.
 const ACTION_BUTTONS: f32 = 4.0;
 
-/// Ширина колонки действий. Считается по числу кнопок, а не подбирается на
-/// глаз, — приписанная кнопка иначе молча уедет под обрезку ячейки (см. `grid`).
+/// Width of the actions column. Computed from the button count, not tuned by
+/// eye — otherwise an added button would silently slide under the cell's clip
+/// (see `grid`).
 const ACTIONS: f32 =
     theme::ROW_BUTTON * ACTION_BUTTONS + BUTTON_GAP * (ACTION_BUTTONS - 1.0) + CELL_PADDING * 2.0;
 
-/// Та же колонка, когда в ней осталось одно меню.
+/// The same column when only one menu is left in it.
 const ACTIONS_COMPACT: f32 = theme::ROW_BUTTON + CELL_PADDING * 2.0;
 
-/// Ниже этого имени не остаётся даже узнаваемого куска, и колонка действий
-/// уступает свои значки меню (см. [`Fit::compact`]). Число мельче
-/// [`NAME_MIN`]: то — ширина, ради которой уходят соседние колонки, а это —
-/// граница, за которой строка перестаёт быть строкой.
+/// Below this name not even a recognizable piece remains, and the actions
+/// column gives up its menu glyphs (see [`Fit::compact`]). Smaller than
+/// [`NAME_MIN`]: that is the width for which neighboring columns go, while
+/// this is the boundary past which a row stops being a row.
 const NAME_FLOOR: f32 = 64.0;
 
-/// Сколько места занимает колонка. У имени своей ширины нет — оно забирает
-/// остаток.
+/// How much room a column takes. The name has no width of its own — it takes
+/// the remainder.
 fn width_of(column: Column) -> f32 {
     match column {
         Column::Check => CHECK,
@@ -127,41 +129,42 @@ fn width_of(column: Column) -> f32 {
     }
 }
 
-/// Ширина, ради которой колонки уступают место: пока имени достаётся меньше,
-/// уходит следующая соседняя. Обещанием она не является — уступать бывает уже
-/// нечему, и тогда имя получает то, что осталось (см. [`fit`]).
+/// The width for which columns give up space: while the name gets less, the
+/// next neighbor goes. It is not a promise — sometimes there is nothing left
+/// to give up, and then the name gets what remains (see [`fit`]).
 const NAME_MIN: f32 = 150.0;
 
-/// Зазор между кнопками строки. Наружу затем, что такой же ряд кнопок стоит в
-/// списке слоёв, и вторая запись этого зазора разошлась бы с первой.
+/// Gap between the row's buttons. Public because the same button row stands in
+/// the layer list, and a second record of this gap would drift from the first.
 pub const BUTTON_GAP: f32 = 6.0;
 
-/// Отступ содержимого ячейки от её границ — по обе стороны.
+/// Cell content padding from its edges — on both sides.
 const CELL_PADDING: f32 = 8.0;
 
-/// Какие необязательные колонки нужны этому списку. Знает это тот, кто собрал
-/// строки: раскрывать и отмечать бывает нечего, и пустой столбец тогда сдвигал
-/// бы весь список ради того, чего в нём не бывает.
+/// Which optional columns this listing needs. The one who assembled the rows
+/// knows this: sometimes there is nothing to expand or mark, and an empty
+/// column would then shift the whole listing for something that never happens
+/// in it.
 #[derive(Clone, Copy, Default)]
 pub struct Optional {
-    /// Есть что раскрыть.
+    /// There is something to expand.
     pub twisty: bool,
-    /// Есть что выбрать — то есть в списке стои́т хоть одна выбираемая строка
-    /// (см. `Row::choosable`).
+    /// There is something to select — that is, the listing has at least one
+    /// choosable row (see `Row::choosable`).
     pub checkable: bool,
 }
 
-/// Какие колонки показывать в отведённой ширине и сколько достанется имени.
+/// Which columns fit in the allotted width and how much goes to the name.
 ///
-/// Половина экрана вдвое уже окна, а фиксированные колонки от этого не
-/// худеют — в узком месте их сумма перекрывает всё место, и тянущееся имя
-/// схлопывается в ноль. Поэтому лишние не сжимаются, а уходят: список без
-/// даты читается, список без имени — нет.
+/// Half the screen is twice as narrow as the window, and the fixed columns do
+/// not get thinner — in a narrow place their sum covers all the room, and the
+/// stretching name collapses to zero. So the extra ones are not squeezed but
+/// dropped: a listing without a date reads, a listing without a name does not.
 ///
-/// Возвращаемая ширина имени — та, что достанется ему на самом деле, даже если
-/// это меньше [`NAME_MIN`]: по ней считается многоточие (`format::mono_fit`), и
-/// названное с запасом имя не влезло бы в свою ячейку — вместо многоточия его
-/// обрывала бы обрезка, на середине знака.
+/// The returned name width is what it actually gets, even if that is less than
+/// [`NAME_MIN`]: the ellipsis is computed from it (`format::mono_fit`), and a
+/// name sized with a margin would not fit its cell — instead of an ellipsis the
+/// clip would cut it off mid-glyph.
 pub fn fit(width: f32, optional: Optional) -> Fit {
     let mut columns: Vec<Column> = COLUMNS.to_vec();
     if !optional.checkable {
@@ -170,7 +173,7 @@ pub fn fit(width: f32, optional: Optional) -> Fit {
     if !optional.twisty {
         columns.retain(|column| *column != Column::Twist);
     }
-    // Отступы экрана и собственные поля колонки имени тратятся всегда.
+    // Screen gutters and the name column's own padding are always spent.
     let overhead = theme::GUTTER * 2.0 + CELL_PADDING * 2.0;
     let taken = |columns: &[Column], compact: bool| -> f32 {
         columns
@@ -189,72 +192,77 @@ pub fn fit(width: f32, optional: Optional) -> Fit {
         }
         columns.retain(|column| *column != dropped);
     }
-    // Уступать больше нечем, а имени не осталось даже на узнаваемый кусок:
-    // тогда уступают значки строки. Уходят они не в никуда — то же действие
-    // стои́т пунктом её меню, и разница только в том, есть ли под него место.
+    // There is nothing left to give up, and the name has not even a
+    // recognizable piece left: then the row's glyphs give up. They do not go
+    // nowhere — the same action stands as a menu item, and the only difference
+    // is whether there is room for it.
     let compact = width - taken(&columns, false) < NAME_FLOOR;
     let name = (width - taken(&columns, compact)).max(0.0);
     Fit { columns, name, compact }
 }
 
-/// Что вышло из [`fit`]: какие колонки показывать, сколько досталось имени и
-/// не пришлось ли колонке действий ужаться до одного меню.
+/// What came out of [`fit`]: which columns to show, how much went to the name,
+/// and whether the actions column had to shrink to a single menu.
 pub struct Fit {
     pub columns: Vec<Column>,
     pub name: f32,
-    /// Значки строки не поместились и ушли в её меню.
+    /// The row's glyphs did not fit and moved into its menu.
     pub compact: bool,
 }
 
-/// Ступенька группировки.
+/// Grouping step.
 const INDENT: f32 = 12.0;
 
-/// Высота шапки — своя: в ней подписи, а не строки данных.
+/// Header height — its own: it holds captions, not data rows.
 const HEADER_HEIGHT: f32 = 22.0;
 
-/// Полоса хода укладки на шар под строкой снимка. Тонкая: она отвечает на один
-/// вопрос — «идёт ли», — а что именно и сколько осталось, сказано словами в
-/// колонке ЗАГРУЗКА и в списке «На просмотре».
+/// Progress bar of the globe placement under the snapshot row. Thin: it
+/// answers one question — "is it going" — while what exactly is going and how
+/// much is left is said in words in the LOADING column and in the "Being
+/// viewed" list.
 const ONTO_GLOBE: f32 = 3.0;
 
-/// Полоса в ячейке ЗАГРУЗКА. Толще той, что под строкой: там она одна на всю
-/// строку и заметна длиной, а здесь стои́т под подписью и меряется ею.
+/// Bar in the LOADING cell. Thicker than the one under the row: there a single
+/// bar covers the whole row and stands out by its length, while here it sits
+/// under the caption and is measured by it.
 const LOAD_BAR: f32 = 4.0;
 
-/// Расширения, у которых есть превью, — по ним же выбрана иконка строки.
+/// Extensions that have a preview — the row glyph is chosen by them too.
 const IMAGE_FORMATS: [&str; 7] = ["png", "jpg", "jpeg", "tif", "tiff", "jp2", "webp"];
 
-/// Строка сетки: ячейка на каждую показываемую колонку. Ячейка обрезает
-/// содержимое по своим границам — длинное имя иначе рисуется поверх соседней
-/// колонки (см. `Wrapping` в types.proto).
+/// A grid row: one cell per shown column. The cell clips its content at its
+/// own edges — otherwise a long name is drawn over the neighboring column (see
+/// `Wrapping` in types.proto).
 ///
-/// `indent` — ступень группировки. Она расширяет первую колонку, а не сдвигает
-/// иконку внутри неё: в колонке иконки ровно иконка и есть, и ступень, положенная
-/// внутрь, упирается в её край — второй ярус обрезается, третий и дальше стоят
-/// на одном месте. Расширение забирает колонка имени (она единственная
-/// тянущаяся), поэтому едут вправо и иконка, и подпись, а всё правее остаётся
-/// выровненным по своим местам.
+/// `indent` is the grouping step. It widens the first column instead of
+/// shifting the glyph inside it: the icon column holds exactly the glyph, and
+/// a step laid inside it hits its edge — the second tier gets clipped, the
+/// third and further stand in one place. The widening is taken by the name
+/// column (the only stretching one), so both the glyph and the caption move
+/// right, while everything to the right stays aligned to its places.
 ///
-/// Высоту ставит вызывающий: у шапки она своя.
+/// The caller sets the height: the header has its own.
 fn grid(
     cells: impl Fn(Column) -> Element<Msg>,
     columns: &[Column],
     indent: f32,
     compact: bool,
 ) -> RowBuilder<Msg> {
-    // Ступень группировки расширяет первую показанную колонку, какой бы она ни
-    // была: колонки отметки и раскрытия есть не всегда, и привязка ступени к
-    // ним роняла бы отступ группы там, где отмечать и раскрывать нечего.
+    // The grouping step widens the first shown column, whichever it is: the
+    // check and expansion columns are not always present, and tying the step
+    // to them would drop the group indent where there is nothing to mark or
+    // expand.
     let first = columns.first().copied();
     row(columns.iter().map(|column| {
         let step = if Some(*column) == first { indent } else { 0.0 };
         let pad = padding_of(*column);
         let (width, left) = match (column, compact) {
-            // Ступень достаётся и имени, когда первой показанной колонкой
-            // оказалось оно: своей ширины у имени нет, поэтому ступень уходит
-            // в отступ. Иначе ярусы группировки схлопывались бы в один — а
-            // ширина имени всё равно считалась бы за вычетом ступени, то есть
-            // подрезанной под отступ, которого нет (см. `entry_line`).
+            // The step goes to the name too when it turns out to be the first
+            // shown column: the name has no width of its own, so the step goes
+            // into the padding. Otherwise the grouping tiers would collapse
+            // into one — while the name width would still be computed minus
+            // the step, i.e. trimmed for a padding that does not exist (see
+            // `entry_line`).
             (Column::Name, _) => (Length::Fill, pad + step),
             (Column::Actions, true) => (Length::Fixed(ACTIONS_COMPACT + step), pad + step),
             (other, _) => (Length::Fixed(width_of(*other) + step), pad + step),
@@ -269,9 +277,10 @@ fn grid(
     .width(Length::Fill)
 }
 
-/// Поля ячейки по бокам. У колонок-кнопок их нет: кнопка занимает ячейку
-/// целиком, и восемь точек полей с каждой стороны оставили бы от двадцати
-/// четыре — значок в такой ячейке рисуется огрызком, а нажать по нему негде.
+/// Cell padding on the sides. The button columns have none: the button takes
+/// the whole cell, and eight points of padding on each side would leave only a
+/// stub of the twenty-four — the glyph in such a cell is drawn cropped, and
+/// there is nowhere to press it.
 fn padding_of(column: Column) -> f32 {
     match column {
         Column::Check | Column::Twist => 0.0,
@@ -279,62 +288,66 @@ fn padding_of(column: Column) -> f32 {
     }
 }
 
-/// Отступ сетки от краёв экрана. У строки его ставит сама кнопка строки
-/// (`theme::row_button`) — она обязана быть нажимаемой и на полях, — поэтому
-/// здесь он назначается только тем, кто не кнопка: шапке и заголовку группы.
-/// Дважды назначенный отступ сужает колонки, а обрезка имени про это не знает
-/// и рисует его поверх соседней.
+/// Grid indent from the screen edges. For a row it is set by the row button
+/// itself (`theme::row_button`) — it must be pressable on the margins too — so
+/// here it is given only to those that are not buttons: the header and the
+/// group title. A twice-applied indent narrows the columns, while the name clip
+/// knows nothing about it and draws the name over the neighbor.
 fn gutters<M>(content: impl Into<Element<M>>) -> Container<M> {
     container(content)
         .width(Length::Fill)
         .padding(Padding { top: 0.0, bottom: 0.0, left: theme::GUTTER, right: theme::GUTTER })
 }
 
-/// Всё, что строке нужно знать помимо себя самой. Одним значением, а не
-/// четырьмя параметрами на каждую функцию: список того, что «нужно знать»,
-/// растёт, а сигнатуры от этого читаться не перестают.
+/// Everything a row needs to know beyond itself. One value instead of four
+/// parameters on every function: the list of what "needs to be known" grows,
+/// and the signatures stay readable.
 #[derive(Clone, Copy)]
 pub struct Context<'a> {
     pub listing: &'a ListingState,
-    /// Раскрытое меню этого списка; `None` — раскрыто что-то другое или
-    /// ничего. Живёт оно в состоянии экрана (`State::open`), а не вида:
-    /// раскрытым бывает одно на весь экран.
+    /// The open menu of this listing; `None` — something else is open or
+    /// nothing. It lives in the screen state (`State::open`), not the view:
+    /// at most one thing is open across the whole screen.
     pub menu: Option<&'a Menu>,
-    /// Колонки, которые помещаются в отведённую ширину, — их и рисуем
-    /// (см. [`fit`]). Набор один на всю таблицу: шапка, заголовок группы и
-    /// строка обязаны совпасть по сетке.
+    /// Columns that fit in the allotted width — those are the ones drawn (see
+    /// [`fit`]). One set for the whole table: the header, the group title, and
+    /// the row must match on the grid.
     pub columns: &'a [Column],
-    /// Ширина колонки имени в точках разметки.
+    /// Width of the name column in layout points.
     pub name_width: f32,
-    /// Значки строки не поместились: у неё осталось одно меню, а то, что
-    /// стояло значками, ушло в него пунктами (см. [`Fit::compact`]).
+    /// The row's glyphs did not fit: only its menu is left, and what stood as
+    /// glyphs moved into it as items (see [`Fit::compact`]).
     pub compact: bool,
-    /// Сколько знаков имени совпадает у всех строк страницы — в начале и в
-    /// хвосте (см. [`format::shared`]). Одно на всю таблицу: режется по нему
-    /// каждая строка, и посчитанное построчно резало бы соседей по-разному.
+    /// How many name characters match across all rows of the page — at the
+    /// head and the tail (see [`format::shared`]). One for the whole table:
+    /// every row is cut by it, and computing it per row would cut neighbors
+    /// differently.
     pub shared: (usize, usize),
-    /// Папка, которую сейчас показывают; пусто — вид её не знает (скачанное,
-    /// поиск). По ней видно, куда вести «показать в каталоге» бессмысленно.
+    /// The folder currently shown; empty — the view does not know it (the
+    /// download, the search). By it one can see where "show in catalogue"
+    /// would be pointless.
     pub here: &'a str,
-    /// Ключ снимка, чей контур выбран на шаре; пусто — не выбран ни один.
-    /// Живёт он в состоянии приложения (`State::pick`), а не вида: выбирают на
-    /// шаре, а видно это должно быть в списке, из которого снимок родом.
+    /// Key of the snapshot whose outline is selected on the globe; empty —
+    /// none is selected. It lives in the application state (`State::pick`),
+    /// not the view: the selection happens on the globe, but it must be seen
+    /// in the listing the snapshot comes from.
     pub picked: &'a str,
-    /// Строка, к которой привёл переход, — она подсвечена наравне с выбранной
-    /// на шаре: обе отвечают на один и тот же вопрос «что здесь главное
-    /// сейчас», и говорить о них по-разному было бы не о чем.
+    /// The row a transition led to — it is highlighted on par with the one
+    /// selected on the globe: both answer the same question "what is the main
+    /// thing here now", and there is nothing to tell them apart by.
     pub target: &'a str,
-    /// Точка отсчёта для подписей времени. Одна на всю таблицу: строки одного
-    /// кадра должны мериться от одного «сейчас», иначе соседние даты
-    /// перескакивают через полночь по-разному.
+    /// Reference point for time captions. One for the whole table: rows of one
+    /// frame must be measured from one "now", otherwise neighboring dates
+    /// cross midnight differently.
     pub now: i64,
 }
 
-/// Шапка. Стоит вне прокрутки, поэтому не уезжает вместе со строками.
+/// The header. It stands outside the scroll, so it does not move away with the
+/// rows.
 ///
-/// `all` — отмечено ли всё, что видно под ней (см. `Arranged::all_marked`): в
-/// колонке отметки стоит та же коробочка, что и в строках, и действует она на
-/// тот же набор, о котором говорит.
+/// `all` — whether everything visible under it is marked (see
+/// `Arranged::all_marked`): the check column holds the same box as the rows,
+/// and it acts on the very set it speaks of.
 pub fn header(view: ViewId, columns: &[Column], all: bool, compact: bool) -> Element<Msg> {
     let label = |name: &str| {
         text::<Msg>(name.to_string())
@@ -346,22 +359,22 @@ pub fn header(view: ViewId, columns: &[Column], all: bool, compact: bool) -> Ele
     };
     let head = grid(
         |column| match column {
-            // «Показанное», а не «всё»: коробочка берёт страницу со всем
-            // раскрытым на ней, и подпись обязана сказать это — иначе она
-            // обещает выбрать всю выдачу, а выберет двадцать строк.
+            // "Shown", not "all": the box takes the page with everything
+            // expanded on it, and the caption must say so — otherwise it
+            // promises to select the whole result set but selects twenty rows.
             Column::Check => hinted(
                 theme::row_check(Some(all)).on_press(Msg::In(view, ViewMsg::CheckShown(!all))),
                 match all {
-                    true => "Снять выбор с показанного",
-                    false => "Выбрать показанное",
+                    true => "Deselect the shown",
+                    false => "Select the shown",
                 },
             ),
-            Column::Name => label("ИМЯ"),
-            Column::Format => label("ФОРМАТ"),
-            Column::Date => label("ДАТА"),
-            Column::Size => label("РАЗМЕР"),
-            Column::Status => label("СОСТОЯНИЕ"),
-            Column::Progress => label("ЗАГРУЗКА"),
+            Column::Name => label("NAME"),
+            Column::Format => label("FORMAT"),
+            Column::Date => label("DATE"),
+            Column::Size => label("SIZE"),
+            Column::Status => label("STATUS"),
+            Column::Progress => label("LOADING"),
             Column::Twist | Column::Icon | Column::Actions => theme::nothing(),
         },
         columns,
@@ -379,9 +392,9 @@ pub fn header(view: ViewId, columns: &[Column], all: bool, compact: bool) -> Ele
     .into()
 }
 
-/// Строки таблицы. Каждая названа своим ключом: список переупорядочивается и
-/// теряет элементы из середины, а состояние виджетов должно ехать за строкой,
-/// а не за местом.
+/// Table rows. Each is named by its own key: the list reorders and loses items
+/// from the middle, and widget state must travel with the row, not with the
+/// place.
 pub fn body(view: ViewId, lines: &[Line<'_>], context: Context<'_>) -> Element<Msg> {
     column(lines.iter().map(|line| match line {
         Line::Group { title, meta, depth } => group_line(title, meta, *depth, context),
@@ -392,14 +405,14 @@ pub fn body(view: ViewId, lines: &[Line<'_>], context: Context<'_>) -> Element<M
     .into()
 }
 
-/// Раскрытая папка, чей листинг ещё идёт. Той же сеткой, что и строка, — она
-/// стоит на её месте и уступит его первой же приехавшей записи; нажимать в ней
-/// нечего.
+/// An expanded folder whose listing is still running. On the same grid as a
+/// row — it stands in the row's place and will give it up to the first record
+/// to arrive; there is nothing to press in it.
 fn waiting_line(depth: usize, context: Context<'_>) -> Element<Msg> {
     let indent = indent(depth);
     let cells = grid(
         |column| match column {
-            Column::Name => text::<Msg>("загружается…".to_string())
+            Column::Name => text::<Msg>("loading…".to_string())
                 .size(theme::TEXT_SMALL)
                 .color(theme::INK_FAINT)
                 .single_line()
@@ -421,7 +434,7 @@ fn waiting_line(depth: usize, context: Context<'_>) -> Element<Msg> {
     .into()
 }
 
-/// Заголовок группы: та же сетка, что у строки, но нажимать в нём нечего.
+/// Group title: the same grid as a row, but there is nothing to press in it.
 fn group_line(title: &str, meta: &str, depth: usize, context: Context<'_>) -> Element<Msg> {
     let indent = indent(depth);
     let cells = grid(
@@ -436,8 +449,8 @@ fn group_line(title: &str, meta: &str, depth: usize, context: Context<'_>) -> El
             .weight(FontWeight::WeightMedium)
             .single_line()
             .into(),
-            // Сколько внутри — говорится там, где у строк стоит их состояние:
-            // это про содержимое группы, а не про её размер.
+            // How many are inside is said where rows show their status: it is
+            // about the group's contents, not about its size.
             Column::Status => text::<Msg>(meta.to_string())
                 .size(theme::TEXT_SMALL)
                 .color(theme::INK_DIM)
@@ -466,8 +479,9 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
         |column| match column {
             Column::Check => check(view, row_data, context),
             Column::Twist => twist(view, row_data, context),
-            // Цветом сказано, чем запись является, а не чем она лежит: снимок
-            // одним объектом и снимок каталогом — один и тот же снимок.
+            // The color says what the record is, not how it is stored: a
+            // snapshot as one object and a snapshot as a catalogue are the same
+            // snapshot.
             Column::Icon => glyph(
                 row_glyph(row_data),
                 match row_data.kind {
@@ -475,9 +489,9 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
                     RowKind::Folder | RowKind::Product { .. } => theme::ACCENT,
                 },
             ),
-            // Имя моноширинным: колонка считается по знакам, а у
-            // пропорционального шрифта их ширина разная. Папка — обычным: это
-            // подпись, а не значение.
+            // Name in monospace: the column is measured in characters, and in
+            // a proportional font their widths differ. A folder uses regular
+            // type: it is a caption, not a value.
             Column::Name => {
                 let title = format::distinct(
                     &row_data.title,
@@ -494,10 +508,10 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
                     false => mono::<Msg>(title).size(theme::TEXT_MONO).color(theme::INK_SOFT).into(),
                 }
             }
-            // Моноширинным и с усечением по месту: это код, а не слово, и
-            // обрезать его молча нельзя — ячейка обрежет по границе, и значение
-            // упрётся в соседнюю колонку без единого знака о том, что оно
-            // неполное.
+            // Monospace and truncated in place: this is a code, not a word,
+            // and it must not be cut silently — the cell clips at the boundary,
+            // and the value would butt against the neighboring column without a
+            // single sign that it is incomplete.
             Column::Format => mono::<Msg>(format::ellipsize(
                 &row_data.format(),
                 format::mono_fit(FORMAT - CELL_PADDING * 2.0, theme::TEXT_TAG),
@@ -531,16 +545,18 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
                 ]
                 .spacing(6.0)
                 .align_items(Alignment::Center);
-                // Причина срыва длиннее колонки, а срезанная на полуслове она
-                // не объясняет ничего. Целиком её показывает подсказка —
-                // единственное место в строке, чья ширина не задана колонкой.
+                // The failure reason is longer than the column, and cut
+                // mid-sentence it explains nothing. The tooltip shows it whole
+                // — the only place in the row whose width is not set by a
+                // column.
                 match &row_data.status {
                     RowStatus::Paused { trouble, .. } | RowStatus::Partial { trouble, .. }
                         if !trouble.is_empty() => tooltip(
                         cell,
-                        // Ужимаем: причину пишет не разметка, а тот, кто
-                        // отказал, и длину её ничто не ограничивает — а
-                        // подсказка идёт одной строкой и шире окна не влезет.
+                        // Trim it: the reason is written not by the layout but
+                        // by whoever refused, and nothing limits its length —
+                        // while the tooltip goes on one line and will not fit
+                        // wider than the window.
                         format::ellipsize(trouble, 90),
                         TooltipPosition::TooltipTop,
                     )
@@ -563,9 +579,10 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
     let height = theme::ROW_HEIGHT - if strip { ONTO_GLOBE } else { 0.0 };
     let cells = cells.height(Length::Fixed(height));
 
-    // Вся строка — кнопка: нажатие на неё делает то же, что её главная кнопка,
-    // а у той, чьё главное дело — раскрыться, оно и делает. Отдельная кнопка
-    // при этом остаётся там, где она есть: по ней видно, что именно случится.
+    // The whole row is a button: pressing it does what its main button does,
+    // and for the one whose main business is to expand, that is what it does.
+    // The separate button meanwhile stays where it is: it shows what exactly
+    // will happen.
     let key = row_data.key();
     let press = primary(view, row_data).map(|action| action.message).or_else(|| {
         row_data
@@ -579,31 +596,32 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
 
     let mut lines: Vec<Element<Msg>> =
         vec![line.width(Length::Fill).height(Length::Fixed(height)).into()];
-    // Доли ещё нет, а работа идёт — полоса заливается целиком, но вполсилы:
-    // пустая дорожка в три точки на этом месте не говорит ничего, а начинается
-    // ею как раз самое долгое, что бывает со снимком, — описание растра по
-    // сети, десятки секунд.
+    // There is no share yet, but the work is going — the bar fills completely,
+    // but at half strength: an empty three-point track here says nothing, and
+    // it is exactly the longest thing that happens to a snapshot that starts
+    // this way — reading the raster over the network, tens of seconds.
     let bar = match onto_globe {
         Pace::Share(share) => Some((theme::ACCENT, share)),
         Pace::Unknown => Some((theme::ACCENT_HALF, 1.0)),
-        // Добыча кончилась, а место остаётся за ней: пустым, чтобы строка не
-        // дрогнула. Что снимок на шаре, говорит зажжённый значок.
+        // The fetching is over, but the room stays with it: empty, so the row
+        // does not jump. That the snapshot is on the globe is told by the lit
+        // glyph.
         Pace::Idle => None,
     };
     if strip {
         lines.push(match bar {
             Some((color, share)) => {
-                // Подпись у полосы своя, а не только у значка в правом краю
-                // строки: смотрят-то на полосу, и без подписи она — доля
-                // неизвестно чего.
+                // The bar has its own caption, not only the glyph at the
+                // right edge of the row: it is the bar one looks at, and
+                // without a caption it is a share of unknown what.
                 tooltip(
                     progress_bar::<Msg>(0.0..=1.0, share)
                         .style(theme::progress(color))
                         .width(Length::Fill)
                         .height(Length::Fixed(ONTO_GLOBE)),
                     match row_data.globe.said() {
-                        Some(said) => format!("Набирается пирамида — {}", said),
-                        None => "Кладётся на глобус".to_string(),
+                        Some(said) => format!("Building the pyramid — {}", said),
+                        None => "Placing on the globe".to_string(),
                     },
                     TooltipPosition::TooltipTop,
                 )
@@ -620,35 +638,35 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
     column(lines).width(Length::Fill).key(row_data.key().to_string()).into()
 }
 
-/// Рисуется ли под строкой полоса хода укладки на шар.
+/// Whether the globe placement progress bar is drawn under the row.
 ///
-/// Запасной путь, а не второй голос: где колонка ЗАГРУЗКА показана, там она и
-/// говорит о работе — словами, числами и полосой сразу, — и вторая полоса под
-/// той же строкой повторяла бы её. Где колонки нет (узкая панель — та самая, в
-/// которой рядом стои́т шар), полоса остаётся единственным, что видно без
-/// наведения курсора.
+/// A fallback path, not a second voice: where the LOADING column is shown, it
+/// is the one that speaks of the work — with words, numbers, and a bar at once
+/// — and a second bar under the same row would repeat it. Where the column is
+/// absent (a narrow panel — the very one with the globe beside it), the bar is
+/// the only thing visible without hovering the cursor.
 ///
-/// Полоса — снимку, а не всякому, кто о нём знает: о шаре отвечает и файл
-/// внутри снимка (см. `rows::from_key`), но нажимали-то значок у снимка, и
-/// видно должно быть там же.
+/// The bar belongs to the snapshot, not to everyone who knows about it: a file
+/// inside the snapshot answers for the globe too (see `rows::from_key`), but it
+/// was the snapshot's glyph that was pressed, and it must be visible there.
 ///
-/// Место под полосу занято, пока снимок на шаре, — а не пока по нему идёт
-/// работа. Иначе строка подпрыгивает на три точки ровно в тот миг, когда
-/// добыча кончилась, то есть на каждом слое и на глазах. Высота при этом
-/// занятая, а не добавленная: шаг строки считается в одном месте
-/// (`theme::ROW_PITCH`), им же список прокручивают к нужной строке, и
-/// подрасти он не может.
+/// The room under the bar is taken while the snapshot is on the globe — not
+/// while work is going on it. Otherwise the row jumps by three points exactly
+/// at the moment the fetching ends, that is, on every layer and before one's
+/// eyes. The height is taken, not added: the row step is computed in one place
+/// (`theme::ROW_PITCH`), the list scrolls to a row by it too, and it cannot
+/// grow.
 fn strip_shown(row: &Row, columns: &[Column]) -> bool {
     row.globe.any() && row.is_snapshot() && !columns.contains(&Column::Progress)
 }
 
-/// Чем строка выделена среди соседей. Старшинство названо в самой роли
-/// (см. [`theme::RowTint`]): подсветка одна на весь экран и старше отметки,
-/// которых в списке бывает полсотни.
+/// How the row stands out among its neighbors. The precedence is named in the
+/// role itself (see [`theme::RowTint`]): the highlight is one for the whole
+/// screen and outranks the marks, of which there may be fifty in a listing.
 ///
-/// Выбор читается здесь той же меркой, что и в коробочке (`check`), — тем же
-/// ключом и тем же множеством: два выражения на этот вопрос однажды разошлись
-/// бы, и залитая строка стояла бы с пустой коробочкой.
+/// The selection is read here by the same measure as in the box (`check`) — by
+/// the same key and the same set: two expressions of this question would one
+/// day drift apart, and a filled row would stand with an empty box.
 fn tint(row: &Row, context: Context<'_>) -> theme::RowTint {
     let picked = (!context.picked.is_empty() && row.snapshot_key() == context.picked)
         || row.named(context.target);
@@ -662,23 +680,25 @@ fn tint(row: &Row, context: Context<'_>) -> theme::RowTint {
     }
 }
 
-/// Насколько отодвинут ярус группировки. Считается по глубине здесь и только
-/// здесь: сдвиг знают двое — сетка (первая колонка шире на него) и обрезка
-/// имени (колонка имени на него же уже), и разъехаться им нельзя.
+/// How far the grouping tier is shifted. Computed from the depth here and only
+/// here: two know the shift — the grid (the first column is wider by it) and
+/// the name clip (the name column is narrower by the same), and they must not
+/// drift apart.
 fn indent(depth: usize) -> f32 {
     depth as f32 * INDENT
 }
 
-/// Содержимое первой колонки. Ступень группировки сюда не входит: её ставит
-/// сетка шириной колонки, иначе иконка упирается в её край (см. `grid`).
+/// Contents of the first column. The grouping step is not part of it: the grid
+/// sets it through the column width, otherwise the glyph butts against its edge
+/// (see `grid`).
 fn glyph(glyph: &str, color: Color) -> Element<Msg> {
     theme::row_glyph::<Msg>(glyph, color)
 }
 
-/// Значок строки — по роду, а не по расширению. Снимок обозначается спутником
-/// и тогда, когда лежит папкой: папка тут — способ хранения, а не то, чем эта
-/// запись является. Расширение спрашивается последним, у того, о чём больше
-/// сказать нечего.
+/// Row glyph — by kind, not by extension. A snapshot is marked by the
+/// satellite even when it lies as a folder: a folder here is a way of storage,
+/// not what the record is. The extension is asked last, from the one there is
+/// nothing more to say about.
 fn row_glyph(row: &Row) -> &'static str {
     match row.kind {
         RowKind::Product { .. } => theme::glyph::SATELLITE,
@@ -690,29 +710,30 @@ fn row_glyph(row: &Row) -> &'static str {
     }
 }
 
-/// Кружок, подпись и её цвет — три способа сказать одно и то же состояние.
+/// Circle, caption, and its color — three ways to say the same state.
 ///
-/// `numbers` — говорить ли числами. Числа принадлежат колонке ЗАГРУЗКА, и пока
-/// она показана, здесь стои́т слово: две соседние ячейки с одной и той же дробью
-/// не сообщают вдвое больше. Ушла колонка — числа возвращаются сюда, потому
-/// что иначе о ходе закачки в узкой панели не осталось бы ни знака: полоса под
-/// строкой отвечает только за снимки на шаре.
+/// `numbers` — whether to speak in numbers. Numbers belong to the LOADING
+/// column, and while it is shown, a word stands here: two neighboring cells
+/// with the same fraction do not tell twice as much. The column is gone — the
+/// numbers return here, because otherwise in a narrow panel there would be no
+/// sign of the download progress left: the bar under the row answers only for
+/// snapshots on the globe.
 fn status_look(status: &RowStatus, numbers: bool) -> (Color, String, Color) {
     match status {
-        RowStatus::Complete => (theme::ACCENT, "на диске".to_string(), theme::ACCENT_TEXT),
-        RowStatus::Remote => (theme::LINE, "в хранилище".to_string(), theme::INK_DIM),
+        RowStatus::Complete => (theme::ACCENT, "on disk".to_string(), theme::ACCENT_TEXT),
+        RowStatus::Remote => (theme::LINE, "in storage".to_string(), theme::INK_DIM),
         RowStatus::Downloading { done, total } => (
             theme::ACCENT,
             match (numbers, *total > 0) {
                 (true, true) => format::progress(*done, *total),
-                _ => "скачивается".to_string(),
+                _ => "downloading".to_string(),
             },
             theme::ACCENT_TEXT,
         ),
-        // Сорвавшаяся закачка говорит своим голосом. «Прервано» ниже — это всё
-        // остальное: и остановленная человеком, и та, чья причина не пережила
-        // перезапуск; молчать о причине там, где она есть, значит предложить
-        // нажать «Продолжить» вслепую.
+        // A failed download speaks in its own voice. "Interrupted" below is
+        // everything else: both stopped by a human and the one whose reason did
+        // not survive a restart; staying silent about a reason where there is
+        // one means offering to press "Resume" blindly.
         RowStatus::Paused { trouble, .. } if !trouble.is_empty() => (
             theme::DANGER,
             trouble.clone(),
@@ -722,73 +743,78 @@ fn status_look(status: &RowStatus, numbers: bool) -> (Color, String, Color) {
             theme::WARN,
             match (numbers, *total > 0) {
                 (true, true) => format::progress(*done, *total),
-                _ => "прервано".to_string(),
+                _ => "interrupted".to_string(),
             },
             theme::WARN_TEXT,
         ),
-        // Отказ важнее счёта: сколько скачано, видно и по размеру, а «3 на
-        // диске» зелёным — это спокойная надпись, за которой стоящее не видно.
+        // The refusal outweighs the count: how much is downloaded is visible
+        // from the size too, while "3 on disk" in green is a calm caption
+        // hiding what stands behind it.
         RowStatus::Partial { trouble, .. } if !trouble.is_empty() => (
             theme::DANGER,
             trouble.clone(),
             theme::DANGER_TEXT,
         ),
-        RowStatus::Partial { done, .. } => (theme::ACCENT, format!("{} на диске", done), theme::ACCENT_TEXT),
+        RowStatus::Partial { done, .. } => (theme::ACCENT, format!("{} on disk", done), theme::ACCENT_TEXT),
     }
 }
 
-/// Что делается со строкой прямо сейчас — всё, чем это показывают.
+/// What is being done with the row right now — everything that shows it.
 ///
-/// Одна ячейка на два рода работы, потому что вопрос у смотрящего один: «идёт
-/// ли что-нибудь и сколько ещё». Два рода в двух колонках заставили бы его
-/// искать ответ в двух местах, из которых одно всегда пустое.
+/// One cell for two kinds of work, because the viewer has one question: "is
+/// anything going and how much is left". Two kinds in two columns would make
+/// them look for the answer in two places, one of which is always empty.
 struct Load {
-    /// Части подписи от старшей к младшей: ужимаясь, ячейка отбрасывает их с
-    /// хвоста (см. [`fit_label`]).
+    /// Caption parts from senior to junior: when shrinking, the cell drops
+    /// them from the tail (see [`fit_label`]).
     parts: Vec<String>,
-    /// Доля, 0..1; `None` — работа идёт, а доли у неё нет.
+    /// Share, 0..1; `None` — work is going, but it has no share.
     share: Option<f32>,
     color: Color,
-    /// Подсказка: та же работа, названная целиком и словами. Место в ней есть
-    /// на всё, чего не вместила ячейка.
+    /// Tooltip: the same work, named fully and in words. It has room for
+    /// everything the cell did not fit.
     hint: String,
 }
 
-/// Чем занята строка. `None` — ничем: колонке в этой строке сказать нечего.
+/// What the row is busy with. `None` — nothing: the column has nothing to say
+/// in this row.
 ///
-/// Старшинство одно и оно не про удобство: скачивание на диск меняет то, что
-/// лежит на машине, а показ по сети производен и повторим — и о нём, кроме
-/// этой ячейки, говорят зажжённый значок шара и список «На просмотре».
+/// The precedence is single and it is not about convenience: downloading to
+/// disk changes what lies on the machine, while the network view is derived
+/// and repeatable — and about it, besides this cell, the lit globe glyph and
+/// the "Being viewed" list speak.
 ///
-/// Пирамида — снимку, а не всякому, кто о нём знает: о шаре отвечает и файл
-/// внутри снимка (см. `rows::from_key`), но нажимали-то значок у снимка, и
-/// видно должно быть там же.
+/// The pyramid belongs to the snapshot, not to everyone who knows about it: a
+/// file inside the snapshot answers for the globe too (see `rows::from_key`),
+/// but it was the snapshot's glyph that was pressed, and it must be visible
+/// there.
 fn load_of(row: &Row) -> Option<Load> {
     match &row.status {
         RowStatus::Downloading { done, total } => Some(Load {
             parts: match *total > 0 {
                 true => vec![format::progress(*done, *total)],
-                false => vec!["скачивается".to_string()],
+                false => vec!["downloading".to_string()],
             },
             share: (*total > 0).then(|| *done as f32 / *total as f32),
             color: theme::ACCENT,
             hint: match *total > 0 {
                 true => format!(
-                    "Скачивается на диск — {}, осталось {}",
+                    "Downloading to disk — {}, {} left",
                     format::progress(*done, *total),
                     format::bytes(total.saturating_sub(*done)),
                 ),
-                false => "Скачивается на диск".to_string(),
+                false => "Downloading to disk".to_string(),
             },
         }),
-        // Стоящая закачка — тоже ответ на «сколько ещё»: продолжать её будут с
-        // этого места. Причину говорит соседняя ячейка, здесь только место.
+        // A standing download also answers "how much is left": it will be
+        // continued from this place. The reason is told by the neighboring
+        // cell, here only the room.
         RowStatus::Paused { done, total, .. } if *total > 0 => Some(Load {
             parts: vec![format::progress(*done, *total)],
             share: Some(*done as f32 / *total as f32),
             color: theme::WARN,
             hint: format!(
-                "Закачка стои́т — {}, осталось {}",
+                "Download is standing — {}, {} left",
                 format::progress(*done, *total),
                 format::bytes(total.saturating_sub(*done)),
             ),
@@ -804,12 +830,13 @@ fn load_of(row: &Row) -> Option<Load> {
             return None;
         }
         Some(Load {
-            hint: format!("Набирается пирамида — {}", parts.join(" · ")),
+            hint: format!("Building the pyramid — {}", parts.join(" · ")),
             parts,
-            // Доли ещё нет, а работа идёт — полоса заливается целиком, но
-            // вполсилы: пустая дорожка на этом месте не говорит ничего, а
-            // начинается ею как раз самое долгое, что бывает со снимком, —
-            // описание растра по сети, десятки секунд.
+            // There is no share yet, but the work is going — the bar fills
+            // completely, but at half strength: an empty track here says
+            // nothing, and it is exactly the longest thing that happens to a
+            // snapshot that starts this way — reading the raster over the
+            // network, tens of seconds.
             share: match row.globe.pace() {
                 Pace::Share(share) => Some(share),
                 Pace::Unknown | Pace::Idle => None,
@@ -822,13 +849,14 @@ fn load_of(row: &Row) -> Option<Load> {
     })
 }
 
-/// Подпись, ужатая под ширину: части отбрасываются с хвоста, пока не влезет.
+/// A caption shrunk to fit the width: parts are dropped from the tail until it
+/// fits.
 ///
-/// С хвоста, потому что порядок частей и есть их старшинство: ступень называет,
-/// чем меряется полоса, байты — единственное, что движется у долгого чтения, а
-/// счёт ячеек мельче обоих. Не влезла и одна — отдаём её как есть: обрезать её
-/// многоточием значит показать «ступ…», из чего не выводится ничего, а ячейка
-/// обрежет лишнее сама (см. `grid`).
+/// From the tail because the order of the parts is their precedence: the step
+/// names what the bar measures, the bytes are the only thing moving in a long
+/// read, and the tile count is smaller than both. Not even one fits — we give
+/// it as is: cutting it with an ellipsis would show "ste…", from which nothing
+/// follows, while the cell will clip the excess itself (see `grid`).
 fn fit_label(parts: &[String], width: f32) -> String {
     for take in (1..=parts.len()).rev() {
         let said = parts[..take].join(" · ");
@@ -865,15 +893,15 @@ fn progress_cell(row: &Row) -> Element<Msg> {
     .into()
 }
 
-/// Главное действие строки: что случится по нажатию на неё.
+/// The row's main action: what will happen when pressing it.
 struct Primary {
     glyph: &'static str,
-    /// Подпись подсказки — она же говорит, что именно случится.
+    /// Tooltip caption — it also says what exactly will happen.
     hint: &'static str,
     message: Msg,
-    /// Действие уводит внутрь — в другую папку или в другой список. Отдельным
-    /// значком такое не стоит: нажатие на строку делает ровно то же, и стрелка
-    /// рядом с ней повторяла бы её (см. `quick`).
+    /// The action leads inside — into another folder or another listing. It
+    /// does not stand as a separate glyph: pressing the row does exactly the
+    /// same, and an arrow beside it would repeat it (see `quick`).
     transition: bool,
 }
 
@@ -887,59 +915,62 @@ impl Primary {
     }
 }
 
-/// Главная кнопка строки. `None` — делать со строкой нечего (например, ключ
-/// провайдера неизвестен).
+/// The row's main button. `None` — there is nothing to do with the row (for
+/// example, the provider key is unknown).
 fn primary(view: ViewId, row: &Row) -> Option<Primary> {
-    // Строка, сложенная из записей, сама записью не является: качать и
-    // открывать нужно её файлы, а её ключ — путь снимка в хранилище, и послать
-    // его в закачку значит попросить скачать папку одним объектом. Её
-    // собственное действие — раскрыться (см. `twist`).
+    // A row folded from records is not a record itself: its files are what to
+    // download and open, while its key is the snapshot's path in storage, and
+    // sending it to the download would mean asking to download a folder as one
+    // object. Its own action is to expand (see `twist`).
     if row.folded {
         return None;
     }
-    // Действие без ключа некому адресовать — лучше не предлагать его вовсе,
-    // чем послать заведомо пустой запрос. Отсюда `?` на каждом: чем адресовать
-    // это действие, известно раньше, чем оно построено.
+    // An action without a key has no one to address — better not to offer it at
+    // all than to send a knowingly empty request. Hence the `?` on each: what
+    // to address this action with is known earlier than the action is built.
     let remote = || (!row.identifier.is_empty()).then(|| row.identifier.clone());
     let local = || (!row.name.is_empty()).then(|| row.name.clone());
 
     Some(match &row.status {
-        // Папка спрашивается первой, чем бы она ни была занята: её ключ —
-        // общий префикс, а не объект, и послать его в закачку значит попросить
-        // скачать папку одним куском. Пауза и продолжение у неё свои и стоят
-        // пунктами меню — там они названы снимком, а не файлом.
+        // The folder is asked first, whatever it is busy with: its key is a
+        // common prefix, not an object, and sending it to the download would
+        // mean asking to download the folder as one piece. It has its own pause
+        // and resume as menu items — there they are named for the snapshot, not
+        // the file.
         _ if row.kind.is_folder() => Primary::transition(
             theme::glyph::ENTER,
-            "Перейти",
+            "Enter",
             Msg::In(view, ViewMsg::Enter(remote()?)),
         ),
         RowStatus::Downloading { .. } => {
-            Primary::new(theme::glyph::PAUSE, "Пауза", Msg::Download(remote()?, row.product.clone()))
+            Primary::new(theme::glyph::PAUSE, "Pause", Msg::Download(remote()?, row.product.clone()))
         }
         RowStatus::Paused { .. } => Primary::new(
             theme::glyph::PLAY,
-            "Продолжить",
+            "Resume",
             Msg::Download(remote()?, row.product.clone()),
         ),
         RowStatus::Remote => Primary::new(
             theme::glyph::DOWNLOAD,
-            "Скачать",
+            "Download",
             Msg::Download(remote()?, row.product.clone()),
         ),
         RowStatus::Complete => {
-            Primary::new(theme::glyph::EYE, "Открыть", Msg::In(view, ViewMsg::Preview(local()?)))
+            Primary::new(theme::glyph::EYE, "Open", Msg::In(view, ViewMsg::Preview(local()?)))
         }
-        // Про папку, часть которой скачана, главная кнопка сказать не может:
-        // «скачать остальное» библиотека не умеет, а «открыть» тут нечего.
+        // About a folder that is partly downloaded the main button cannot say
+        // anything: "download the rest" the library cannot do, and "open" there
+        // is nothing to open.
         RowStatus::Partial { .. } => return None,
     })
 }
 
-/// Кнопки справа: быстрые значки и меню всего остального.
+/// Buttons on the right: quick glyphs and the menu of everything else.
 fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
-    // В тесноте значки уступают место имени: строка без имени не строка. Уходят
-    // они не в никуда — то же действие становится пунктом меню, и значок с
-    // пунктом здесь одно и то же, разница только в том, есть ли место.
+    // In tight space the glyphs give up their place to the name: a row without
+    // a name is not a row. They do not go nowhere — the same action becomes a
+    // menu item, and the glyph and the item are one and the same here, the
+    // only difference being whether there is room.
     let shown = match context.compact {
         true => Vec::new(),
         false => quick(view, entry),
@@ -954,10 +985,10 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
 
     let mut items = menu_items(view, entry, context.here);
     if context.compact {
-        // Пунктами — впереди прочего: это главные действия строки, значками
-        // они и стояли. Выключенный значок пунктом не становится: значок хотя
-        // бы держит своё место в ряду и объясняется подсказкой, а пункт меню,
-        // который ничего не делает, не делает и этого.
+        // As items — ahead of the rest: these are the row's main actions, they
+        // stood as glyphs. A disabled glyph does not become an item: a glyph at
+        // least keeps its place in the row and is explained by the tooltip,
+        // while a menu item that does nothing does not do even that.
         let moved: Vec<super::menu::Item> = quick(view, entry)
             .into_iter()
             .filter_map(|Quick { glyph, label, message, .. }| {
@@ -993,24 +1024,27 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
         .into()
 }
 
-/// Быстрый значок строки: чем нарисован, что скажет подсказка, что пошлёт и
-/// каким лицом стоит.
+/// A quick glyph of the row: how it is drawn, what the tooltip will say, what
+/// it will send, and with what face it stands.
 struct Quick {
     glyph: &'static str,
     hint: String,
-    /// Чем он зовётся пунктом меню, куда уезжает в тесноте. Отдельно от
-    /// подсказки: та рассказывает и состояние («спрашиваем каталог…»), а пункт
-    /// меню обязан называть действие — состояние в списке пунктов не читается
-    /// и предлагает непонятно что. Доводом конструктора, а не умолчанием:
-    /// забытая подпись дала бы безымянный пункт, и компилятор бы промолчал.
+    /// What it is called as a menu item, where it moves in tight space.
+    /// Separate from the tooltip: the tooltip also tells the state ("asking the
+    /// catalogue…"), while a menu item must name the action — a state in the
+    /// item list does not read and offers no one knows what. A constructor
+    /// argument, not a default: a forgotten caption would give an unnamed item,
+    /// and the compiler would stay silent.
     label: &'static str,
-    /// Что пошлёт нажатие. `None` — послать нечего: значок стои́т выключенным
-    /// и в меню тесноты не уезжает. Так стои́т наводка у снимка, которого на
-    /// шаре нет вовсе: пропасть ей нельзя — соседние значки съехали бы на её
-    /// место при каждом нажатии, — а обещать нажатие она не вправе.
+    /// What the press will send. `None` — there is nothing to send: the glyph
+    /// stands disabled and does not move into the tight-space menu. That is how
+    /// the aiming glyph stands for a snapshot that is not on the globe at all:
+    /// it cannot vanish — the neighboring glyphs would slide into its place on
+    /// every press — but it has no right to promise a press.
     message: Option<Msg>,
-    /// Каким лицом стои́т. Умолчание — покой: состояние есть у значков контура
-    /// и шара, а у наводки — только «есть куда навести» и «некуда».
+    /// With what face it stands. The default is rest: the outline and globe
+    /// glyphs have state, while aiming has only "there is somewhere to aim" and
+    /// "there is nowhere".
     tone: theme::IconTone,
 }
 
@@ -1019,7 +1053,7 @@ impl Quick {
         Self { glyph, hint, label, message: Some(message), tone: theme::IconTone::Rest }
     }
 
-    /// Значок без нажатия: делать нечего, а место за ним остаётся.
+    /// Glyph without a press: there is nothing to do, but its place stays.
     fn idle(glyph: &'static str, label: &'static str, hint: String) -> Self {
         Self { glyph, hint, label, message: None, tone: theme::IconTone::Idle }
     }
@@ -1029,27 +1063,28 @@ impl Quick {
     }
 }
 
-/// Быстрые значки строки — только те три, что про шар: контур, растр и
-/// наводка.
+/// The row's quick glyphs — only those three about the globe: outline,
+/// raster, and aiming.
 ///
-/// Первые два — переключатели, и механика у них одна: нажали — снимок на шаре,
-/// нажали ещё раз — снят. Двух правил здесь быть не может: вопрос у них один
-/// («лежит ли этот снимок на шаре»), разница только в подробности, с какой он
-/// там лежит. Камеру ни один из них не двигает — это третье намерение, и стои́т
-/// оно третьим значком: «покажи здесь» и «отвези меня туда» сведённые в одно
-/// нажатие отбирают друг у друга ответ.
+/// The first two are toggles, and their mechanics is one: press — the snapshot
+/// is on the globe, press again — it is taken off. There cannot be two rules
+/// here: their question is one ("is this snapshot on the globe"), the
+/// difference is only in the detail of how it lies there. Neither moves the
+/// camera — that is a third intention, and it stands as the third glyph:
+/// "show here" and "take me there" merged into one press would take the answer
+/// away from each other.
 ///
-/// Всё остальное — скачать, приостановить, открыть, посмотреть — стои́т
-/// пунктами меню (см. [`menu_items`]). Строка узкая, панель делят пополам, и
-/// значок сверх этих отнимал бы место у имени; а каждый из трёх говорит о
-/// своём состоянии цветом, чего пункт меню не умеет.
+/// Everything else — download, pause, open, view — stands as menu items (see
+/// [`menu_items`]). The row is narrow, the panel is shared in half, and a glyph
+/// beyond these would take room from the name; while each of the three tells
+/// its state with color, which a menu item cannot do.
 ///
-/// Перехода вглубь среди них нет: внутрь ведёт нажатие на саму
-/// строку, и стрелка рядом с ней говорила бы то же самое второй раз.
+/// There is no transition deeper among them: pressing the row itself leads
+/// inside, and an arrow beside it would say the same a second time.
 ///
-/// Все — только у снимка: ни контура, ни растра у папки пути и у файла внутри
-/// снимка не бывает, а кнопка, которой нечего сделать, врёт о том, что строка
-/// умеет.
+/// All of them only for a snapshot: neither an outline nor a raster can belong
+/// to a path folder or to a file inside the snapshot, and a button with nothing
+/// to do lies about what the row can.
 fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
     let mut quick = Vec::new();
     let key = row.snapshot_key().to_string();
@@ -1057,72 +1092,75 @@ fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
         return quick;
     }
 
-    // Контур — своё состояние строки, не выбор и не показ (см.
-    // handlers::outline). Горит зелёным, когда нарисован; вполсилы — пока
-    // геометрия едет и когда её не оказалось вовсе.
+    // The outline is the row's own state, not the selection and not the show
+    // (see handlers::outline). It burns green when drawn; at half strength —
+    // while the geometry is on its way and when there turned out to be none.
     //
-    // Подпись называет то, что случится по нажатию, а состояние объясняет
-    // после тире: у не спросившегося нажатие переспрашивает, а не снимает
-    // просьбу (см. `outline::toggle_outline`).
+    // The caption names what will happen on the press, while the state is
+    // explained after the dash: for the unrequested one a press re-asks, it
+    // does not lift the request (see `outline::toggle_outline`).
     let (tone, hint) = match row.outlined {
-        OnOutline::Off => (theme::IconTone::Rest, "Очертить на шаре"),
-        OnOutline::Asking => (theme::IconTone::Half, "Убрать контур — спрашиваем каталог…"),
+        OnOutline::Off => (theme::IconTone::Rest, "Outline on the globe"),
+        OnOutline::Asking => (theme::IconTone::Half, "Remove the outline — asking the catalogue…"),
         OnOutline::Blank => {
-            (theme::IconTone::Half, "Убрать контур — геометрии у снимка нет")
+            (theme::IconTone::Half, "Remove the outline — the snapshot has no geometry")
         }
-        OnOutline::Failed => (theme::IconTone::Half, "Переспросить контур — не спросился"),
-        OnOutline::Drawn => (theme::IconTone::Lit, "Убрать контур с шара"),
+        OnOutline::Failed => (theme::IconTone::Half, "Ask for the outline again — it did not come"),
+        OnOutline::Drawn => (theme::IconTone::Lit, "Remove the outline from the globe"),
     };
     quick.push(
         Quick::new(
             theme::glyph::OUTLINE,
-            "Контур на шаре",
+            "Outline on the globe",
             hint.to_string(),
             Msg::OutlineToggle(key.clone()),
         )
         .tone(tone),
     );
 
-    // Пустая причина — не «покажется наверняка», а «есть смысл предлагать»
-    // (см. `Row::unviewable`): значок над сырьём уровня 0 или над архивом
-    // обещает то, чего не бывает. Названная причина гасит значок, а не убирает
-    // его: место остаётся, и подсказка говорит, чем именно нельзя, — тем же
-    // способом, что и наводка ниже. В тесноте этого не видно: выключенный
-    // значок пунктом меню не становится (см. `actions`).
+    // An empty reason is not "it will surely show", but "it makes sense to
+    // offer" (see `Row::unviewable`): the glyph over level-0 raw data or over
+    // an archive promises what does not happen. A named reason dims the glyph
+    // instead of removing it: the place stays, and the tooltip says exactly
+    // what is impossible — the same way as the aiming below. In tight space
+    // this is not seen: a disabled glyph does not become a menu item (see
+    // `actions`).
     if row.unviewable.is_empty() {
-        // Значок горит, когда снимок лежит на шаре растром. Подпись называет
-        // то, что случится по нажатию: у лежащего это снятие, а не второе
-        // наложение. Скрытый снят наравне с видимым — он остаётся слоем, и
-        // прячет его свой глаз в списке «На просмотре».
+        // The glyph burns when the snapshot lies on the globe as a raster. The
+        // caption names what will happen on the press: for a lying one it is
+        // removal, not a second overlay. A hidden one is taken off on par with
+        // a visible one — it remains a layer, and its own eye in the "Being
+        // viewed" list hides it.
         let (tone, hint) = match row.globe {
-            OnGlobe::Off => (theme::IconTone::Rest, "Показать на шаре"),
-            OnGlobe::Asked => (theme::IconTone::Half, "Отменить показ — спрашиваем каталог…"),
-            OnGlobe::Assembling => (theme::IconTone::Half, "Отменить показ — кладётся на глобус…"),
+            OnGlobe::Off => (theme::IconTone::Rest, "Show on the globe"),
+            OnGlobe::Asked => (theme::IconTone::Half, "Cancel the show — asking the catalogue…"),
+            OnGlobe::Assembling => (theme::IconTone::Half, "Cancel the show — placing on the globe…"),
             OnGlobe::Laid { hidden: true, .. } => {
-                (theme::IconTone::Half, "Снять с шара — сейчас лежит скрытым")
+                (theme::IconTone::Half, "Take off the globe — it lies hidden now")
             }
-            OnGlobe::Laid { hidden: false, .. } => (theme::IconTone::Lit, "Снять с шара"),
+            OnGlobe::Laid { hidden: false, .. } => (theme::IconTone::Lit, "Take off the globe"),
         };
-        // Ход добычи здесь не называется: значок отвечает на «что случится, если
-        // нажать», а «что происходит сейчас» стои́т в той же строке ячейкой
-        // ЗАГРУЗКА либо, где её нет, подсказкой полосы под строкой.
+        // The fetching progress is not named here: the glyph answers "what will
+        // happen if pressed", while "what is happening now" stands in the same
+        // row as the LOADING cell or, where there is none, as the tooltip of
+        // the bar under the row.
         //
-        // А вот прошлый отказ — называется, и он старше всего остального:
-        // ждать его пришлось десятки секунд, и молча позвать нажать ещё раз
-        // значило бы предложить прождать их снова. Значок при этом остаётся
-        // нажимаемым — сорваться попытка могла и по сети (см.
+        // But a past failure is named, and it outranks everything else: waiting
+        // for it took tens of seconds, and silently inviting another press
+        // would mean offering to wait them again. The glyph stays pressable
+        // meanwhile — the attempt could have failed over the network too (see
         // `Row::unshowable`).
         let (tone, hint) = match (row.unshowable.is_empty(), row.globe) {
             (false, OnGlobe::Off) => (
                 theme::IconTone::Warn,
-                format!("Показать не вышло — {}. Нажмите, чтобы попробовать снова", row.unshowable),
+                format!("Showing failed — {}. Press to try again", row.unshowable),
             ),
             _ => (tone, hint.to_string()),
         };
         quick.push(
             Quick::new(
                 theme::glyph::GLOBE,
-                "Показать на шаре",
+                "Show on the globe",
                 hint,
                 Msg::In(view, ViewMsg::GlobeToggle(key.clone())),
             )
@@ -1131,40 +1169,40 @@ fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
     } else {
         quick.push(Quick::idle(
             theme::glyph::GLOBE,
-            "Показать на шаре",
-            format!("На шар не положить — {}", row.unviewable),
+            "Show on the globe",
+            format!("Cannot put on the globe — {}", row.unviewable),
         ));
     }
 
-    // Наводка. Своё нажатие, а не довесок к показу: положить второй снимок
-    // рядом с первым, не улетая к нему, иначе было бы нельзя. Наводить при
-    // этом можно только на то, у чего есть место на шаре, — нарисованный
-    // контур или заведённый слой. Одной просьбы показать мало: пока каталог не
-    // ответил, о снимке не известно даже того, где он, и нажатие увело бы
-    // взгляд к шару, на котором ничего не изменилось.
+    // Aiming. Its own press, not an appendage to the show: otherwise one could
+    // not put a second snapshot beside the first without flying away to it.
+    // Aiming is possible only at what has a place on the globe — a drawn
+    // outline or an established layer. One show request is not enough: until
+    // the catalogue answers, not even where the snapshot is is known, and the
+    // press would lead the eye to a globe where nothing has changed.
     let aimable = matches!(row.outlined, OnOutline::Drawn) || row.globe.laid();
     quick.push(match aimable {
         true => Quick::new(
             theme::glyph::FOCUS,
-            "Навести камеру",
-            "Навести камеру и выделить".to_string(),
+            "Aim the camera",
+            "Aim the camera and highlight".to_string(),
             Msg::OutlineFocus(key),
         ),
         false => Quick::idle(
             theme::glyph::FOCUS,
-            "Навести камеру",
-            "Наводить не на что: снимка на шаре нет".to_string(),
+            "Aim the camera",
+            "Nothing to aim at: the snapshot is not on the globe".to_string(),
         ),
     });
     quick
 }
 
-/// Треугольник раскрытия. У строки, которой нечего показать, — пусто: место за
-/// ней остаётся, поэтому соседи не съезжают, когда в списке есть и то, и другое.
+/// The expansion triangle. For a row with nothing to show it is empty: its
+/// place stays, so the neighbors do not shift when the listing has both.
 ///
-/// Содержимое папки к этому моменту может быть ещё не спрошено — раскрытие его
-/// и спросит (см. handlers::browse::request_children), поэтому треугольник
-/// стоит у всякой папки, а не только у наполненной.
+/// The folder's contents may not have been requested yet at this point — the
+/// expansion is what requests them (see handlers::browse::request_children),
+/// so the triangle stands on every folder, not only a filled one.
 fn twist(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
     if !row.expandable() {
         return theme::nothing();
@@ -1175,7 +1213,8 @@ fn twist(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
             .size(10.0)
             .color(theme::INK_DIM),
     )
-    // Поля у́же обычных — по той же причине, что у коробочки отметки.
+    // The padding is narrower than usual — for the same reason as the check
+    // box.
     .padding(1.0)
     .width(Length::Fill)
     .height(Length::Fixed(theme::ROW_BUTTON))
@@ -1183,25 +1222,27 @@ fn twist(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
     .into()
 }
 
-/// Коробочка выбора.
+/// The selection box.
 ///
-/// Выбор — набор строк для пакетных действий: выбранное удаляют и качают
-/// (см. заголовок списка). Шара он не касается вовсе — ни контура, ни показа:
-/// у тех свои значки и свои состояния (см. handlers::outline).
+/// Selection is a set of rows for batch actions: the selected are deleted and
+/// downloaded (see the listing header). It does not touch the globe at all —
+/// neither the outline nor the show: those have their own glyphs and their own
+/// states (see handlers::outline).
 ///
-/// Нет её только у папки пути: в папку заходят, а выбирают то, что лежит в
-/// каталоге или на диске. Снимок, лежащий каталогом (.SAFE, .SEN3), — тоже
-/// «папка» по укладке, но выбирают как раз его.
+/// Only a path folder lacks it: one enters a folder, while what is selected
+/// lies in the catalogue or on disk. A snapshot stored as a catalogue (.SAFE,
+/// .SEN3) is also a "folder" in storage, but it is exactly the one being
+/// selected.
 ///
-/// Выключенной она бывает у строки без ключа, а такой в списке взяться неоткуда
-/// (см. [`Row::key`]) — коробочка эта сторожевая: нарисовать её всё равно надо,
-/// иначе колонка рвётся, а рычаг, который виден и ничего не делает, врёт ровно
-/// так же, как и его отсутствие. Выключенный говорит правду и объясняет её
-/// подсказкой.
+/// It is disabled on a row without a key, and such a row has nowhere to come
+/// from in the listing (see [`Row::key`]) — this box is a guard one: it must be
+/// drawn anyway, otherwise the column breaks, and a lever that is visible and
+/// does nothing lies exactly as its absence does. A disabled one tells the
+/// truth and explains it with a tooltip.
 ///
-/// С подсказкой, и это не украшение: действует выбор не здесь, а кнопками в
-/// заголовке списка, и без подписи коробочка предлагает «отметить» неизвестно
-/// для чего.
+/// With a tooltip, and this is not decoration: the selection acts not here but
+/// with the buttons in the listing header, and without a caption the box
+/// offers to "mark" for no one knows what.
 fn check(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
     if matches!(row.kind, RowKind::Folder) {
         return theme::nothing();
@@ -1209,7 +1250,7 @@ fn check(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
     if !row.choosable() {
         return hinted(
             theme::row_check(None),
-            "Выбрать нечем: у записи нет ключа, которым её адресуют",
+            "Nothing to select: the record has no key to address it by",
         );
     }
     let key = row.choice_key();
@@ -1217,16 +1258,17 @@ fn check(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
     hinted(
         theme::row_check(Some(marked)).on_press(Msg::In(view, ViewMsg::Check(key.to_string()))),
         match marked {
-            false => "Выбрать",
-            true => "Снять выбор",
+            false => "Select",
+            true => "Deselect",
         },
     )
 }
 
-/// Значок-кнопка: чем нарисован, каким лицом стоит, что скажет подсказка и что
-/// пошлёт. Ряды таких кнопок стоят справа в строке таблицы, в списке слоёв и в
-/// заголовке списка — собираются они поэтому здесь, а не в каждом месте
-/// по-своему: иначе одинаковые с виду значки разъезжаются лицом и подсказкой.
+/// A glyph-button: how it is drawn, with what face it stands, what the tooltip
+/// will say, and what it will send. Rows of such buttons stand on the right in
+/// a table row, in the layer list, and in the listing header — that is why they
+/// are assembled here, not each place on its own: otherwise glyphs that look
+/// the same drift apart in face and tooltip.
 pub fn icon_button(
     glyph: &'static str,
     tone: theme::IconTone,
@@ -1236,8 +1278,8 @@ pub fn icon_button(
     hinted(theme::row_button_icon(glyph, tone).on_press(message), hint)
 }
 
-/// Кнопка с подсказкой: подсказка одинакова у всех значков строки, и написанная
-/// на каждом call-сайте она разъезжается отступом и кеглем.
+/// A button with a tooltip: the tooltip is the same for all row glyphs, and
+/// written at every call site it would drift apart in padding and font size.
 pub fn hinted(button: crate::proto::ui_service::Container<Msg>, hint: &str) -> Element<Msg> {
     tooltip(button, hint, TooltipPosition::TooltipTop)
         .style(theme::panel())
@@ -1246,566 +1288,163 @@ pub fn hinted(button: crate::proto::ui_service::Container<Msg>, hint: &str) -> E
         .into()
 }
 
-/// Всё, что делают со строкой редко. Порядок общий: сначала переходы, потом
-/// необратимое.
+/// Everything done with a row rarely. The order is common: first the
+/// transitions, then the irreversible.
 fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
     use super::menu::Item;
     let mut items = Vec::new();
 
-    // Главное действие строки — скачать, приостановить, открыть. Значком оно
-    // не стои́т: в строке остались только те два, что кладут снимок на шар
-    // (см. [`quick`]). Переход вглубь пунктом не идёт по той же причине, по
-    // какой не шёл значком, — внутрь ведёт нажатие на саму строку.
+    // The row's main action — download, pause, open. It does not stand as a
+    // glyph: only those two that put the snapshot on the globe remain in the
+    // row (see [`quick`]). The transition deeper does not go as an item for the
+    // same reason it did not go as a glyph — pressing the row itself leads
+    // inside.
     if let Some(action) = primary(view, row).filter(|action| !action.transition) {
-        // Со значком: пункт этот главный, и знак у него тот же, каким действие
-        // называют везде — иначе одно и то же читалось бы как разное.
+        // With a glyph: this item is the main one, and its sign is the same one
+        // the action is named by everywhere — otherwise the same thing would
+        // read as different.
         items.push(Item::new(action.hint, action.message).glyph(action.glyph));
     }
     let key = row.snapshot_key().to_string();
-    // Снимок, лежащий папкой, скачивается целиком: его файлы разложены по
-    // ярусам, и качать их по одному, обойдя каталог руками, — работа, которую
-    // приложение умеет сделать само (см. handlers::library::on_download_snapshot).
-    // Доведённому это предлагать незачем: он уже весь на диске.
+    // A snapshot stored as a folder is downloaded whole: its files are laid out
+    // in tiers, and downloading them one by one, walking the catalogue by hand,
+    // is work the application can do itself (see
+    // handlers::library::on_download_snapshot). There is no point in offering
+    // it to a completed one: it is already all on disk.
     if row.kind.is_product()
         && row.kind.is_folder()
         && !key.is_empty()
         && !matches!(row.status, RowStatus::Complete)
     {
-        // Вес — в подписи: одно нажатие ставит в очередь весь снимок, а это
-        // гигабайты, и узнавать об этом по счётчику закачек поздно. Каталог
-        // размера папки не знает (в S3 за префиксом его нет), и тогда сказано
-        // просто, что качается снимок целиком.
+        // The weight is in the caption: one press queues the whole snapshot,
+        // and that is gigabytes, and learning it from the download counter is
+        // too late. The catalogue does not know the folder's size (in S3 there
+        // is none behind a prefix), and then it is simply said that the
+        // snapshot is downloaded whole.
         let label = match row.size > 0 {
-            true => format!("Скачать снимок целиком — {}", format::bytes(row.size)),
-            false => "Скачать снимок целиком".to_string(),
+            true => format!("Download the whole snapshot — {}", format::bytes(row.size)),
+            false => "Download the whole snapshot".to_string(),
         };
         items.push(Item::new(label, Msg::DownloadSnapshot(key.clone())).glyph(theme::glyph::DOWNLOAD));
     }
-    // Смотреть снимок — его собственное действие, чем бы снимок ни лежал:
-    // папкой ярусов или единственным файлом. Условие то же, что у значка шара,
-    // и это не совпадение — вопрос у них один («можно ли это показать»), и два
-    // ответа на него разошлись бы молча.
-    // Кроме случая, когда главным действием уже стои́т «Открыть»: это тот же
-    // глаз и тот же смысл, и два таких пункта подряд читались бы как два
-    // разных действия.
+    // View the snapshot — its own action, however the snapshot is stored: as a
+    // folder of tiers or as a single file. The condition is the same as for the
+    // globe glyph, and this is no coincidence — their question is one ("can
+    // this be shown"), and two answers to it would drift apart silently.
+    // Except when the main action is already "Open": it is the same eye and the
+    // same meaning, and two such items in a row would read as two different
+    // actions.
     let opens = matches!(row.status, RowStatus::Complete) && !row.kind.is_folder();
     if row.is_snapshot() && row.unviewable.is_empty() && !key.is_empty() && !opens {
         items.push(
-            Item::new("Смотреть снимок", Msg::In(view, ViewMsg::PreviewProduct(key.clone())))
+            Item::new("View the snapshot", Msg::In(view, ViewMsg::PreviewProduct(key.clone())))
                 .glyph(theme::glyph::EYE),
         );
     }
-    // Файл внутри снимка кладёт снимок на шар собой: подробным растром слоя
-    // ложится он, а не выбор провайдера (см. handlers::overlay::on_file_pressed).
-    // Растр ли это, решит провайдер по имени, а тайлер — по содержимому;
-    // `unviewable` здесь ни при чём: у файла внутри снимка она говорит «на
-    // шар кладут снимок, а не файл» — ровно то, что этот пункт и делает
-    // иначе.
+    // A file inside the snapshot puts the snapshot on the globe with itself: it
+    // is laid as the layer's detailed raster, not the provider's choice (see
+    // handlers::overlay::on_file_pressed). Whether it is a raster is decided by
+    // the provider from the name and by the tiler from the contents;
+    // `unviewable` has nothing to do with it here: for a file inside the
+    // snapshot it says "the snapshot, not the file, is put on the globe" —
+    // exactly what this item does differently.
     if !row.product.is_empty() && !row.is_snapshot() && !row.kind.is_folder() {
         items.push(
-            Item::new("На шар этим файлом", Msg::GlobeFile(row.product.clone(), row.identifier.clone()))
+            Item::new("On the globe with this file", Msg::GlobeFile(row.product.clone(), row.identifier.clone()))
                 .glyph(theme::glyph::GLOBE),
         );
     }
-    // Показать на шаре можно всё, у чего есть ключ провайдера: у найденного
-    // продукт с контуром уже под рукой, у строки каталога или скачанного его
-    // восстанавливает провайдер по ключу (см. handlers::overlay). У снимка
-    // этот пункт стоит значком в самой строке и здесь не повторяется.
+    // Everything with a provider key can be shown on the globe: for a found one
+    // the product with its outline is already at hand, while a catalogue row or
+    // a downloaded one has it restored by the provider from the key (see
+    // handlers::overlay). For a snapshot this item stands as a glyph in the row
+    // itself and is not repeated here.
     //
-    // Кладётся при этом снимок, а не файл: ни контура, ни растра у отдельного
-    // файла не бывает. Отсюда и ключ, и подпись: она называет то, что случится
-    // по нажатию, а знает это строка потому же, почему знает значок снимка, —
-    // о шаре она отвечает снимком, которому принадлежит (см.
-    // `rows::from_key`).
+    // The snapshot is put on the globe, not the file: an individual file has
+    // neither an outline nor a raster. Hence both the key and the caption: it
+    // names what will happen on the press, and the row knows it for the same
+    // reason the snapshot's glyph does — it answers for the globe with the
+    // snapshot it belongs to (see `rows::from_key`).
     //
-    // Папке пути этот пункт не достаётся: снимка за ней нет, и каталог на её
-    // имя отвечает «нет такого продукта» — предлагать это значит обещать
-    // отказ.
+    // A path folder does not get this item: there is no snapshot behind it, and
+    // the catalogue answers "no such product" to its name — offering this means
+    // promising a refusal.
     if !row.identifier.is_empty() && !row.is_snapshot() && !matches!(row.kind, RowKind::Folder) {
         let label = match row.globe.any() {
-            true => "Снять снимок с шара",
-            false => "Показать снимок на шаре",
+            true => "Take the snapshot off the globe",
+            false => "Show the snapshot on the globe",
         };
         items.push(Item::new(label, Msg::In(view, ViewMsg::GlobeToggle(row.product_key().to_string()))));
     }
-    // Показывать папку, которая и так открыта, незачем: пункт вёл бы туда,
-    // где пользователь уже стоит.
+    // There is no point in showing a folder that is already open: the item
+    // would lead where the user already stands.
     if !row.folder().is_empty() && !crate::module::components::row::bare(here).ends_with(row.folder())
     {
         items.push(Item::new(
-            "Показать в каталоге",
+            "Show in the catalogue",
             Msg::In(view, ViewMsg::InCatalog(row.snapshot_key().to_string())),
         ));
     }
     if !row.kind.is_folder() && !row.identifier.is_empty() && matches!(row.status, RowStatus::Remote) {
         items.push(Item::new(
-            "Смотреть без скачивания",
+            "View without downloading",
             Msg::In(view, ViewMsg::PreviewRemote(row.identifier.clone())),
         ));
     }
-    // Перекачка сносит имеющийся файл до старта — иначе рядом с ним лёг бы
-    // второй, недокачанный (см. data-library::download). Отсюда и пометка.
-    // Сложенной строке качать нечего: её ключ — путь снимка в хранилище, и
-    // послать его в закачку значит попросить скачать папку одним объектом.
-    // Снимок целиком качает свой значок (см. `quick`).
+    // A re-download wipes the existing file before it starts — otherwise a
+    // second, half-downloaded one would lie beside it (see
+    // data-library::download). Hence the mark. A folded row has nothing to
+    // download: its key is the snapshot's path in storage, and sending it to
+    // the download would mean asking to download a folder as one object. The
+    // whole snapshot is downloaded by its own glyph (see `quick`).
     if !row.identifier.is_empty() && !row.folded && matches!(row.status, RowStatus::Complete) {
         items.push(
-            Item::new("Скачать заново", Msg::Download(row.identifier.clone(), row.product.clone()))
+            Item::new("Download again", Msg::Download(row.identifier.clone(), row.product.clone()))
                 .danger(),
         );
     }
-    // Только у того, что на диске: показывать в файловом менеджере лежащее в
-    // хранилище нечего.
+    // Only for what is on disk: there is nothing to show in the file manager
+    // for what lies in storage.
     if !row.name.is_empty() && !matches!(row.status, RowStatus::Remote) {
         items.push(Item::new(
-            "Показать в файловом менеджере",
+            "Show in the file manager",
             Msg::Reveal(row.name.clone()),
         ));
     }
-    // Отказаться от начатого и удалить скачанное — одно действие: и то, и
-    // другое оставляет после себя пустое место. Разной у них может быть только
-    // подпись, потому что по-разному называется то, что пропадёт.
+    // Abandoning the started and deleting the downloaded is one action: both
+    // leave an empty place behind. Only the caption can differ, because what
+    // will disappear is named differently.
     if !row.name.is_empty() && !matches!(row.status, RowStatus::Remote) {
         let label = match row.status {
-            RowStatus::Downloading { .. } | RowStatus::Paused { .. } => "Отменить загрузку",
-            _ => "Удалить с диска",
+            RowStatus::Downloading { .. } | RowStatus::Paused { .. } => "Cancel the download",
+            _ => "Delete from disk",
         };
         items.push(Item::new(label, Msg::Delete(row.name.clone())).danger());
     }
-    // Пауза на снимок целиком — по той же причине, по какой он целиком
-    // качается: файлов у него под три десятка, и жать паузу на каждом значит
-    // просить пользователя сделать за нас то, что мы же и сложили. Предлагается
-    // только пока есть что останавливать.
+    // Pause for the whole snapshot — for the same reason it is downloaded whole:
+    // it has getting on for three dozen files, and pressing pause on each would
+    // mean asking the user to do for us what we have composed ourselves. It is
+    // offered only while there is something to stop.
     //
-    // Идёт ли по снимку закачка, сложенная строка видит по своим файлам, а
-    // строка каталога — по себе самой: файлов под ней не приезжало, и о них
-    // она знает ровно то, что сказала библиотека про свой префикс (см.
-    // `rows::from_key`).
+    // Whether a download runs over the snapshot, a folded row sees from its
+    // files, while a catalogue row sees from itself: no files have arrived
+    // under it, and it knows exactly what the library said about its prefix
+    // (see `rows::from_key`).
     let downloading = match row.folded {
         true => row.children.iter().any(|file| matches!(file.status, RowStatus::Downloading { .. })),
         false => row.kind.is_folder() && matches!(row.status, RowStatus::Downloading { .. }),
     };
     if downloading && !row.product.is_empty() {
-        items.push(Item::new("Приостановить снимок", Msg::PauseSnapshot(row.product.clone())));
+        items.push(Item::new("Pause the snapshot", Msg::PauseSnapshot(row.product.clone())));
     }
-    // У сложенной строки своего имени нет — она и не запись, а снимок.
-    // Выбрасывается он целиком: раскрывать его, чтобы удалить файлы по одному,
-    // значит просить пользователя сделать за нас то, что мы же и сложили.
+    // A folded row has no name of its own — it is not a record, but a snapshot.
+    // It is thrown away whole: expanding it to delete files one by one would
+    // mean asking the user to do for us what we have composed ourselves.
     if row.folded && !row.product.is_empty() {
         items.push(
-            Item::new("Удалить снимок с диска", Msg::DeleteSnapshot(row.product.clone())).danger(),
+            Item::new("Delete the snapshot from disk", Msg::DeleteSnapshot(row.product.clone())).danger(),
         );
     }
 
     items
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::module::state::{BrowseState, State, ViewKind};
-
-    fn state_view() -> (State, ViewId) {
-        let mut state =
-            State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние");
-        let pane = state.focused();
-        let view = state.open_in(pane, ViewKind::Browse(BrowseState::default()));
-        (state, view)
-    }
-
-    fn snapshot(outlined: OnOutline) -> Row {
-        Row {
-            outlined,
-            ..Row::container_row(
-                "eodata/store/A.SAFE".to_string(),
-                "A.SAFE".to_string(),
-                RowStatus::Remote,
-                RowKind::Product { folder: false },
-            )
-        }
-    }
-
-    /// В строке стоят ровно три значка, и все три про шар: контур, растр и
-    /// наводка.
-    ///
-    /// Остальное уехало пунктами меню, и вернувшийся значок отнял бы место у
-    /// имени. У не-снимка нет и этих трёх: ни контура, ни растра, ни своего
-    /// места на шаре у файла и у папки пути не бывает.
-    #[test]
-    fn the_row_offers_only_the_three_globe_icons() {
-        let (_state, view) = state_view();
-
-        let icons = quick(view, &snapshot(OnOutline::Off));
-        let glyphs: Vec<&str> = icons.iter().map(|q| q.glyph).collect();
-        assert_eq!(glyphs, vec![theme::glyph::OUTLINE, theme::glyph::GLOBE, theme::glyph::FOCUS]);
-        // В тесноте значок становится пунктом меню и обязан называть действие.
-        assert!(icons.iter().all(|q| !q.label.is_empty()), "безымянный пункт меню");
-
-        let file = Row::container_row(
-            "eodata/store/dem.tif".to_string(),
-            "dem.tif".to_string(),
-            RowStatus::Remote,
-            RowKind::File,
-        );
-        assert!(quick(view, &file).is_empty(), "у файла шара не бывает");
-    }
-
-    /// Отказ показать снимок называется, а не гасит значок молча.
-    ///
-    /// Убранный значок оставляет смотрящего гадать, чего строке не хватает, и
-    /// объяснить это потом отказом поздно — нажать-то нечего. Поэтому место за
-    /// значком остаётся, а причина едет подсказкой: ровно так же объясняет себя
-    /// наводка на снимок, которого на шаре нет. Проверяется широкий ряд: в
-    /// тесноте значков нет ни у кого, и объяснения там нет тоже.
-    #[test]
-    fn a_refused_snapshot_keeps_its_place_and_says_why() {
-        let (_state, view) = state_view();
-        let refused = Row {
-            unviewable: "продукт лежит одним файлом .tgz, а наложить можно растр — TIFF"
-                .to_string(),
-            ..snapshot(OnOutline::Off)
-        };
-
-        let icons = quick(view, &refused);
-        let glyphs: Vec<&str> = icons.iter().map(|q| q.glyph).collect();
-        assert_eq!(
-            glyphs,
-            vec![theme::glyph::OUTLINE, theme::glyph::GLOBE, theme::glyph::FOCUS],
-            "значок пропал вместо того, чтобы погаснуть"
-        );
-        assert!(icons[1].message.is_none(), "отказавший значок нажимается");
-        assert_eq!(icons[1].tone, theme::IconTone::Idle);
-        assert!(icons[1].hint.contains(".tgz"), "подсказка не назвала причины: {}", icons[1].hint);
-
-        // А без причины он остаётся нажимаемым — иначе показать не вышло бы
-        // ничего и никогда.
-        let allowed = quick(view, &snapshot(OnOutline::Off));
-        assert!(
-            matches!(allowed[1].message, Some(Msg::In(_, ViewMsg::GlobeToggle(_)))),
-            "значок без причины перестал нажиматься"
-        );
-    }
-
-    /// Показ и контур — переключатели с одной механикой: нажатие кладёт,
-    /// второе снимает. Наводка к ним не примешана — это третье нажатие, и
-    /// нажать его можно только тогда, когда снимок на шаре есть.
-    #[test]
-    fn the_globe_icons_toggle_and_the_aim_stands_apart() {
-        let (_state, view) = state_view();
-        let quick_of = |row: &Row| quick(view, row);
-
-        let idle = quick_of(&snapshot(OnOutline::Off));
-        assert!(matches!(idle[0].message, Some(Msg::OutlineToggle(_))), "контур — переключатель");
-        assert!(
-            matches!(idle[1].message, Some(Msg::In(_, ViewMsg::GlobeToggle(_)))),
-            "растр — тоже переключатель"
-        );
-        assert!(idle[2].message.is_none(), "наводить не на что, и нажатия нет");
-        assert_eq!(idle[2].tone, theme::IconTone::Idle);
-
-        // Очерченному наводка есть на что: контур на шаре нарисован.
-        let drawn = quick_of(&snapshot(OnOutline::Drawn));
-        assert!(matches!(drawn[2].message, Some(Msg::OutlineFocus(_))));
-
-        // И лежащему растром — тоже, даже если контура ему никто не просил.
-        let laid = Row {
-            globe: OnGlobe::Laid { hidden: false, progress: Default::default() },
-            ..snapshot(OnOutline::Off)
-        };
-        assert!(matches!(quick_of(&laid)[2].message, Some(Msg::OutlineFocus(_))));
-
-        // Слой ещё собирается — рамка у него уже посчитана, наводить есть на
-        // что.
-        let assembling = Row { globe: OnGlobe::Assembling, ..snapshot(OnOutline::Off) };
-        assert!(matches!(quick_of(&assembling)[2].message, Some(Msg::OutlineFocus(_))));
-
-        // А одной просьбы мало: пока каталог не ответил, о снимке не известно
-        // даже того, где он.
-        let asked = Row { globe: OnGlobe::Asked, ..snapshot(OnOutline::Off) };
-        assert!(quick_of(&asked)[2].message.is_none(), "наводка обещает несуществующее место");
-        // Значок шара при этом горит вполсилы и снимает просьбу: нажатие
-        // принято, и отменяется оно тем же значком.
-        assert_eq!(quick_of(&asked)[1].tone, theme::IconTone::Half);
-        assert!(matches!(quick_of(&asked)[1].message, Some(Msg::In(_, ViewMsg::GlobeToggle(_)))));
-    }
-
-    /// Зелёным горит сделанное, вполсилы — начатое и несбывшееся, покоем —
-    /// нетронутое. Подсказки при этом все разные: одинаковая на двух лицах
-    /// значит, что одно из них необъяснимо.
-    #[test]
-    fn the_outline_icon_burns_only_when_drawn() {
-        let (_state, view) = state_view();
-        let tone = |outlined| quick(view, &snapshot(outlined))[0].tone;
-
-        assert_eq!(tone(OnOutline::Drawn), theme::IconTone::Lit);
-        assert_eq!(tone(OnOutline::Off), theme::IconTone::Rest);
-        for half in [OnOutline::Asking, OnOutline::Blank, OnOutline::Failed] {
-            assert_eq!(tone(half), theme::IconTone::Half, "{:?} горит не вполсилы", half);
-        }
-
-        let hints: std::collections::HashSet<String> =
-            [OnOutline::Off, OnOutline::Asking, OnOutline::Blank, OnOutline::Failed, OnOutline::Drawn]
-                .into_iter()
-                .map(|outlined| quick(view, &snapshot(outlined))[0].hint.clone())
-                .collect();
-        assert_eq!(hints.len(), 5, "два лица объяснены одной подсказкой");
-    }
-
-    /// «Смотреть снимок» не встаёт рядом с «Открыть»: это тот же глаз и тот же
-    /// смысл, и два таких пункта подряд читались бы как два разных действия.
-    #[test]
-    fn the_menu_does_not_offer_the_same_eye_twice() {
-        let (_state, view) = state_view();
-        let named = |row: &Row| -> Vec<String> {
-            menu_items(view, row, "").iter().map(|item| item.named().to_string()).collect()
-        };
-
-        let mut done = snapshot(OnOutline::Off);
-        done.status = RowStatus::Complete;
-        done.name = "A.SAFE".to_string();
-        let items = named(&done);
-        assert!(items.contains(&"Открыть".to_string()));
-        assert!(!items.contains(&"Смотреть снимок".to_string()), "два глаза подряд");
-
-        // А у того, что на диске не лежит, «Смотреть снимок» — единственный
-        // способ его увидеть, и он остаётся.
-        let items = named(&snapshot(OnOutline::Off));
-        assert!(items.contains(&"Смотреть снимок".to_string()));
-
-        // Тому, о чём провайдер сказал «нельзя», не предлагают и просмотр:
-        // вопрос у обоих один — есть ли в продукте изображение.
-        let refused = Row {
-            unviewable: "это сырьё уровня 0".to_string(),
-            ..snapshot(OnOutline::Off)
-        };
-        assert!(
-            !named(&refused).contains(&"Смотреть снимок".to_string()),
-            "смотреть предложили там, где смотреть нечего"
-        );
-    }
-
-    /// Колонки отметки и раскрытия появляются только там, где им есть что
-    /// показать: пустой столбец сдвигал бы весь список ради того, чего в нём
-    /// не бывает.
-    #[test]
-    fn optional_columns_appear_only_where_they_are_needed() {
-        let wide = 1400.0;
-        let bare = fit(wide, Optional::default()).columns;
-        assert!(!bare.contains(&Column::Check) && !bare.contains(&Column::Twist));
-
-        let full = fit(wide, Optional { twisty: true, checkable: true }).columns;
-        assert_eq!(full.first(), Some(&Column::Check));
-        assert_eq!(full.get(1), Some(&Column::Twist));
-    }
-
-    /// В узком месте колонки уступают место по одной, а имя не сжимается ниже
-    /// своего минимума: список без даты читается, список без имени — нет.
-    #[test]
-    fn narrow_panes_drop_columns_instead_of_squeezing_the_name() {
-        let optional = Optional { twisty: true, checkable: true };
-        let fit = fit(420.0, optional);
-        assert!(fit.name >= NAME_MIN, "имени досталось {}", fit.name);
-        assert!(!fit.compact, "значки уступают только когда имени не остаётся вовсе");
-        assert!(fit.columns.contains(&Column::Name) && fit.columns.contains(&Column::Actions));
-        assert!(!fit.columns.contains(&Column::Date), "справочное уходит первым");
-        assert!(!fit.columns.contains(&Column::Size));
-    }
-
-    /// Просторной панели хватает на всё, и на загрузку в том числе: колонка
-    /// эта — единственное место, где написано, что происходит со строкой прямо
-    /// сейчас, и расширенная сверх меры она молча уехала бы из кадра. Нижней
-    /// границы ширины не стережёт больше ничто.
-    #[test]
-    fn a_full_width_pane_keeps_the_loading_column() {
-        let optional = Optional { twisty: true, checkable: true };
-        // Окно по умолчанию — 2048 физических точек при ui_scale 2.0.
-        let fit = fit(1024.0, optional);
-        assert!(fit.columns.contains(&Column::Progress), "колонка не поместилась в целое окно");
-        assert!(fit.columns.contains(&Column::Status));
-        assert!(fit.name >= NAME_MIN, "имени досталось {}", fit.name);
-    }
-
-    /// Загрузка уступает место позже справки и раньше состояния: справка о
-    /// записи не изменится и через час, а работа идёт сейчас.
-    #[test]
-    fn the_loading_column_outlives_the_reference_ones() {
-        let optional = Optional { twisty: true, checkable: true };
-        let at = |width: f32| fit(width, optional).columns;
-
-        let middling = at(760.0);
-        assert!(middling.contains(&Column::Progress), "загрузка ушла раньше справки");
-        assert!(!middling.contains(&Column::Date) && !middling.contains(&Column::Size));
-
-        // А в половине окна не остаётся и её — там о ходе говорит полоса под
-        // строкой (см. `strip_shown`).
-        let half = at(512.0);
-        assert!(!half.contains(&Column::Progress));
-        assert!(half.contains(&Column::Format), "различающая колонка ушла раньше загрузки");
-    }
-
-    /// Подпись хода влезает в свою колонку — на самом длинном образце каждого
-    /// случая. Мерить её больше нечем: модуль разметку не измеряет, а не
-    /// влезшая уезжает под обрезку ячейки, то есть обрывается на середине знака.
-    #[test]
-    fn every_loading_caption_fits_its_column() {
-        let room = PROGRESS - CELL_PADDING * 2.0;
-        let samples = [
-            // Ход по сети целиком: двузначная ступень, байты и ячейки.
-            vec![
-                "ступень 10/12".to_string(),
-                format::progress(8_600_000, 25_100_000),
-                "тайлы 12/16".to_string(),
-            ],
-            // Он же без байт — так отвечает источник с произвольным доступом.
-            vec!["ступень 10/12".to_string(), "тайлы 12/16".to_string()],
-            // Закачка на диск.
-            vec![format::progress(508_000_000, 615_000_000)],
-            // Слова вместо чисел — самое длинное из них.
-            vec!["спрашиваем каталог…".to_string()],
-        ];
-        for parts in samples {
-            let said = fit_label(&parts, room);
-            let width = format::text_width(&said, theme::TEXT_TAG);
-            assert!(width <= room, "«{said}» — {width} точек при {room}");
-            assert!(!said.is_empty(), "подпись пропала целиком: {parts:?}");
-        }
-
-        // Ужимается с хвоста: байты остаются, счёт ячеек уходит. Отбрасывать с
-        // начала значило бы первой выбрасывать единицу измерения полосы.
-        let parts = vec!["ступень 3/6".to_string(), "8,2/24 МБ".to_string(), "тайлы 5/12".to_string()];
-        assert_eq!(fit_label(&parts, room), "ступень 3/6 · 8,2/24 МБ");
-        assert_eq!(fit_label(&parts, 1000.0), parts.join(" · "), "простору хватает на всё");
-    }
-
-    /// Старшинство работ: диск старше шара. Обе разом бывают у скачиваемого
-    /// снимка, который в это же время лежит на глобусе, и ячейка одна.
-    #[test]
-    fn the_disk_outranks_the_globe_in_one_cell() {
-        let laid = OnGlobe::Laid {
-            hidden: false,
-            progress: crate::module::state::overlay::Progress {
-                working: true,
-                total: 12,
-                ready: 5,
-                steps: 6,
-                step: 2,
-                ..Default::default()
-            },
-        };
-        let snapshot = || Row {
-            kind: RowKind::Product { folder: true },
-            globe: laid,
-            ..Row::default()
-        };
-
-        let downloading = Row {
-            status: RowStatus::Downloading { done: 10, total: 100 },
-            ..snapshot()
-        };
-        assert!(
-            load_of(&downloading).expect("работа есть").hint.starts_with("Скачивается"),
-            "показ по сети перебил скачивание на диск"
-        );
-
-        assert!(
-            load_of(&snapshot()).expect("работа есть").hint.starts_with("Набирается"),
-            "снимок на шаре молчит о своей пирамиде"
-        );
-
-        // Файл внутри снимка о шаре знает, но значок нажимали не у него.
-        let file = Row { kind: RowKind::File, globe: laid, ..Row::default() };
-        assert!(load_of(&file).is_none(), "полоса досталась не тому, кто её просил");
-
-        // Спокойная строка не говорит ничего: скачано, на шаре не лежит.
-        let quiet = Row {
-            status: RowStatus::Complete,
-            globe: OnGlobe::Off,
-            ..snapshot()
-        };
-        assert!(load_of(&quiet).is_none());
-    }
-
-    /// Свёрнутая строка снимка знает только скачанное — знаменателя у неё нет.
-    /// Сказать об этом всё равно надо: пустая ячейка у качающегося снимка
-    /// читается как «ничего не происходит».
-    #[test]
-    fn a_snapshot_without_a_total_still_speaks() {
-        let row = Row {
-            kind: RowKind::Product { folder: true },
-            status: RowStatus::Downloading { done: 3 << 20, total: 0 },
-            ..Row::default()
-        };
-        let load = load_of(&row).expect("работа есть");
-        assert_eq!(load.parts, vec!["скачивается".to_string()]);
-        assert!(load.share.is_none(), "доля взялась из ниоткуда");
-    }
-
-    /// Числа принадлежат одному месту за раз: пока ЗАГРУЗКА показана, СОСТОЯНИЕ
-    /// говорит словом. Ушла колонка — числа возвращаются, иначе о ходе закачки
-    /// в узкой панели не осталось бы ни знака.
-    #[test]
-    fn the_numbers_live_in_one_column_at_a_time() {
-        let downloading = RowStatus::Downloading { done: 50 << 20, total: 100 << 20 };
-        let (_, beside, _) = status_look(&downloading, false);
-        let (_, alone, _) = status_look(&downloading, true);
-
-        assert_eq!(beside, "скачивается", "оба соседа сказали одну и ту же дробь");
-        assert!(alone.contains('/'), "числа пропали вместе с колонкой: {alone}");
-
-        // Слова остальных от соседа не зависят: у них своих чисел нет.
-        assert_eq!(status_look(&RowStatus::Complete, false).1, "на диске");
-        assert_eq!(status_look(&RowStatus::Complete, true).1, "на диске");
-        // Причина отказа — не число хода, и молчать о ней нельзя никогда.
-        let broken = RowStatus::Paused { done: 0, total: 0, trouble: "HTTP 502".into() };
-        assert_eq!(status_look(&broken, false).1, "HTTP 502");
-    }
-
-    /// Полоса под строкой — запасной путь, а не второй голос: где колонка
-    /// показана, полосы нет, и наоборот.
-    #[test]
-    fn the_strip_stands_in_for_the_missing_column() {
-        let row = Row {
-            kind: RowKind::Product { folder: true },
-            globe: OnGlobe::Assembling,
-            ..Row::default()
-        };
-        assert!(!strip_shown(&row, &COLUMNS), "полоса повторила колонку");
-        assert!(strip_shown(&row, &[Column::Name]), "без колонки о ходе не сказано ничего");
-
-        // Снимка на шаре нет — полосе взяться не от чего, какой бы ни была
-        // ширина панели.
-        let off = Row { globe: OnGlobe::Off, ..row };
-        assert!(!strip_shown(&off, &[Column::Name]));
-    }
-
-    /// Уступать бывает нечему: в половине узкого окна одни лишь кнопки строки
-    /// занимают половину места. Тогда имя получает остаток — и говорит об этом
-    /// честно, потому что по названной ширине считается его многоточие.
-    #[test]
-    fn a_pane_too_narrow_for_the_minimum_reports_what_is_left() {
-        let optional = Optional { twisty: false, checkable: true };
-        let fit = fit(272.0, optional);
-
-        assert!(fit.name < NAME_MIN, "проверяется именно нехватка, а досталось {}", fit.name);
-        assert!(!fit.columns.contains(&Column::Icon), "значок уступает последним");
-        // Ровно то, что достанется тянущейся колонке: всё место минус
-        // фиксированные колонки, отступы экрана и собственные поля ячейки.
-        let fixed: f32 = fit.columns.iter().map(|column| width_of(*column)).sum();
-        assert_eq!(fit.name, 272.0 - fixed - theme::GUTTER * 2.0 - CELL_PADDING * 2.0);
-    }
-
-    /// Панель в свой предел (`MIN_PANE`) не оставляла имени ни точки: одни лишь
-    /// кнопки строки шире её. Строка из одних значков не строка — поэтому
-    /// уступают и значки, уходя пунктами в меню.
-    #[test]
-    fn the_narrowest_pane_keeps_the_name_and_moves_the_icons_into_the_menu() {
-        let optional = Optional { twisty: true, checkable: true };
-        let tight = fit(crate::module::state::MIN_PANE, optional);
-        assert!(tight.compact, "значки не уступили");
-        assert!(tight.name > 0.0, "имени опять не осталось");
-        assert!(tight.columns.contains(&Column::Name) && tight.columns.contains(&Column::Actions));
-
-        // Просторной панели это не касается: там значки на месте.
-        assert!(!fit(900.0, optional).compact);
-    }
 }

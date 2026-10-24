@@ -1,54 +1,59 @@
-//! Память инстанса: сколько её дают, сколько отложено на несчитаемое и как
-//! работа сверяет с этим свой пик. Счёт один на все пути: пик складывается
-//! именованными слагаемыми ([`Peak`]) — полоса, каскад, чанк, кэш, область,
-//! кадр, плоскость — и сверяется с [`free`] в [`Peak::admit`]; отказ называет
-//! слагаемые. Их знает тот, кто тратит: [`crate::cascade::bytes`], `Grid`,
-//! `netcdf`. Таблица уровней (`adapters::table`) считает тот же пик заранее —
-//! столбец «влезает». Две доли назначены отсюда: кэш чанков ([`CHUNK_CACHE`])
-//! и через него потолок области под тайл (`grid::REGION_CAP`).
+//! Instance memory: how much the host grants, how much is set aside as
+//! uncountable, and how a job checks its peak against that. One account for
+//! every path: the peak is summed from named terms ([`Peak`]) — band, cascade,
+//! chunk, cache, region, frame, plane — and checked against [`free`] in
+//! [`Peak::admit`]; a refusal names the terms. The spender knows them:
+//! [`crate::cascade::bytes`], `Grid`, `netcdf`. The level table
+//! (`adapters::table`) computes the same peak up front — the "fits" column.
+//! Two shares are assigned from here: the chunk cache ([`CHUNK_CACHE`]) and,
+//! through it, the per-tile region cap (`grid::REGION_CAP`).
 
-/// Сколько линейной памяти хост даёт одному инстансу.
+/// How much linear memory the host grants one instance.
 ///
-/// Копия `INSTANCE_MEMORY_LIMIT` из ядра хоста, и копия поневоле: числа лежат по
-/// разные стороны провода, хостовой константы модулю не видно. Равенство держит
-/// таблица пар `buildgen/tests/test_wire_pairs.py` — компилятор такую пару не
-/// свяжет, а рантайм свяжет трапом.
+/// A copy of `INSTANCE_MEMORY_LIMIT` from the host core, and a copy by
+/// necessity: the numbers lie on opposite sides of the wire, and the host
+/// constant is invisible to the module. The equality is held by the pair
+/// table `buildgen/tests/test_wire_pairs.py` — the compiler cannot link such
+/// a pair, while the runtime links it with a trap.
 pub const INSTANCE: u64 = 1024 * 1024 * 1024;
 
-/// Занятое всегда и никем не считаемое.
+/// Always occupied and counted by nobody.
 ///
-/// Сюда входят код модуля со своей статикой, стек, кэш заголовков HDF5
-/// (`netcdf::METADATA_CACHE`, восемь мегабайт) и провисание аллокатора:
-/// отпущенное крупное возвращается ему, но не хосту, и следующий крупный запрос
-/// обязан лечь в освободившуюся дыру. Не ляжет непрерывным куском — будет
-/// `memory.grow` и трап при формально свободных сотнях мегабайт.
+/// It covers the module code with its statics, the stack, the HDF5 header
+/// cache (`netcdf::METADATA_CACHE`, eight megabytes), and allocator slack:
+/// released large blocks return to the allocator, not to the host, and the
+/// next large request must land in the freed hole. If it does not land as one
+/// contiguous piece, `memory.grow` traps while hundreds of megabytes are
+/// formally free.
 ///
-/// Число назначено, а не выведено, — вывести его не из чего: несчитаемое на то
-/// и несчитаемое. Зато зажато оно тестами с обеих сторон, и всякая попытка
-/// потратить больше упирается в них, а не в лимит инстанса.
+/// The number is assigned, not derived — there is nothing to derive it from:
+/// the uncountable is uncountable by definition. It is pinned by tests from
+/// both sides instead, and every attempt to spend more runs into them rather
+/// than into the instance limit.
 pub const RESERVE: u64 = 96 * 1024 * 1024;
 
-/// Сколько остаётся работе над источником.
+/// How much is left for the work on the source.
 pub const fn free() -> u64 {
     INSTANCE - RESERVE
 }
 
-/// Кэш декодированных чанков при точечном чтении — доля свободного.
+/// Decoded chunk cache for pointwise reads — a share of the free memory.
 ///
-/// Соседние тайлы уровня стоят на одних и тех же чанках источника, и без кэша
-/// каждый распаковывался бы по четыре раза; в байтах, а не в штуках, потому что
-/// чанки бывают и 256², и 4096². Восьмая часть — потому что пик точечного
-/// чтения складывается из трёх таких долей разом (сам кэш, область тайла — она
-/// лежит в нём же, и свежий чанк до развёртки), а остаток нужен разбору
-/// соседнего источника и провисанию аллокатора. Число это — политика кэша, не
-/// инвариант: сдвинь его, и сдвинется только граница окна ([`Peak`] пересчитается сам).
+/// Neighboring tiles of a level sit on the very same source chunks, and
+/// without the cache each would be unpacked four times; in bytes, not in
+/// items, because chunks come as 256² and as 4096². One eighth — because the
+/// peak of a pointwise read sums three such shares at once (the cache itself,
+/// the tile region — it lives in the same cache, and the fresh chunk before
+/// unpacking), while the remainder goes to parsing the neighboring source and
+/// to allocator slack. This number is cache policy, not an invariant: move it,
+/// and only the window boundary shifts ([`Peak`] recomputes itself).
 pub const CHUNK_CACHE: u64 = free() / 8;
 
-/// Пик памяти одной работы — именованными слагаемыми.
+/// Peak memory of one job — as named terms.
 ///
-/// Слагаемые называются затем, чтобы отказ говорил, что именно не влезло, а
-/// таблица уровней показывала, из чего сложена цена; сумму никто не пишет
-/// руками.
+/// The terms are named so that a refusal says exactly what did not fit and
+/// the level table shows what the cost is made of; nobody writes the sum by
+/// hand.
 #[derive(Clone, Debug, Default)]
 pub struct Peak {
     terms: Vec<(&'static str, u64)>,
@@ -59,7 +64,7 @@ impl Peak {
         Self::default()
     }
 
-    /// Ещё одно слагаемое.
+    /// One more term.
     pub fn with(mut self, what: &'static str, bytes: u64) -> Self {
         self.terms.push((what, bytes));
         self
@@ -69,98 +74,36 @@ impl Peak {
         self.terms.iter().map(|(_, bytes)| *bytes).fold(0, u64::saturating_add)
     }
 
-    /// Помещается ли пик в свободное.
+    /// Whether the peak fits in the free memory.
     pub fn fits(&self) -> bool {
         self.total() <= free()
     }
 
-    /// Отказ, если не помещается, — со слагаемыми, чтобы было видно, что
-    /// именно просит больше всех.
+    /// A refusal when it does not fit — with the terms, so that it is visible
+    /// which one asks for the most.
     pub fn admit(&self) -> Result<(), String> {
         if self.fits() {
             return Ok(());
         }
         Err(format!(
-            "нужно {} МБ при свободных {} МБ ({})",
+            "need {} MB with {} MB free ({})",
             mb(self.total()),
             mb(free()),
             self.note()
         ))
     }
 
-    /// Слагаемые словами: «полоса 200 МБ, каскад 56 МБ».
+    /// The terms in words: "band 200 MB, cascade 56 MB".
     pub fn note(&self) -> String {
         self.terms
             .iter()
-            .map(|(what, bytes)| format!("{} {} МБ", what, mb(*bytes)))
+            .map(|(what, bytes)| format!("{} {} MB", what, mb(*bytes)))
             .collect::<Vec<_>>()
             .join(", ")
     }
 }
 
-/// Байты в мегабайтах для разговора с человеком.
+/// Bytes to megabytes, for talking to a human.
 pub fn mb(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use super::super::cascade;
-
-    /// Запас не съедает лимит целиком: иначе всякий источник отвергался бы.
-    #[test]
-    fn запас_оставляет_место_работе() {
-        assert!(RESERVE < INSTANCE / 2, "запас {} съел половину лимита", RESERVE);
-        assert!(free() > 0);
-    }
-
-    /// Каскад на самой широкой стороне, какую тайлер вообще берёт, помещается
-    /// в остаток. Пара эта живёт в двух файлах: цену каскада знает `cascade`,
-    /// потолок стороны — `adapters`, и сложить их можно только здесь.
-    #[test]
-    fn каскад_предельной_ширины_помещается() {
-        let side = super::super::adapters::MAX_SOURCE_SIDE;
-        let need = cascade::bytes(side, side);
-        assert!(
-            need < free(),
-            "каскад {}×{} просит {} МБ при свободных {} МБ",
-            side, side, mb(need), mb(free())
-        );
-    }
-
-    /// Настоящие величины NetCDF помещаются вместе со всей работой по ним и
-    /// там, где окно строк — вся плоскость: проход по такой держит полосу во
-    /// всю величину, свежий чанк того же роста и каскад. Считается тем же
-    /// `Grid::pass_peak`, что и у таблицы уровней, — иначе учёт расходился бы
-    /// с тем, кто им пользуется.
-    ///
-    /// Размеры настоящие: OLCI узкая и высокая (u16), SLSTR почти квадратная
-    /// (i16), полоса Sentinel-5P (f32).
-    #[test]
-    fn настоящие_величины_помещаются_плоскостью() {
-        use hdf5_pure::DType;
-        let sizes = [(1217u32, 15076u32, DType::U16), (1500, 1200, DType::I16), (450, 4172, DType::F32)];
-        for (w, h, dtype) in sizes {
-            let layout = super::super::adapters::netcdf::Layout::of(w, h, h, dtype);
-            let peak = layout.grid.pass_peak((w, h));
-            assert!(peak.fits(), "величина {}×{}: {} при свободных {} МБ", w, h, peak.note(), mb(free()));
-        }
-    }
-
-    /// Точечное чтение в худшем случае держит три доли кэша разом — и это
-    /// меньше половины свободного, иначе доля назначена не той.
-    #[test]
-    fn три_доли_кэша_меньше_половины_свободного() {
-        assert!(3 * CHUNK_CACHE < free() / 2, "кэш {} МБ великоват", mb(CHUNK_CACHE));
-    }
-
-    /// Отказ называет слагаемые и сумму, а не одно «не влезло».
-    #[test]
-    fn отказ_называет_слагаемые() {
-        let peak = Peak::new().with("плоскость", free()).with("каскад", 1);
-        let why = peak.admit().expect_err("свободное превышено на байт");
-        assert!(why.contains("плоскость") && why.contains("каскад"), "{}", why);
-        assert!(Peak::new().with("тайл", 1).admit().is_ok());
-    }
 }

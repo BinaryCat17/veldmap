@@ -1,19 +1,19 @@
-//! image-tiler: ресурс с растром → тайлы пирамиды (RGBA8 sRGB).
+//! image-tiler: a raster resource → pyramid tiles (RGBA8 sRGB).
 //!
-//! Откуда байты — не его забота: заказчик открывает ресурс сам и даёт
-//! read-грант, а читаются они окнами одинаково — файл, сеть или память.
-//! Durable-состояние — тайловый кэш, им владеет tile-cache, и сюда приходят
-//! только его промахи. Поэтому убийство посреди самого долгого прохода ничего
-//! не разматывает: уже отданные тайлы у заказчика, уже отправленные — в кэше,
-//! остальное честно пропало.
+//! Where the bytes come from is not its concern: the requester opens the
+//! resource itself and grants a read, and the bytes are read by windows the
+//! same way — file, network, or memory. Durable state is the tile cache, owned
+//! by tile-cache, and only its misses arrive here. So a kill in the middle of
+//! the longest pass unwinds nothing: tiles already handed out are with the
+//! requester, tiles already sent are in the cache, the rest is honestly lost.
 //!
-//! Состояния, от которого зависел бы ответ, у модуля нет; разбор источника он
-//! держит между запросами (см. [`Parsed`]) — но это memo, а не память: ответ
-//! от него не меняется, меняется только цена.
+//! The module holds no state an answer would depend on; it keeps the source
+//! parse between requests (see [`Parsed`]) — but this is memo, not memory: the
+//! answer does not change with it, only the cost does.
 //!
-//! module.rs — фасад: State, init, обработчики и приёмник тайлов (Sink).
-//! Арифметика пирамиды — pyramid.rs (общий с потребителями через wrap),
-//! проход — cascade.rs, форматы — adapters/, идентичность — fingerprint.rs.
+//! module.rs is the facade: State, init, handlers, and the tile sink (Sink).
+//! Pyramid arithmetic lives in pyramid.rs (shared with consumers via the wrap),
+//! the pass in cascade.rs, the formats in adapters/, identity in fingerprint.rs.
 
 pub mod adapters;
 pub mod budget;
@@ -28,8 +28,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use veldsdk::graphics as gfx;
-// Формат тайла — не наш: он общий с кэшем и объявлен там, где его видят оба
-// (см. `tile.rs` в tile-cache). Своя копия здесь однажды разошлась бы с той.
+// The tile format is not ours: it is shared with the cache and declared where
+// both sides see it (see `tile.rs` in tile-cache). A private copy here would
+// eventually diverge from it.
 use veldmap_tile_cache_wrap::tile::TILE_FORMAT;
 
 use crate::proto::image_tiler::{
@@ -38,49 +39,53 @@ use crate::proto::image_tiler::{
 };
 use crate::proto::tile_cache::StoreTile;
 
-/// Шаг прогресса по прочитанному: чаще — шум, реже — «висит».
+/// Progress step over bytes read: more often it is noise, less often it
+/// appears stuck.
 const PROGRESS_STEP: u64 = 8 * 1024 * 1024;
 
 #[derive(serde::Deserialize, Clone)]
 pub struct Config {}
 
-/// Разобранный источник, оставленный до следующего запроса.
+/// A parsed source, kept until the next request.
 ///
-/// Запрос обслуживается целиком в обработчике, и состояния, от которого
-/// зависел бы ответ, здесь по-прежнему нет: это memo, а не память. Убийство
-/// посреди прохода его теряет вместе с инстансом, и следующий запрос просто
-/// разберёт файл заново — ответ от этого не меняется, меняется только цена.
+/// A request is served entirely in the handler, and there is still no state an
+/// answer would depend on here: this is memo, not memory. A kill in the middle
+/// of a pass loses it along with the instance, and the next request simply
+/// parses the file again — the answer does not change, only the cost does.
 ///
-/// Цена и есть причина. `describe` и `produce` приходят парой на один и тот же
-/// ресурс, а за одним описанием идёт столько проходов, сколько у источника
-/// ступеней; разбор — это заголовки и каталоги, у NetCDF ещё и выборка окон
-/// величины (`netcdf::describe`), и по сети каждый стои́т походов к блочному
-/// пулу. Отсчётов разбор не держит ни у одного формата: они читаются окнами
-/// по заказу, и держать в memo нечего, кроме раскладки.
+/// Cost is the reason. `describe` and `produce` come as a pair for one and the
+/// same resource, and a single description is followed by as many passes as
+/// the source has levels; a parse is headers and catalogues, and for NetCDF
+/// also the window sampling of the variable (`netcdf::describe`), and over the
+/// network each one costs round trips to the block pool. The parse holds no
+/// samples for any format: they are read by windows on demand, and there is
+/// nothing to keep in memo but the layout.
 struct Parsed {
     resource: u64,
-    /// Названная величина (`DescribeRequest.variable`); пусто — выбор
-    /// адаптера. Часть ключа memo: тот же ресурс с другой величиной — другой
-    /// разбор, и взятый готовым чужой отдал бы её отсчёты под своим отпечатком.
+    /// The named variable (`DescribeRequest.variable`); empty — the adapter's
+    /// choice. Part of the memo key: the same resource with another variable is
+    /// another parse, and taking a foreign one as ready would hand out its
+    /// samples under its own fingerprint.
     variable: String,
     info: adapters::Info,
-    /// Ключ этого источника в кэше тайлов. Лежит рядом с разбором затем, что
-    /// считается он тем же чтением файла: голова и хвост по 64 КиБ, то есть у
-    /// удалённого ресурса — два похода к блочному пулу. Разбор переживает
-    /// десятки заказов (ступень лестницы, обнажившийся край), и отпечаток
-    /// обязан пережить столько же: он свойство файла, а не заказа.
+    /// Key of this source in the tile cache. It sits next to the parse because
+    /// it is computed from the same file read: head and tail of 64 KiB each,
+    /// that is, two round trips to the block pool for a remote resource. The
+    /// parse outlives dozens of orders (a ladder level, a revealed edge), and
+    /// the fingerprint must outlive as many: it is a property of the file, not
+    /// of the order.
     fingerprint: String,
 }
 
-/// Сколько разборов лежит в memo. Два, потому что растры приходят парами
-/// вперемежку — описали квиклук, описали гранулу, произвели квиклук,
-/// произвели гранулу, — и одним слотом каждый вытеснял бы каждого: разбор
-/// квиклука не пережил бы даже своего собственного прохода. Больше незачем:
-/// заказчиков у тайлера двое, и у каждого на виду одна пара.
+/// How many parses sit in memo. Two, because rasters come in interleaved
+/// pairs — described the quicklook, described the granule, produced the
+/// quicklook, produced the granule — and with a single slot each would evict
+/// the other: the quicklook parse would not survive even its own pass. More is
+/// needless: the tiler has two requesters, and each keeps one pair in view.
 const MEMO_SLOTS: usize = 2;
 
 pub struct State {
-    /// Разборы от свежего к старому; лишний выпадает с хвоста.
+    /// Parses from newest to oldest; the extra drops off the tail.
     kept: Vec<Parsed>,
 }
 
@@ -89,15 +94,15 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
 }
 
 impl State {
-    /// Положить разбор свежим; старейший сверх [`MEMO_SLOTS`] выпадает.
+    /// Keep a parse as fresh; the oldest beyond [`MEMO_SLOTS`] drops out.
     fn keep(&mut self, kept: Parsed) {
         self.kept.retain(|other| !(other.resource == kept.resource && other.variable == kept.variable));
         self.kept.insert(0, kept);
         self.kept.truncate(MEMO_SLOTS);
     }
 
-    /// Отметить разбор ресурса с этой величиной свежим; `false` — его в memo
-    /// нет.
+    /// Mark the parse of this resource with this variable as fresh; `false` —
+    /// it is not in memo.
     fn touch(&mut self, resource_id: u64, variable: &str) -> bool {
         match self.kept.iter().position(|kept| kept.resource == resource_id && kept.variable == variable) {
             Some(at) => {
@@ -109,9 +114,9 @@ impl State {
         }
     }
 
-    /// Сколько памяти держат чужие разборы, лежащие в memo, — другого ресурса
-    /// или того же с другой величиной: работа над своим идёт рядом с ними, и
-    /// её пик обязан учесть их слагаемым.
+    /// How much memory the foreign parses sitting in memo hold — of another
+    /// resource or of the same one with another variable: work on one's own
+    /// runs alongside them, and its peak must count them as a term.
     fn neighbour_footprint(&self, resource_id: u64, variable: &str) -> u64 {
         self.kept
             .iter()
@@ -120,20 +125,21 @@ impl State {
             .sum()
     }
 
-    /// Разбор этого ресурса с этой величиной, если он лежит в memo.
+    /// The parse of this resource with this variable, if it sits in memo.
     fn kept(&self, resource_id: u64, variable: &str) -> Option<&Parsed> {
         self.kept.iter().find(|kept| kept.resource == resource_id && kept.variable == variable)
     }
 }
 
-/// Разбор источника — из memo, если это тот же ресурс, иначе заново; с ним —
-/// сколько длился отпечаток и сколько памяти держат разборы соседей, оставшиеся
-/// в memo ([`State::neighbour_footprint`]): пока разбор взят ссылкой, самого
-/// `state` больше не спросить.
+/// Parse of the source — from memo if this is the same resource, otherwise
+/// fresh; with it, how long the fingerprint took and how much memory the
+/// neighbouring parses left in memo hold ([`State::neighbour_footprint`]): once
+/// the parse is taken by reference, `state` itself can no longer be asked.
 ///
-/// Отдаётся ссылкой, а не значением: за одним описанием идёт столько проходов,
-/// сколько у источника ступеней (у тайлового TIFF это четыре-пять), и разбор,
-/// расходуемый первым же из них, экономил бы ровно один.
+/// It is handed out as a reference, not a value: a single description is
+/// followed by as many passes as the source has levels (four or five for a
+/// tiled TIFF), and a parse consumed by the first of them would save exactly
+/// one.
 fn parsed<'a>(
     state: &'a mut State,
     resource_id: u64,
@@ -143,10 +149,10 @@ fn parsed<'a>(
 ) -> Result<(&'a Parsed, Duration, u64), String> {
     let mut stamped = Duration::ZERO;
     if state.touch(resource_id, variable) {
-        veldsdk::log::debug!(target: "decode", "разбор ресурса {} взят готовым", resource_id);
+        veldsdk::log::debug!(target: "decode", "parse of resource {} taken ready", resource_id);
     } else {
-        veldsdk::log::debug!(target: "decode", "разбираем ресурс {} ({} байт){}", resource_id, size,
-            match variable.is_empty() { true => String::new(), false => format!(", величина '{}'", variable) });
+        veldsdk::log::debug!(target: "decode", "parsing resource {} ({} bytes){}", resource_id, size,
+            match variable.is_empty() { true => String::new(), false => format!(", variable '{}'", variable) });
         let began = Instant::now();
         let fingerprint = fingerprint::fingerprint(resource_id, size, variable)?;
         stamped = began.elapsed();
@@ -154,22 +160,22 @@ fn parsed<'a>(
         state.keep(Parsed { resource: resource_id, variable: variable.to_string(), info, fingerprint });
     }
     let neighbour = state.neighbour_footprint(resource_id, variable);
-    Ok((state.kept(resource_id, variable).expect("разбор только что положен"), stamped, neighbour))
+    Ok((state.kept(resource_id, variable).expect("parse was just kept"), stamped, neighbour))
 }
 
 pub fn on_describe(state: &mut State, req: DescribeRequest) {
     let correlation = veldsdk::correlation();
     let label = if req.label.is_empty() { correlation.clone() } else { req.label.clone() };
 
-    // Сорвавшееся описание раскладки по шагам не оставляет — она печатается в
-    // конце удавшегося. А сорваться оно может дорого: истёкшая подпись
-    // отказывает после трёх попыток с паузами, и молчаливым это ожидание
-    // выглядит так же, как удачное.
+    // A failed description leaves no per-step layout — it is printed at the end
+    // of a successful one. And failing can be expensive: an expired signature
+    // refuses after three attempts with pauses, and in a silent log this wait
+    // looks the same as a successful one.
     let began = Instant::now();
     let described = match describe(state, &req) {
         Ok(described) => described,
         Err(error) => {
-            veldsdk::log::warn!(target: "handlers", "{}: {} (за {:.2} с)",
+            veldsdk::log::warn!(target: "handlers", "{}: {} (in {:.2} s)",
                                 label, error, began.elapsed().as_secs_f32());
             Described { error, ..Default::default() }
         }
@@ -177,29 +183,32 @@ pub fn on_describe(state: &mut State, req: DescribeRequest) {
     crate::emit::on_described(&described, &correlation);
 }
 
-/// Величина на провод — как есть.
+/// The variable onto the wire — as is.
 fn wire_variable(variable: &adapters::Variable) -> Variable {
     Variable { path: variable.path.clone(), said: variable.said.clone(), units: variable.units.clone() }
 }
 
 fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, String> {
-    let resource = req.resource.clone().ok_or_else(|| "в запросе нет ресурса".to_string())?;
+    let resource = req.resource.clone().ok_or_else(|| "no resource in the request".to_string())?;
     let began = Instant::now();
-    // Привязка приезжает из соседнего файла и в memo не идёт: она свойство
-    // пары «растр и его координаты», а memo знает только про растр.
+    // The binding arrives from a neighbouring file and does not go into memo: it
+    // is a property of the pair "raster and its coordinates", and memo knows
+    // only about the raster.
     let mut ties = Vec::new();
     let (kept, stamped, _) = parsed(state, resource.id, resource.size, &req.variable, &Rc::new(Cell::new(0)))?;
     let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
     let read = began.elapsed();
 
-    // Координаты из соседнего файла — только когда в самом растре их нет: то,
-    // что записано в нём, знает о своей раскладке точнее любого соседа.
+    // Coordinates from a neighbouring file — only when the raster itself has
+    // none: what is written in the raster knows its own layout better than any
+    // neighbour.
     //
-    // Неудача здесь описания не отменяет. Растр от этого не портится, он лишь
-    // остаётся без привязки — и что с ним тогда делать, решает заказчик: у
-    // него есть контур каталога, а у нас нет ничего. Но и молчать о ней
-    // нельзя: по пустой привязке заказчику не отличить «в файлах не сказано»
-    // от «сказано, да не прочиталось».
+    // A failure here does not cancel the description. The raster is not spoiled
+    // by it, it merely stays unbound — and what to do with it then is the
+    // requester's decision: they have the catalogue outline, and we have
+    // nothing. But silence about it is not an option either: by an empty
+    // binding the requester cannot tell "the files do not say" from "they say,
+    // but it did not read".
     let mut sidecar = None;
     if info.ties.is_empty()
         && info.placement.is_none()
@@ -214,29 +223,32 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
         ) {
             Ok(found) => ties = found,
             Err(error) => {
-                veldsdk::log::warn!(target: "decode", "файл координат: {}", error);
-                sidecar = Some(format!("файл координат: {}", error));
+                veldsdk::log::warn!(target: "decode", "coordinates file: {}", error);
+                sidecar = Some(format!("coordinates file: {}", error));
             }
         }
     }
 
-    // Описание — самая долгая и самая молчаливая часть показа: прогресса у
-    // него нет вовсе (см. schema.yaml), а внутри лежит и отпечаток двумя
-    // концами файла, и разбор, и соседний файл координат.
+    // The description is the longest and the most silent part of a show: it has
+    // no progress at all (see schema.yaml), and inside it lie the fingerprint
+    // with both ends of the file, the parse, and the neighbouring coordinates
+    // file.
     //
-    // Секунды у отпечатка — это сеть, и разбор ими же и оплачен: голова файла
-    // нужна обоим, и после отпечатка она лежит в блочном кэше хоста. Читать
-    // «отпечаток 2,6 — разбор 0,0» как «разбор дёшев» нельзя.
+    // The fingerprint's seconds are the network, and the parse is paid for with
+    // the same ones: the file head is needed by both, and after the fingerprint
+    // it sits in the host's block cache. Reading "fingerprint 2.6 — parse 0.0"
+    // as "the parse is cheap" is wrong.
     //
-    // Только время: сколько уехало по проводу, отсюда не видно — счётчик
-    // `Metered` считает дальнюю достигнутую позицию, а не объём, и провод
-    // мерит хост (`network::perf`).
-    // Привязка в ответе есть — своя у растра либо приехавшая из соседнего файла.
+    // Time only: how much went over the wire is not visible from here — the
+    // `Metered` counter counts the farthest reached position, not the volume,
+    // and the wire is measured by the host (`network::perf`).
+    // The answer carries a binding — the raster's own or one arrived from a
+    // neighbouring file.
     let placed = !info.ties.is_empty() || info.placement.is_some() || !ties.is_empty();
 
     let total = began.elapsed();
     veldsdk::log::debug!(target: "perf",
-        "описание ресурса {}: {:.2} с — отпечаток {:.2}, разбор {:.2}, координаты {:.2}",
+        "description of resource {}: {:.2} s — fingerprint {:.2}, parse {:.2}, coordinates {:.2}",
         resource.id, total.as_secs_f32(), stamped.as_secs_f32(),
         (read - stamped).as_secs_f32(), (total - read).as_secs_f32());
 
@@ -245,8 +257,8 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
         width: info.width,
         height: info.height,
         tile: pyramid::TILE,
-        // Таблица уровней — та же, по которой `produce` выберет рукав: строка
-        // на уровень, как она посчитана, без пересказа скалярами.
+        // The level table is the same one `produce` picks its sleeve by: a row
+        // per level, exactly as computed, without a retelling in scalars.
         levels: info
             .levels()
             .iter()
@@ -281,19 +293,21 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
         error: String::new(),
         variable: info.variable.as_ref().map(wire_variable),
         variables: info.variables.iter().map(wire_variable).collect(),
-        // Оговорка едет ровно тогда, когда привязки в ответе нет: обещано полем
-        // «привязку взять не удалось», и присланная вместе со взятой привязкой
-        // она называла бы беду там, где её нет. Ловится это здесь, а не у
-        // потребителя: адаптер про соседний файл координат не знает, а тот его
-        // жалобу как раз и отменяет, когда сам справился.
+        // The caveat travels exactly when there is no binding in the answer: the
+        // field promises "the binding could not be taken", and sent along with a
+        // binding that was taken it would call trouble where there is none. This
+        // is caught here, not by the consumer: the adapter knows nothing of the
+        // neighbouring coordinates file, and that file precisely cancels its
+        // complaint when it handled things itself.
         //
-        // Обе половины, а не старшая: они про разные файлы, и вторая первую не
-        // отменяет. Каждая называет свой — иначе склеенное читается повтором,
-        // потому что беда у них бывает одна и та же.
+        // Both halves, not the major one: they are about different files, and
+        // the second does not cancel the first. Each names its own — otherwise
+        // the joined text reads as a repetition, because their trouble can be
+        // one and the same.
         binding_trouble: match placed {
             true => String::new(),
             false => [
-                info.binding_trouble.as_ref().map(|said| format!("растр: {}", said)),
+                info.binding_trouble.as_ref().map(|said| format!("raster: {}", said)),
                 sidecar,
             ]
             .into_iter()
@@ -305,8 +319,8 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
 }
 
 pub fn on_produce(state: &mut State, req: ProduceRequest) {
-    // Корреляция запроса — она же имя операции у платформы: ею заказчик её
-    // и убьёт, если тайлы перестанут быть нужны.
+    // The request correlation is also the operation name at the platform: with
+    // it the requester kills the operation when the tiles are no longer needed.
     let correlation = veldsdk::correlation();
     let label = if req.label.is_empty() { correlation.clone() } else { req.label.clone() };
 
@@ -318,42 +332,45 @@ pub fn on_produce(state: &mut State, req: ProduceRequest) {
             error
         }
     };
-    // Проход — самая долгая работа тайлера, и мерить её больше нечем: описание
-    // печатает свою раскладку, а во что обошлось само декодирование, из логов
-    // не следовало никак. Числами взяты те же, какими проход отчитывается о
-    // ходе: без уровня и числа тайлов секунды не с чем сравнить — у грубой
-    // ступени и у подробной работа разная.
+    // The pass is the tiler's longest job, and there is nothing else left to
+    // measure it with: the description prints its own layout, while what the
+    // decoding itself cost never followed from the logs. The numbers are the
+    // same ones the pass reports its progress by: without the level and the
+    // tile count the seconds have nothing to compare against — a coarse level
+    // and a detailed one are different work.
     //
-    // Сорвавшийся мерится наравне с удавшимся: его секунды человек прождал так
-    // же, а по молчанию долгий отказ неотличим от быстрого.
+    // A failure is measured on par with a success: a human waited out its
+    // seconds just the same, and in silence a long refusal is indistinguishable
+    // from a quick one.
     veldsdk::log::debug!(target: "perf",
-        "проход по ресурсу {}: {:.2} с — уровень {}, тайлов {}{}",
+        "pass over resource {}: {:.2} s — level {}, tiles {}{}",
         req.resource.as_ref().map_or(0, |handle| handle.id),
         began.elapsed().as_secs_f32(),
         req.level,
         req.tiles.len(),
         match error.is_empty() {
             true => String::new(),
-            false => format!(", сорвался: {}", error),
+            false => format!(", failed: {}", error),
         });
     crate::emit::on_produce_done(&ProduceDone { error }, &correlation);
 }
 
 fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result<(), String> {
-    // Владелец будущих текстур — тот, кто прислал запрос: без имени
-    // передавать их некому.
+    // The owner of the future textures is whoever sent the request: without a
+    // name there is no one to hand them to.
     let owner = veldsdk::resource::requester("image-tiler/on_produce")?;
-    let resource = req.resource.clone().ok_or_else(|| "в запросе нет ресурса".to_string())?;
+    let resource = req.resource.clone().ok_or_else(|| "no resource in the request".to_string())?;
 
     let bytes = Rc::new(Cell::new(0u64));
     let (kept, _, neighbour) = parsed(state, resource.id, resource.size, &req.variable, &bytes)?;
     let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
 
-    // Пик работы сверяется со свободным до неё — вместе с разбором соседа,
-    // который лежит в memo и памяти не отпускает. Строка таблицы та же, по
-    // которой описание обещало «влезает»; отказ здесь называет слагаемые.
+    // The work peak is checked against the free memory before it — together
+    // with the neighbour's parse, which sits in memo and holds its memory. The
+    // table row is the same one the description promised "fits" by; a refusal
+    // here names the terms.
     let admitted = match info.level(req.level) {
-        Some(row) => row.peak.with("разбор соседа", neighbour).admit(),
+        Some(row) => row.peak.with("neighbour parse", neighbour).admit(),
         None => Ok(()),
     };
     let ordered = plan(info, req)?;
@@ -379,22 +396,24 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
         adapters::produce(resource.id, resource.size, info, req.level, &ordered, &bytes, &mut emit)?;
     }
 
-    // Проход кончился, а запрошенное не всё отдано — это ошибка адаптера,
-    // и молчать о ней значит показать заказчику дыру без причины.
+    // The pass ended but not everything requested is delivered — this is an
+    // adapter error, and staying silent about it means showing the requester a
+    // hole without a reason.
     if !sink.wants.is_empty() {
-        return Err(format!("адаптер не произвёл {} из запрошенных тайлов", sink.wants.len()));
+        return Err(format!("adapter did not produce {} of the requested tiles", sink.wants.len()));
     }
     Ok(())
 }
 
-/// Какие ячейки заказаны — с проверкой, что такие вообще бывают.
+/// Which cells are ordered — with a check that such cells exist at all.
 ///
-/// Чистой функцией над описанием и запросом: правило «уровень есть, ячейка в
-/// его сетке» не зависит ни от источника, ни от состояния модуля.
+/// A pure function over the description and the request: the rule "the level
+/// exists, the cell is in its grid" depends on neither the source nor the
+/// module state.
 fn plan(info: &adapters::Info, req: &ProduceRequest) -> Result<Vec<(u32, u32)>, String> {
     let levels = pyramid::level_count(info.width, info.height);
     if req.level >= levels {
-        return Err(format!("уровня {} нет: у растра их {}", req.level, levels));
+        return Err(format!("there is no level {}: the raster has {} of them", req.level, levels));
     }
     let grid_w = pyramid::grid(pyramid::level_size(info.width, req.level));
     let grid_h = pyramid::grid(pyramid::level_size(info.height, req.level));
@@ -402,50 +421,53 @@ fn plan(info: &adapters::Info, req: &ProduceRequest) -> Result<Vec<(u32, u32)>, 
     for tile in &req.tiles {
         if tile.x >= grid_w || tile.y >= grid_h {
             return Err(format!(
-                "тайла {}:{} нет: сетка уровня {} — {}×{}",
+                "there is no tile {}:{}: the grid of level {} is {}×{}",
                 tile.x, tile.y, req.level, grid_w, grid_h
             ));
         }
         wants.insert((tile.x, tile.y));
     }
 
-    // Рядами, а не столбцами. Чанки тайлового TIFF адресуются
-    // `cy * across + cx`, то есть лежат рядами, а упреждающее чтение хоста
-    // узнаёт последовательный проход по тому, что промах пришёлся ровно за
-    // концом прошлого запроса. Столбцовый обход прыгает через всю ширину
-    // чанковой сетки на каждом тайле, и разгон сбрасывается в один блок.
+    // By rows, not by columns. Chunks of a tiled TIFF are addressed as
+    // `cy * across + cx`, that is, they lie in rows, and the host's readahead
+    // recognizes a sequential pass by a miss landing right after the end of the
+    // previous request. A column-wise walk jumps over the whole width of the
+    // chunk grid on every tile, and the ramp-up resets to a single block.
     //
-    // Порядок отдаётся отсюда, а не наводится над готовым множеством: там его
-    // можно забыть навести, и заказ снова поехал бы столбцами молча.
+    // The order is handed out from here, not arranged over the finished set:
+    // there it can be forgotten, and the order would silently travel by columns
+    // again.
     //
-    // Скачки он убирает не все, а только между тайлами. Внутри тайла область
-    // собирается циклом по рядам чанков, и когда чанк ниже этой области —
-    // у файла с внутренними тайлами 256×256 против наших 512 — следующий тайл
-    // ряда возвращается к её первому ряду чанков. Там выигрыш падает с
-    // семидесяти процентов до единиц, и лечится это уже не порядком заказа.
-    // По той же причине выигрыш стои́т на том, что уровень читается из своей
-    // копии: из копии вдвое крупнее один тайл накрывает 2×2 чанка, и возврат
-    // случается на каждом.
+    // It removes not all jumps, but only those between tiles. Inside a tile the
+    // area is assembled by a loop over chunk rows, and when a chunk lies below
+    // this area — in a file with internal tiles 256×256 against our 512 — the
+    // next tile of the row returns to its first chunk row. There the gain drops
+    // from seventy percent to single digits, and that is no longer cured by the
+    // order of the request. For the same reason the gain stands on a level being
+    // read from its own copy: from a copy twice as large one tile covers 2×2
+    // chunks, and the return happens on every one.
     //
-    // Выигрыш этот — в числе запросов, а не в байтах. Разогнавшееся чтение
-    // берёт кусок наперёд, и на разрыве ряда хвост уезжает за правый край
-    // окна, где его никто не спросит: у широкого окна запросов вдвое меньше
-    // при тех же байтах, у узкого и высокого байт до полутора раз больше при
-    // том же числе запросов. Пул при этом общий на процесс, и лишнее в нём
-    // вытесняет чужое оплаченное — видно это строкой `network::perf`.
+    // This gain is in the number of requests, not in bytes. Ramped-up reading
+    // takes a piece ahead of time, and at a row break the tail slides past the
+    // right edge of the window, where no one asks for it: with a wide window
+    // there are half as many requests for the same bytes, with a narrow and
+    // tall one up to one and a half times more bytes for the same number of
+    // requests. The pool meanwhile is shared per process, and the extra in it
+    // evicts someone else's paid-for blocks — visible in the `network::perf`
+    // line.
     //
-    // И само правило — про индекс чанка, а не про его место в файле:
-    // физический порядок задаёт `TileOffsets`, и монотонным он обязан быть
-    // только по обычаю писателя. Пересобранный чужим инструментом файл вернёт
-    // те же скачки, и заметить это можно лишь тем же счётчиком.
+    // And the rule itself is about the chunk index, not about its place in the
+    // file: the physical order is set by `TileOffsets`, and it is monotonic only
+    // by the writer's custom. A file rebuilt by a foreign tool brings the jumps
+    // back, and it can be noticed only by the same counter.
     let mut ordered: Vec<(u32, u32)> = wants.into_iter().collect();
     ordered.sort_by_key(|&(x, y)| (y, x));
     Ok(ordered)
 }
 
-/// Приёмник произведённых тайлов: каждый уезжает в кэш, запрошенные — ещё и
-/// заказчику текстурой. Прогресс едет отсюда же: у адаптеров нет ни
-/// корреляции, ни знания, кто чего ждал.
+/// Sink for produced tiles: every one goes to the cache, the requested ones
+/// also to the requester as a texture. Progress travels from here too: the
+/// adapters have neither a correlation nor knowledge of who expected what.
 struct Sink<'a> {
     correlation: &'a str,
     owner: String,
@@ -461,10 +483,11 @@ struct Sink<'a> {
 
 impl Sink<'_> {
     fn emit(&mut self, level: u32, tx: u32, ty: u32, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
-        // Кромка прозрачного заливается цветом соседа здесь, а не в адаптерах:
-        // сюда сходятся все тайлы всех рукавов, и ореол на границе `nodata`
-        // одинаков у каждого (см. `adapters::bleed_alpha`). Копия делается
-        // только там, где прозрачное вообще есть, — у обычного снимка её нет.
+        // The edge of transparent pixels is filled with the neighbour's color
+        // here, not in the adapters: all tiles of all sleeves converge here, and
+        // the halo at the `nodata` boundary is the same for each (see
+        // `adapters::bleed_alpha`). A copy is made only where transparency
+        // exists at all — an ordinary scene has none.
         let bled;
         let rgba = match rgba.chunks_exact(4).any(|pixel| pixel[3] == 0) {
             false => rgba,
@@ -476,8 +499,9 @@ impl Sink<'_> {
             }
         };
 
-        // В кэш — всё произведённое: второй запрос по этому источнику должен
-        // обслуживаться без прохода. Fire-and-forget, подтверждение не ждётся.
+        // Into the cache goes everything produced: a second request for this
+        // source must be served without a pass. Fire-and-forget, no
+        // confirmation is awaited.
         let encoded = qoi::encode_to_vec(rgba, w, h).map_err(|e| format!("qoi: {}", e))?;
         crate::calls::tile_cache::on_store(&StoreTile {
             fingerprint: self.fingerprint.clone(),
@@ -488,7 +512,7 @@ impl Sink<'_> {
         });
 
         if level == self.want_level && self.wants.remove(&(tx, ty)) {
-            let texture = gfx::upload_texture("тайл", w, h, TILE_FORMAT, rgba, &self.owner)?;
+            let texture = gfx::upload_texture("tile", w, h, TILE_FORMAT, rgba, &self.owner)?;
             crate::emit::on_produced(
                 &TileResult { level, x: tx, y: ty, texture: Some(texture), width: w, height: h },
                 self.correlation,
@@ -501,9 +525,9 @@ impl Sink<'_> {
         Ok(())
     }
 
-    /// Прогресс: всегда на отданном тайле, между ними — по прочитанным
-    /// мегабайтам источника (долгий проход виден и там, где запрошенных
-    /// тайлов ещё не было).
+    /// Progress: always on a delivered tile, and between them by megabytes of
+    /// the source read (a long pass is visible also where no requested tile has
+    /// come yet).
     fn progress(&mut self, force: bool) {
         let read = self.bytes.get();
         if !force && read.saturating_sub(self.reported) < PROGRESS_STEP {
@@ -519,140 +543,5 @@ impl Sink<'_> {
             },
             self.correlation,
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::proto::image_tiler::TileAddr;
-
-    fn keep(state: &mut State, resource: u64, info: adapters::Info) {
-        keep_as(state, resource, "", info);
-    }
-
-    fn keep_as(state: &mut State, resource: u64, variable: &str, info: adapters::Info) {
-        state.keep(Parsed { resource, variable: variable.to_string(), info, fingerprint: String::new() });
-    }
-
-    fn quicklook() -> adapters::Info {
-        adapters::Info::plain(2422, 1940, adapters::Kind::Jpeg)
-    }
-
-    /// Пара растров наложения переживает друг друга. Приходят они парами
-    /// вперемежку: описали квиклук, описали гранулу, произвели квиклук,
-    /// произвели гранулу. Одним слотом квиклук выбрасывал бы разбор гранулы
-    /// ровно между её описанием и производством.
-    #[test]
-    fn пара_разборов_живёт_в_memo_вместе() {
-        let mut state = State { kept: Vec::new() };
-        keep(&mut state, 1, adapters::Info::plain(64, 64, adapters::Kind::Png { interlaced: false }));
-        keep(&mut state, 2, quicklook());
-
-        assert!(state.touch(1, ""), "гранула на месте");
-        assert!(state.touch(2, ""), "и квиклук рядом");
-        assert!(state.kept(1, "").is_some() && state.kept(2, "").is_some());
-    }
-
-    /// Третий разбор вытесняет тот, к которому дольше не обращались, а не
-    /// тот, что положен раньше: разбор, взятый готовым, свеж так же, как
-    /// новый.
-    #[test]
-    fn вытесняется_давно_не_спрошенный() {
-        let mut state = State { kept: Vec::new() };
-        keep(&mut state, 1, quicklook());
-        keep(&mut state, 2, quicklook());
-        assert!(state.touch(1, ""), "первый спрошен снова");
-
-        keep(&mut state, 3, quicklook());
-
-        assert!(state.kept(1, "").is_some(), "спрошенный остался");
-        assert!(state.kept(2, "").is_none(), "давно не спрошенный выпал");
-        assert!(state.kept(3, "").is_some());
-        assert!(!state.touch(2, ""), "выпавшего готовым не взять");
-        assert_eq!(state.kept.len(), MEMO_SLOTS);
-    }
-
-    /// Тот же ресурс, разобранный снова, не занимает второго слота.
-    #[test]
-    fn повторный_разбор_того_же_ресурса_занимает_тот_же_слот() {
-        let mut state = State { kept: Vec::new() };
-        keep(&mut state, 1, quicklook());
-        keep(&mut state, 2, quicklook());
-        keep(&mut state, 1, quicklook());
-
-        assert_eq!(state.kept.len(), 2);
-        assert!(state.kept(1, "").is_some() && state.kept(2, "").is_some());
-    }
-
-    /// Тот же ресурс с другой величиной — другой разбор: он не берётся готовым
-    /// вместо своего и не вытесняет его, а в пик входит соседом.
-    #[test]
-    fn разбор_того_же_ресурса_с_другой_величиной_не_свой() {
-        let mut state = State { kept: Vec::new() };
-        let mut heavy = quicklook();
-        heavy.ties = vec![adapters::Tie { px: 0.0, py: 0.0, lat: 0.0, lon: 0.0 }];
-        keep_as(&mut state, 1, "", quicklook());
-        keep_as(&mut state, 1, "/PRODUCT/qa_value", heavy);
-
-        assert_eq!(state.kept.len(), 2, "две величины одного файла — два разбора");
-        assert!(state.touch(1, "") && state.touch(1, "/PRODUCT/qa_value"));
-        assert!(!state.touch(1, "/PRODUCT/chi_square"), "неназванная величина взята готовой");
-        assert!(state.neighbour_footprint(1, "") > 0, "разбор другой величины — сосед");
-    }
-
-    /// Сосед в memo входит в пик работы над своим источником: чужой разбор
-    /// считается, свой — нет.
-    #[test]
-    fn сосед_в_memo_входит_в_пик() {
-        let mut state = State { kept: Vec::new() };
-        let mut tiff = adapters::Info::plain(64, 64, adapters::Kind::Jpeg);
-        tiff.ties = vec![adapters::Tie { px: 0.0, py: 0.0, lat: 0.0, lon: 0.0 }];
-        keep(&mut state, 2, tiff);
-
-        assert!(state.neighbour_footprint(1, "") > 0, "чужой разбор не посчитан");
-        assert_eq!(state.neighbour_footprint(2, ""), 0, "свой разбор — не сосед");
-    }
-
-    fn asked(level: u32, tiles: &[(u32, u32)]) -> ProduceRequest {
-        ProduceRequest {
-            level,
-            tiles: tiles.iter().map(|&(x, y)| TileAddr { x, y }).collect(),
-            ..Default::default()
-        }
-    }
-
-    /// Заказ отдаётся рядами. Это не вкус: чанки тайлового TIFF лежат рядами,
-    /// и столбцовый обход прыгает через всю ширину чанковой сетки на каждом
-    /// тайле — упреждающее чтение читает такой скачок как случайный доступ и
-    /// сбрасывает разгон, так что весь проход едет блоками по одному.
-    #[test]
-    fn заказ_отдаётся_рядами_а_не_столбцами() {
-        let info = adapters::Info::plain(2048, 2048, adapters::Kind::Png { interlaced: false });
-        let req = asked(0, &[(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]);
-
-        let ordered = plan(&info, &req).expect("сетка вмещает");
-
-        assert_eq!(ordered, vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1)]);
-    }
-
-    /// Повторы в заказе не удваивают работу: тайл производят один раз.
-    #[test]
-    fn повторённый_тайл_заказан_однажды() {
-        let info = adapters::Info::plain(2048, 2048, adapters::Kind::Png { interlaced: false });
-        let req = asked(0, &[(1, 1), (0, 0), (1, 1)]);
-
-        assert_eq!(plan(&info, &req).expect("сетка вмещает"), vec![(0, 0), (1, 1)]);
-    }
-
-    /// Тайла за краем сетки не бывает, и молча пропустить его нельзя: заказчик
-    /// ждал бы его до закрытия вида.
-    #[test]
-    fn тайл_за_краем_сетки_отвергается() {
-        let info = adapters::Info::plain(1024, 1024, adapters::Kind::Png { interlaced: false });
-
-        assert!(plan(&info, &asked(0, &[(2, 0)])).is_err(), "сетка уровня 0 — 2×2");
-        assert!(plan(&info, &asked(1, &[(1, 0)])).is_err(), "у первого уровня она 1×1");
-        assert!(plan(&info, &asked(9, &[(0, 0)])).is_err(), "девятого уровня нет вовсе");
     }
 }

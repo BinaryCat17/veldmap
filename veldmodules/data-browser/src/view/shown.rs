@@ -1,21 +1,23 @@
-//! view/shown.rs — «На просмотре»: чем сейчас накрыт шар.
+//! view/shown.rs — "Now showing": what currently covers the globe.
 //!
-//! Общий экран списка сюда не годится, и это не лень: у таблицы строка — это
-//! запись каталога, у которой спрашивают размер, дату и состояние загрузки, а
-//! здесь строка — слой, у которого спрашивают прозрачность и видимость. Общими
-//! у них остаются только имя и значок, и сводить ради этого две сетки в одну
-//! значило бы завести колонки, пустующие у каждой второй строки.
+//! The shared list screen does not fit here, and not out of laziness: a table
+//! row is a catalogue entry asked about size, date and download state, while a
+//! row here is a layer asked about opacity and visibility. Only the name and
+//! the glyph stay shared, and merging two grids into one for that would mean
+//! columns left empty on every second row.
 //!
-//! Порядок на экране обратен порядку набора: сверху новые, а на шаре последний
-//! пришедший лежит поверх остальных (см. state::overlay). Переворот живёт
-//! здесь, потому что «сверху новые» — свойство экрана, а не набора.
+//! The on-screen order is the reverse of the set order: newest on top, while on
+//! the globe the last arrived lies above the rest (see state::overlay). The
+//! flip lives here because "newest on top" is a property of the screen, not of
+//! the set.
 //!
-//! Показано здесь всё, что на шаре, а не одни растры: снимок бывает на нём и
-//! одним контуром, и тогда убрать его больше неоткуда — значок стои́т в списке,
-//! до которого ещё надо дойти. Слои и контуры идут двумя группами: это два
-//! независимых состояния снимка (см. handlers::outline), и спрашивают у них
-//! разное — у слоя прозрачность и порядок, у контура ничего, — так что одна
-//! сетка на двоих пустовала бы у каждой второй строки.
+//! Everything on the globe is shown here, not just rasters: a snapshot can sit
+//! on it as a bare outline too, and then it can be removed nowhere else — its
+//! glyph lives in a list still to be reached. Layers and outlines go in two
+//! groups: these are two independent snapshot states (see handlers::outline),
+//! and they are asked about different things — a layer about opacity and order,
+//! an outline about nothing — so one grid for both would stay empty on every
+//! second row.
 
 use veld_ui_service_wrap::{column, popover, row, slider, Keyed};
 use crate::proto::ui_service::{
@@ -27,20 +29,21 @@ use crate::module::state::listing::Choice;
 use crate::module::state::{globe::Outlined, overlay::OverlayState, Shift, State, ViewId};
 use crate::module::{theme, Msg, ViewMsg};
 
-/// Кнопок в строке слоя: скрыть, навести, убрать и меню. Порядок слоёв и
-/// переходы к снимку живут в меню (см. [`options`]). Ряд здесь свой, а не
-/// табличный: у слоя есть порядок, а у записи каталога его нет.
+/// Buttons in a layer row: hide, focus, remove and menu. Layer order and
+/// jumps to the snapshot live in the menu (see [`options`]). The strip here is
+/// its own, not the table's: a layer has an order, a catalogue entry does not.
 const BUTTONS: f32 = 4.0;
 
-/// Что занимает в строке место помимо имени и подписи состояния: ряд кнопок со
-/// своими зазорами, отступы экрана, зазор до кнопок, значок слева и два зазора
-/// вокруг него. Считается по числу кнопок, а не подбирается: приписанная кнопка
-/// иначе молча уедет под обрезку.
+/// What takes room in a row besides the name and the state label: the button
+/// strip with its gaps, the screen gutters, the gap before the buttons, the
+/// glyph on the left and the two gaps around it. Counted from the button count,
+/// not tuned by hand: an added button would otherwise silently slide under the
+/// clipping.
 ///
-/// Подписи состояния здесь нет: её ширина своя у каждой строки, и постоянным
-/// числом её не выразить — «скрыт» это шесть знаков, а «ступень 1 из 9 · тайлы
-/// 3/12» двадцать семь. Названная одним числом, она обрезалась ровно там, где
-/// говорила больше всего (см. [`row_name_chars`]).
+/// The state label is not here: its width is its own for every row, and a
+/// constant cannot express it — "hidden" is six characters, while "step 1 of 9
+/// · tiles 3/12" is twenty-seven. Named by one number, it would be cut off
+/// exactly where it says the most (see [`row_name_chars`]).
 const NAME_OVERHEAD: f32 = theme::ROW_BUTTON * BUTTONS
     + table::BUTTON_GAP * (BUTTONS - 1.0)
     + table::BUTTON_GAP * 2.0
@@ -48,33 +51,33 @@ const NAME_OVERHEAD: f32 = theme::ROW_BUTTON * BUTTONS
     + NAME_GLYPH
     + NAME_GAPS;
 
-/// Значок слева от имени и два зазора вокруг него (`row![…].spacing(8.0)`).
+/// The glyph left of the name and the two gaps around it (`row![…].spacing(8.0)`).
 const NAME_GLYPH: f32 = 13.0;
 const NAME_GAPS: f32 = 8.0 * 2.0;
 
-/// Сколько знаков имени влезает в строку слоя рядом с его подписью состояния.
+/// How many name characters fit in a layer row beside its state label.
 ///
-/// Подпись меряется по себе самой: она стои́т справа от имени, растёт вместе с
-/// ходом добычи и в тесной панели отнимает у имени вдвое больше, чем отнимало
-/// постоянное число.
+/// The label is measured by itself: it stands to the right of the name, grows
+/// with the retrieval, and in a cramped pane takes twice as much from the name
+/// as a constant would.
 fn row_name_chars(width: f32, state: &str, buttoned: bool) -> usize {
-    // Подпись-кнопка шире своего текста на отступы (см. [`state_label`]).
+    // A label button is wider than its text by the padding (see [`state_label`]).
     let button = if buttoned { 16.0 } else { 0.0 };
     let room = width - NAME_OVERHEAD - button - format::text_width(state, theme::TEXT_SMALL);
     format::mono_fit(room.max(60.0), theme::TEXT_MONO)
 }
 
-/// Высота строки слоя: две строчки — имя и ползунок под ним.
+/// Height of a layer row: two lines — the name and the slider under it.
 const ROW_HEIGHT: f32 = 54.0;
 
 pub fn view(state: &State, view: ViewId) -> Element<Msg> {
-    // Ширина под имя — от панели, в которой список стоит: та же арифметика,
-    // что у таблицы, и по той же причине.
+    // The width for the name comes from the pane holding the list: the same
+    // arithmetic as the table's, for the same reason.
     let width = state.pane_width(view);
     let shown = state.overlays.iter().filter(|overlay| !overlay.hidden).count();
     let ready = state.overlays.iter().filter(|overlay| overlay.on_globe()).count();
-    // Снимок, лежащий растром, очерчен и сам: показывать его дважды значило бы
-    // предложить убрать одно и то же двумя разными кнопками.
+    // A snapshot lying as a raster is outlined on its own: showing it twice
+    // would offer removing the same thing with two different buttons.
     let contours: Vec<&Outlined> = state
         .outlined
         .iter()
@@ -82,16 +85,16 @@ pub fn view(state: &State, view: ViewId) -> Element<Msg> {
         .collect();
 
     let body: Element<Msg> = if state.overlays.is_empty() && contours.is_empty() {
-        theme::empty("Пусто. Коробочка в строке снимка очерчивает его здесь, значок глобуса кладёт растром.").into()
+        theme::empty("Empty. The box in the snapshot row outlines it here; the globe icon lays it as a raster.").into()
     } else {
         let mut lines: Vec<Element<Msg>> = Vec::new();
-        // Снизу вверх у набора — сверху вниз на экране.
+        // Bottom-up in the set — top-down on screen.
         lines.extend(
             state.overlays.iter().rev().map(|overlay| layer(state, view, overlay, width)),
         );
         if !contours.is_empty() {
             if !state.overlays.is_empty() {
-                lines.push(divider("Только контур"));
+                lines.push(divider("Outline only"));
             }
             lines.extend(
                 contours.iter().map(|outlined| contour(state, view, outlined, width)),
@@ -115,8 +118,9 @@ pub fn view(state: &State, view: ViewId) -> Element<Msg> {
     .into()
 }
 
-/// Подпись над второй группой. Не заголовок списка: он один и стоит выше, а
-/// это черта внутри — сказать, что дальше строки другого рода.
+/// A caption over the second group. Not the list heading: there is one and it
+/// stands above; this is a mark inside — to say that rows of another kind
+/// follow.
 fn divider(label: &str) -> Element<Msg> {
     container(
         text::<Msg>(label.to_string())
@@ -132,45 +136,45 @@ fn divider(label: &str) -> Element<Msg> {
     .into()
 }
 
-/// Заголовок: сколько слоёв и что с ними сделать разом. Собирается общей ролью
-/// (см. `list_screen::heading`) — заголовок здесь такой же, как над всяким
-/// списком, и своя его копия разошлась бы кеглем и высотой.
+/// The heading: how many layers and what to do with them at once. Assembled by
+/// the shared role (see `list_screen::heading`) — the heading here is the same
+/// as over any list, and its own copy would diverge in size and height.
 fn header(total: usize, contours: usize, shown: usize, ready: usize) -> Element<Msg> {
     let mut counts = format::counted(&[
-        (total, ["слой", "слоя", "слоёв"]),
-        (contours, ["контур", "контура", "контуров"]),
+        (total, ["layer", "layers", "layers"]),
+        (contours, ["contour", "contours", "contours"]),
     ]);
-    // О том, что не доехало, говорится только пока оно не доехало: строка
-    // «0 собирается» на готовом наборе — шум.
+    // What has not arrived yet is spoken of only while it has not arrived: a
+    // "0 assembling" line on a finished set is noise.
     let assembling = total - ready;
     if assembling > 0 {
-        counts.push_str(&format!(", {} собирается", assembling));
+        counts.push_str(&format!(", {} assembling", assembling));
     } else if shown < total {
-        counts.push_str(&format!(", {} на шаре", shown));
+        counts.push_str(&format!(", {} on globe", shown));
     }
 
     let mut trailing = Vec::new();
     if total > 0 {
-        // Одна кнопка на оба действия: она называет то, что случится, а не то,
-        // что есть сейчас. Всё скрыто — предлагает показать.
+        // One button for both actions: it names what will happen, not what is
+        // the case now. All hidden — offers to show.
         let (label, hidden) = match shown > 0 {
-            true => ("Скрыть все", true),
-            false => ("Показать все", false),
+            true => ("Hide all", true),
+            false => ("Show all", false),
         };
         trailing.push(theme::bar_button(label).on_press(Msg::OverlayHideAll(hidden)).into());
     }
-    list_screen::heading("На просмотре", counts, trailing)
+    list_screen::heading("Now showing", counts, trailing)
 }
 
-/// Одна строка: значок, имя, состояние и ползунок прозрачности.
+/// One row: glyph, name, state and the opacity slider.
 fn layer(state: &State, view: ViewId, overlay: &OverlayState, width: f32) -> Element<Msg> {
     let key = overlay.identifier.clone();
     let dim = overlay.hidden || !overlay.on_globe();
-    // Скрытый слой гасится фоном, а не только чернилами: приглушённые чернила
-    // здесь уже заняты — ими сказано «на шаре его ещё нет», и скрытый от
-    // собирающегося отличался бы одним словом справа. Подсветка старше:
-    // выделенный слой назван полосой под шаром и обведён на нём лентой, и
-    // строка обязана сказать то же самое.
+    // A hidden layer is dimmed by the background, not only by the ink: muted
+    // ink is already taken here — it says "not on the globe yet", and hidden
+    // would differ from assembling by one word on the right. Highlighting is
+    // older: a picked layer is named by the strip under the globe and ringed
+    // on it with a ribbon, and the row must say the same.
     let tint = if state.picked_key() == key {
         theme::RowTint::Picked
     } else if overlay.hidden {
@@ -197,19 +201,20 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, width: f32) -> Ele
     .width(Length::Fill);
     let name = container(name).width(Length::Fill);
 
-    // Ползунок доступен и у скрытого: прозрачность — то, с чем возвращают на
-    // шар уже настроенным, и гасить его значило бы заставлять сперва показать.
+    // The slider is available for a hidden layer too: opacity is what a layer
+    // returns to the globe already set with, and dimming it would force showing
+    // it first.
     let opacity = row![
         container(
             slider(0.0..=1.0, overlay.opacity, {
                 let key = key.clone();
                 move |value| Msg::OverlayOpacity(key, value)
             })
-            // Шаг — не про точность, а про цену: прозрачность запечена в
-            // вершинах наложения, и всякое новое значение пересобирает их все.
-            // iced шлёт событие только на смене значения, поэтому шаг режет
-            // сотни сообщений за протаскивание до двух десятков, а пяти
-            // процентов глазу довольно.
+            // The step is not about precision but about cost: opacity is baked
+            // into the overlay vertices, and every new value rebuilds them all.
+            // iced sends an event only on a value change, so the step cuts
+            // hundreds of messages per drag to a couple of dozen, and five
+            // percent is enough for the eye.
             .step(0.05)
             .height(14.0)
             .style(theme::slider())
@@ -223,8 +228,8 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, width: f32) -> Ele
                 .size(theme::TEXT_SMALL)
                 .color(theme::INK_MUTED),
         )
-        // Ширина под «100%» фиксирована: иначе ползунок дёргается на каждый
-        // разряд, пока его тянут.
+        // The width for "100%" is fixed: otherwise the slider jumps on every
+        // digit while it is dragged.
         .width(Length::Fixed(38.0))
         .align_x(Alignment::End),
     ]
@@ -235,26 +240,26 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, width: f32) -> Ele
     let buttons = vec![
         table::icon_button(
             if overlay.hidden { theme::glyph::EYE_OFF } else { theme::glyph::EYE },
-            // Скрытие — включённый режим строки, и кнопка, которая его держит,
-            // стои́т нажатой: иначе о нём говорит один перечёркнутый глаз в
-            // одиннадцать точек.
+            // Hiding is an enabled mode of the row, and the button that holds
+            // it stands pressed: otherwise one crossed-out eye in eleven dots
+            // speaks of it.
             match overlay.hidden {
                 true => theme::IconTone::Raised,
                 false => theme::IconTone::Rest,
             },
-            if overlay.hidden { "Показать на шаре" } else { "Скрыть" },
+            if overlay.hidden { "Show on globe" } else { "Hide" },
             Msg::OverlayHidden(key.clone(), !overlay.hidden),
         ),
         table::icon_button(
             theme::glyph::FOCUS,
             theme::IconTone::Rest,
-            "Навести камеру и выделить",
+            "Focus camera and highlight",
             Msg::OutlineFocus(key.clone()),
         ),
         table::icon_button(
             theme::glyph::TRASH,
             theme::IconTone::Rest,
-            "Убрать",
+            "Remove",
             Msg::OverlayRemove(key.clone()),
         ),
         options(state, view, overlay),
@@ -269,21 +274,21 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, width: f32) -> Ele
     )
 }
 
-/// Одна строка контура: снимок, который на шаре только очерчен.
+/// One outline row: a snapshot that sits on the globe only as an outline.
 ///
-/// Строчка одна, а не две: у контура нет ни прозрачности, ни порядка — он
-/// либо есть, либо нет. Оттого и кнопок меньше: положить растром, убрать
-/// контур и меню с переходами к самому снимку.
+/// One line, not two: an outline has neither opacity nor order — it is either
+/// there or not. Hence fewer buttons: lay as raster, remove the outline, and
+/// the menu with jumps to the snapshot itself.
 fn contour(state: &State, view: ViewId, outlined: &Outlined, width: f32) -> Element<Msg> {
     let key = outlined.key.clone();
 
     let name = row![
         theme::row_glyph::<Msg>(theme::glyph::SATELLITE, theme::INK_FAINT),
-        mono::<Msg>(format::ellipsize(&outlined.label, row_name_chars(width, "контур", false)))
+        mono::<Msg>(format::ellipsize(&outlined.label, row_name_chars(width, "contour", false)))
             .size(theme::TEXT_MONO)
             .color(theme::INK_SOFT),
         theme::spacer(),
-        text::<Msg>("контур".to_string())
+        text::<Msg>("contour".to_string())
             .size(theme::TEXT_SMALL)
             .color(theme::INK_FAINT)
             .single_line(),
@@ -292,29 +297,30 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, width: f32) -> Elem
     .align_items(Alignment::Center)
     .width(Length::Fill);
 
-    // Значки те же и в том же порядке, что у строки слоя, и повторяющиеся —
-    // те же самые: слои и контуры лежат в одном списке друг под другом, и
-    // одинаково подписанное действие обязано быть одним и тем же. Разводит их
-    // первый значок — то, чего у соседней строки нет: контур кладут растром, а
-    // слою прятать. Знак «положить растром» тот же, каким это действие названо
-    // в строке списка (см. `table::quick`), — одно действие, один знак.
+    // The glyphs are the same and in the same order as in the layer row, and
+    // the repeating ones are exactly the same: layers and outlines lie in one
+    // list under each other, and an identically labelled action must be one
+    // and the same. They are told apart by the first glyph — what the neighbor
+    // row does not have: an outline is laid as a raster, while a layer is
+    // hidden. The "lay as raster" mark is the same one this action is named
+    // with in the list row (see `table::quick`) — one action, one mark.
     let buttons = vec![
         table::icon_button(
             theme::glyph::GLOBE,
             theme::IconTone::Rest,
-            "Положить растром",
+            "Lay as raster",
             Msg::In(view, ViewMsg::GlobeToggle(key.clone())),
         ),
         table::icon_button(
             theme::glyph::FOCUS,
             theme::IconTone::Rest,
-            "Навести камеру и выделить",
+            "Focus camera and highlight",
             Msg::OutlineFocus(key.clone()),
         ),
         table::icon_button(
             theme::glyph::TRASH,
             theme::IconTone::Rest,
-            "Убрать контур",
+            "Remove outline",
             Msg::OutlineRemove(key.clone()),
         ),
         menu_button(state, key.clone(), jumps(state, view, &key, outlined.folder)),
@@ -333,15 +339,16 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, width: f32) -> Elem
     )
 }
 
-/// Хвост, общий у обеих строк списка: тело слева, ряд кнопок справа, подсветка
-/// под ними и черта под строкой. Один на слой и на контур — стоят они в одном
-/// списке друг под другом, и, разъехавшись отступом, зазором кнопок или высотой
-/// черты, читались бы как два разных списка.
+/// The tail shared by both list rows: the body on the left, the button strip
+/// on the right, the highlight under them and the hairline under the row. One
+/// for a layer and an outline — they stand in one list under each other, and,
+/// diverging in padding, button gap or hairline height, would read as two
+/// different lists.
 ///
-/// Высота объявляется и здесь, а не только у обёртки: `Length::Fill` у кнопок
-/// внутри строки высотой `Shrink` схлопывается в ноль, и кнопки пропадают, не
-/// оставив следа в раскладке (то же правило, что у переноса текста, — Fill
-/// нужен на обоих уровнях).
+/// The height is declared here too, not only on the wrapper: `Length::Fill` on
+/// the buttons inside a `Shrink`-height row collapses to zero, and the buttons
+/// vanish without a trace in the layout (the same rule as for text wrapping —
+/// Fill is needed on both levels).
 fn line(
     body: Element<Msg>,
     buttons: Vec<Element<Msg>>,
@@ -375,10 +382,10 @@ fn line(
     .into()
 }
 
-/// Меню строки: значок «ещё», раскрытая под ним панель и её закрытие. Одно на
-/// слой и на контур — раскрытое адресуется ключом снимка (см.
-/// `State::layer_menu`), и вторая запись этого правила однажды оставила бы
-/// панель висеть над закрывшейся строкой.
+/// The row menu: the "more" glyph, the panel opened under it and its closing.
+/// One for a layer and an outline — the opened one is addressed by the
+/// snapshot key (see `State::layer_menu`), and a second copy of this rule
+/// would once leave a panel hanging over a closed row.
 fn menu_button(state: &State, key: String, items: Vec<menu::Item>) -> Element<Msg> {
     let open = state.layer_menu(&key);
     let anchor = theme::row_button_icon(
@@ -396,31 +403,31 @@ fn menu_button(state: &State, key: String, items: Vec<menu::Item>) -> Element<Ms
         .into()
 }
 
-/// Пункты, которыми со строки уходят к самому снимку: посмотреть его и найти в
-/// каталоге. Одни и те же у слоя и у контура — снимок за ними один, и
-/// одинаково подписанное действие обязано быть одним и тем же.
+/// Items that lead from the row to the snapshot itself: view it and find it in
+/// the catalogue. The same for a layer and an outline — there is one snapshot
+/// behind them, and an identically labelled action must be one and the same.
 ///
-/// `folder` — лежит ли снимок в хранилище каталогом: этим и различается, чем
-/// его открывать (см. [`preview_of`]).
+/// `folder` — whether the snapshot lies in storage as a catalogue folder: this
+/// is what decides how to open it (see [`preview_of`]).
 fn jumps(state: &State, view: ViewId, key: &str, folder: bool) -> Vec<menu::Item> {
     vec![
-        menu::Item::new("Смотреть снимок", Msg::In(view, preview_of(&state.library, key, folder)))
+        menu::Item::new("View snapshot", Msg::In(view, preview_of(&state.library, key, folder)))
             .glyph(theme::glyph::EYE),
-        menu::Item::new("Показать в каталоге", Msg::In(view, ViewMsg::InCatalog(key.to_string())))
+        menu::Item::new("Show in catalogue", Msg::In(view, ViewMsg::InCatalog(key.to_string())))
             .glyph(theme::glyph::FOLDER),
     ]
 }
 
-/// Меню слоя: то, что делают редко.
+/// The layer menu: what is done rarely.
 ///
-/// Порядок слоёв живёт здесь же. Двигают его нечасто, а каждый значок на строке
-/// отнимает место у имени, которое и без того обрезается по ширине половины;
-/// ряд, доросший до семи знаков, перестаёт читаться раньше, чем кончается
-/// место. Переходы к снимку — по той же причине: со слоя уходят к тому, из чего
-/// он сделан, и делают это тоже не каждую минуту.
+/// Layer order lives here too. It is moved rarely, and every glyph on the row
+/// takes room from the name, which is already cut to half the width; a strip
+/// grown to seven marks stops being readable before the room runs out. Jumps
+/// to the snapshot are here for the same reason: from a layer one goes to what
+/// it is made of, and not every minute either.
 ///
-/// Порядок в наборе — снизу вверх, на экране — сверху вниз, поэтому «выше» на
-/// экране это `Shift::Up` в наборе: переворот один и живёт он здесь.
+/// The order in the set is bottom-up, on screen top-down, so "higher" on screen
+/// is `Shift::Up` in the set: the flip is one and lives here.
 fn options(state: &State, view: ViewId, overlay: &OverlayState) -> Element<Msg> {
     let key = overlay.identifier.clone();
     let mut items = vec![
@@ -433,51 +440,55 @@ fn options(state: &State, view: ViewId, overlay: &OverlayState) -> Element<Msg> 
     menu_button(state, key, items)
 }
 
-/// Что со слоем прямо сейчас. Пусто у доехавшего видимого слоя: сказать о нём
-/// нечего, кроме того, что и так видно на шаре.
+/// What is up with the layer right now. Empty for a settled visible layer:
+/// there is nothing to say about it beyond what is already seen on the globe.
 ///
-/// Три состояния и три источника: собирается — наше (растры ещё открываются),
-/// скрыт — тоже наше, а сколько тайлов осталось, знает только глобус и
-/// рассказывает сам (см. `state::overlay::Progress`). Ждать снимок приходится
-/// десятками секунд, и без этой подписи он выглядит зависшим.
-/// Сколько знаков подписи о беде помещается в строку.
+/// Three states and three sources: assembling is ours (rasters are still being
+/// opened), hidden is ours too, while how many tiles are left is known only to
+/// the globe, which tells it itself (see `state::overlay::Progress`). A
+/// snapshot takes tens of seconds to wait for, and without this label it looks
+/// stuck.
+/// How many characters of a trouble label fit in the row.
 ///
-/// Ограничение не украшение: ширину под имя считает [`row_name_chars`] по тому,
-/// что осталось от подписи, а причину пишет не разметка, а тот, кто отказал, —
-/// длины у неё нет вовсе. Неограниченная, она оставляет имени снимка его нижний
-/// предел в шестьдесят точек, то есть огрызок, по которому строку не узнать.
+/// The limit is not decoration: [`row_name_chars`] computes the name width from
+/// what is left of the label, and the reason is written not by the layout but
+/// by whoever refused — it has no length at all. Unlimited, it would leave the
+/// snapshot name its lower bound of sixty points, that is, a stub the row
+/// cannot be recognized by.
 const TROUBLE_CHARS: usize = 44;
 
-/// Подпись состояния слоя: что стои́т в строке, каким цветом и что сказать
-/// целиком.
+/// The layer state label: what stands in the row, in what color, and what to
+/// say in full.
 ///
-/// Целиком — врозь с показанным, потому что показанное ужато: срезанная на
-/// полуслове причина не объясняет ничего, а место, где она помещается вся, в
-/// строке одно — подсказка.
+/// In full — separate from the shown, because the shown is compressed: a
+/// reason cut mid-word explains nothing, and the one place in the row where it
+/// fits whole is the tooltip.
 struct Said {
     shown: String,
     color: Color,
     whole: Option<String>,
 }
 
-/// Сколько знаков имени файла помещается перед словами о нём. Имя режется
-/// отдельно от слов: срезанные вместе, они теряли бы то, ради чего стоят —
-/// «не подробнее превью» за именем в тридцать знаков не доехало бы до строки.
+/// How many characters of the file name fit before the words about it. The
+/// name is cut separately from the words: cut together, they would lose what
+/// they stand for — "no finer than preview" behind a thirty-character name
+/// would never reach the row.
 const FILE_CHARS: usize = 16;
 
-/// Сколько знаков в подсказке: одна строка, шире окна ей не быть — тот же
-/// предел, что у списка загрузок. Части подписи делят её между собой
-/// ([`format::share`]), каждая режется своим способом.
+/// How many characters in a tooltip: one line, it cannot be wider than the
+/// window — the same limit as the download list. The label parts share it
+/// among themselves ([`format::share`]), each cut its own way.
 const TOOLTIP_CHARS: usize = 90;
 
 fn state_said(overlay: &OverlayState) -> Option<Said> {
     let plain = |shown: &str, color| Said { shown: shown.to_string(), color, whole: None };
     let said = match (overlay.on_globe(), overlay.hidden) {
-        (false, _) => plain("готовится…", theme::INK_FAINT),
-        (true, true) => plain("скрыт", theme::INK_FAINT),
-        // Отказ растра говорится последним и остаётся насовсем: пока слой
-        // чего-то ждёт, важнее ожидание, а когда дождался — только он и
-        // объясняет, почему приближение больше ничего не даст.
+        (false, _) => plain("preparing…", theme::INK_FAINT),
+        (true, true) => plain("hidden", theme::INK_FAINT),
+        // The raster refusal is spoken last and stays forever: while the layer
+        // waits for something, the waiting matters more, and once it has
+        // waited — only the refusal explains why zooming in will give nothing
+        // more.
         (true, false) => match overlay.progress.said() {
             Some(said) => plain(&said, theme::ACCENT_TEXT),
             None => match settled_said(overlay) {
@@ -489,31 +500,34 @@ fn state_said(overlay: &OverlayState) -> Option<Said> {
     Some(said)
 }
 
-/// Подпись улёгшегося слоя: имя лежащего подробным файла, его величина
-/// (`variable`) и слова о нём — только о нём (`detailed_trouble`), — затем
-/// остальное (`trouble`). Предел превью или отказ привязки под именем
-/// подробного файла читались бы как сказанное о нём, поэтому граница между
-/// ними идёт с глобуса, а не проводится здесь. Имя без слов — слой улёгся, и
-/// сказать о нём больше нечего, кроме того, какой файл лёг и какая его
-/// величина; остальное идёт за ним через точку с запятой, своим утверждением.
-/// Пусто — нет ни имени, ни слов.
+/// The label of a settled layer: the name of the file lying as detailed, its
+/// variable (`variable`) and the words about it — about it alone
+/// (`detailed_trouble`) — then the rest (`trouble`). A preview limit or a
+/// binding refusal under the detailed file name would read as said about it,
+/// so the boundary between them comes from the globe and is not drawn here. A
+/// name without words — the layer has settled, and there is nothing more to
+/// say about it beyond which file lay down and which of its variables it is;
+/// the rest goes after it behind a semicolon, as its own statement. Empty —
+/// there is neither a name nor words.
 ///
-/// Показанное собирается по частям, каждая своим пределом: имя — [`FILE_CHARS`],
-/// слова о подробном — тем, что осталось от строки, остальное — только если
-/// место ещё есть. Величина в строке стои́т, пока о файле нечего сказать
-/// хуже: слова о беде старше имени того, что не показалось. Подсказка — та же
-/// подпись целиком, насколько её строка ([`TOOLTIP_CHARS`]) вмещает: части
-/// делят строку поровну, короткие берут своё ([`format::share`]), так что имя
-/// с единицами величины и суть беды доезжают при любом имени файла. Имя
-/// режется посередине (края узнаваемы), слова — с хвоста (суть впереди).
+/// The shown is assembled from parts, each with its own limit: the name —
+/// [`FILE_CHARS`], the words about the detailed one — what is left of the row,
+/// the rest — only if there is still room. The variable stands in the row
+/// while there is nothing worse to say about the file: trouble words outrank
+/// the name of what did not show up. The tooltip is the same label in full, as
+/// far as its line ([`TOOLTIP_CHARS`]) holds: the parts share the line evenly,
+/// short ones take their own ([`format::share`]), so the name with the variable
+/// units and the gist of the trouble arrive for any file name. The name is cut
+/// in the middle (the edges are recognizable), the words — from the tail (the
+/// gist comes first).
 fn settled_said(overlay: &OverlayState) -> Option<(String, String)> {
-    /// Как режется часть: имя — серединой, слова — хвостом.
+    /// How a part is cut: the name — in the middle, the words — from the tail.
     enum Cut {
         Middle,
         Tail,
     }
     let mut shown: Vec<String> = Vec::new();
-    // Части подсказки целиком, с тем, как каждую резать; остальное — последней.
+    // The tooltip parts in full, with how to cut each; the rest — last.
     let mut parts: Vec<(String, Cut)> = Vec::new();
     let room = |shown: &[String]| {
         let taken: usize = shown.iter().map(|part| part.chars().count()).sum();
@@ -554,8 +568,8 @@ fn settled_said(overlay: &OverlayState) -> Option<(String, String)> {
     if parts.is_empty() {
         return None;
     }
-    // Разделители — по три знака на стык (« · » длиннее «; » на один, и это
-    // запас, а не недостача).
+    // Separators take three characters per joint (" · " is one longer than
+    // "; ", and that is a surplus, not a shortfall).
     let lengths: Vec<usize> = parts.iter().map(|(text, _)| text.chars().count()).collect();
     let shares = format::share(&lengths, TOOLTIP_CHARS.saturating_sub(3 * (parts.len() - 1)));
     let mut whole = String::new();
@@ -571,18 +585,20 @@ fn settled_said(overlay: &OverlayState) -> Option<(String, String)> {
     Some((shown, whole))
 }
 
-/// Та же подпись элементом. Врозь с [`state_said`] затем, что её ширину надо
-/// знать до сборки строки: место под имя считается по ней.
+/// The same label as an element. Separate from [`state_said`] because its
+/// width must be known before the row is assembled: the name room is computed
+/// from it.
 ///
-/// У слоя с файлом многих величин подпись — кнопка: под ней список величин
-/// (`OverlayState.variables`), и пункт называет величину шару. Галочка — у
-/// той, что шар показывает; названной, которой он отказал, галочки нет.
+/// On a layer whose file has many variables the label is a button: under it
+/// sits the variable list (`OverlayState.variables`), and an item names a
+/// variable to the globe. The checkmark is on the one the globe shows; the
+/// named one it refused has no checkmark.
 fn state_label(state: &State, overlay: &OverlayState) -> Element<Msg> {
     let Some(said) = state_said(overlay) else { return theme::nothing() };
     let label = text::<Msg>(said.shown).size(theme::TEXT_SMALL).color(said.color).single_line();
     let label: Element<Msg> = match said.whole {
-        // Подсказка собрана в свою строку ([`TOOLTIP_CHARS`]); срез здесь —
-        // страховка, а не правило.
+        // The tooltip is assembled into its own line ([`TOOLTIP_CHARS`]); the
+        // cut here is a safeguard, not a rule.
         Some(whole) => tooltip(label, format::ellipsize(&whole, TOOLTIP_CHARS), TooltipPosition::TooltipTop)
             .style(theme::panel())
             .text_size(theme::TEXT_SMALL)
@@ -606,108 +622,4 @@ fn state_label(state: &State, overlay: &OverlayState) -> Element<Msg> {
     .gap(4.0)
     .on_dismiss(Msg::OverlayVariables(None))
     .into()
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::{settled_said, FILE_CHARS, TOOLTIP_CHARS, TROUBLE_CHARS};
-    use crate::module::state::overlay::OverlayState;
-
-    fn overlay(detailed: Option<&str>, about_detailed: &str, rest: &str) -> OverlayState {
-        let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
-        overlay.detailed = detailed.map(str::to_string);
-        overlay.detailed_trouble = about_detailed.to_string();
-        overlay.trouble = rest.to_string();
-        overlay
-    }
-
-    fn with_variable(mut overlay: OverlayState) -> OverlayState {
-        overlay.variable = Some(crate::proto::globe::Variable {
-            path: "/PRODUCT/carbonmonoxide_total_column".to_string(),
-            said: "Vertically integrated CO column".to_string(),
-            units: "mol m-2".to_string(),
-        });
-        overlay
-    }
-
-    /// Величина стои́т за именем файла, пока о нём нечего сказать хуже; при
-    /// словах о беде она остаётся в подсказке — перед словами, словами файла.
-    #[test]
-    fn the_variable_follows_the_name_until_there_is_trouble_to_tell() {
-        let (shown, whole) = settled_said(&with_variable(overlay(Some("S5P_CO.nc"), "", ""))).unwrap();
-        assert_eq!(whole, "S5P_CO.nc · carbonmonoxide_total_column, mol m-2 — Vertically integrated CO column");
-        assert_eq!(shown, "S5P_CO.nc · carbonmonoxide_total_column");
-
-        let (shown, whole) = settled_said(&with_variable(overlay(Some("S5P_CO.nc"), REFUSAL, ""))).unwrap();
-        assert!(whole.starts_with("S5P_CO.nc · carbonmonoxide_total_column, mol m-2") && whole.contains(" · не подробнее превью: подробный растр"), "{whole}");
-        assert!(whole.chars().count() <= TOOLTIP_CHARS, "{whole}");
-        assert!(shown.starts_with("S5P_CO.nc · не подробнее") && !shown.contains("carbonmonoxide"), "{shown}");
-    }
-
-    /// Подсказка — одна строка на всех: имя файла в восемьдесят знаков не
-    /// выталкивает из неё ни имя величины с единицами, ни суть беды. Части
-    /// делят строку поровну, короткие берут своё.
-    #[test]
-    fn the_tooltip_shares_its_line_so_every_part_is_recognisable() {
-        let long = "S5P_NRTI_L2__CO_____20260827T161616_20260827T162116_45971_03_020901_20260827T164732.nc";
-        let (_, whole) = settled_said(&with_variable(overlay(Some(long), "", ""))).unwrap();
-        assert!(whole.chars().count() <= TOOLTIP_CHARS, "{whole}");
-        assert!(whole.starts_with("S5P_NRTI_L2__CO_____") && whole.contains(".nc · carbonmonoxide_total_column, mol m-2"), "{whole}");
-
-        let (_, whole) = settled_said(&with_variable(overlay(Some(long), REFUSAL, CAP))).unwrap();
-        assert!(whole.chars().count() <= TOOLTIP_CHARS, "{whole}");
-        for part in ["S5P_NRTI_L", ".nc · carbonmonoxide_tota", " · не подробнее превью", "; подробнее 2001"] {
-            assert!(whole.contains(part), "в подсказке нет «{part}»: {whole}");
-        }
-    }
-
-    const REFUSAL: &str = "не подробнее превью: подробный растр на шар не кладётся";
-    const CAP: &str = "подробнее 2001×1501 из 4001×3001 не будет";
-
-    /// Имя файла стоит перед словами о нём и только перед ними: предел превью
-    /// идёт после, за точкой с запятой, без имени. Целиком — в подсказке, а в
-    /// строке имя и слова режутся порознь, так что суть слов доезжает.
-    #[test]
-    fn the_name_goes_before_the_words_about_its_file_only() {
-        let (shown, whole) = settled_said(&overlay(Some("F1_BT_fn.nc"), REFUSAL, CAP)).unwrap();
-        // Подсказка — одна строка на троих: суть отказа и начало предела
-        // доезжают оба, срезанные с хвоста.
-        assert!(whole.starts_with("F1_BT_fn.nc · не подробнее превью: подробный растр") && whole.contains("; подробнее 2001"), "{whole}");
-        assert!(whole.chars().count() <= TOOLTIP_CHARS, "{whole}");
-        assert!(shown.starts_with("F1_BT_fn.nc · не подробнее"), "{shown}");
-        assert!(shown.chars().count() <= TROUBLE_CHARS, "{shown}");
-        assert!(!shown.contains("4001×3001"), "остальному в строке места нет, оно в подсказке: {shown}");
-
-        // Короткие слова оставляют остальному место — оно дописывается.
-        let (shown, _) = settled_said(&overlay(Some("F1_BT_fn.nc"), "отвергнут", "мал")).unwrap();
-        assert_eq!(shown, "F1_BT_fn.nc · отвергнут; мал");
-
-        // Без слов о подробном имя — своё утверждение, за точкой с запятой;
-        // под точкой посередине предел превью читался бы как сказанное о нём.
-        let (shown, whole) = settled_said(&overlay(Some("F1_BT_fn.nc"), "", CAP)).unwrap();
-        assert_eq!(whole, format!("F1_BT_fn.nc; {}", CAP));
-        assert!(shown.starts_with("F1_BT_fn.nc; подробнее") && !shown.contains(" · "), "{shown}");
-
-        let long = "S3A_SL_1_RBT____20260824T174507_F1_BT_fn.nc";
-        let (shown, whole) = settled_said(&overlay(Some(long), REFUSAL, "")).unwrap();
-        assert!(whole.starts_with(long) && whole.contains(" · не подробнее превью: подробный растр"), "{whole}");
-        assert!(whole.chars().count() <= TOOLTIP_CHARS, "{whole}");
-        assert!(shown.contains("не подробнее превью"), "суть слов срезана вместе с именем: {shown}");
-        assert!(shown.find(" · ").is_some_and(|at| shown[..at].chars().count() <= FILE_CHARS), "{shown}");
-    }
-
-    /// Улёгшийся без слов слой называет файл, и только его; без имени и слов
-    /// подписи нет.
-    #[test]
-    fn a_settled_layer_with_nothing_to_say_names_its_file() {
-        assert_eq!(
-            settled_said(&overlay(Some("F1_BT_fn.nc"), "", "")),
-            Some(("F1_BT_fn.nc".to_string(), "F1_BT_fn.nc".to_string()))
-        );
-        assert_eq!(settled_said(&overlay(None, "", "")), None);
-        let (shown, whole) = settled_said(&overlay(None, REFUSAL, "")).unwrap();
-        assert_eq!(whole, REFUSAL, "слова о подробном без имени — как есть");
-        assert!(shown.chars().count() <= TROUBLE_CHARS && shown.starts_with("не подробнее"), "{shown}");
-    }
 }

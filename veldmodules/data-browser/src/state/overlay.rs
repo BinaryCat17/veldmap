@@ -1,13 +1,13 @@
-//! Наложения снимков на шар: что собирается и что уже показано.
+//! Image overlays on the globe: what is being assembled and what is already shown.
 //!
-//! Наложений много, и порядок в наборе — порядок слоёв снизу вверх, тот же,
-//! которым его понимает глобус (см. его `Overlays`). Показанный последним
-//! лежит поверх остальных; список на экране идёт обратным порядком — сверху
-//! новые, — и переворачивает его вид, а не состояние.
+//! There are many overlays, and the order in the set is the layer order from
+//! bottom to top, the same order the globe understands it in (see its
+//! `Overlays`). The one shown last lies on top of the rest; the on-screen list
+//! goes in reverse order — new ones on top — and reverses its view, not its state.
 //!
-//! Сборка одного наложения идёт в три такта — растры у провайдера, открытие
-//! каждого ресурсом, передача владения глобусу, — и всё это переживает
-//! обработчики, поэтому живёт здесь, а не в локальных переменных.
+//! Building one overlay goes in three beats — rasters from the provider, opening
+//! each with a resource, handing ownership to the globe — and all of this survives
+//! the handlers, so it lives here rather than in local variables.
 
 use veldsdk::proto::core::ResourceHandle;
 
@@ -15,85 +15,90 @@ use crate::proto::globe::{OverlayRaster, UtmFrame, Variable};
 use super::ViewId;
 
 pub struct OverlayState {
-    /// Продукт наложения; он же ключ наложения у глобуса.
+    /// The overlay's product; also the overlay's key at the globe.
     pub identifier: String,
     pub label: String,
-    /// Лежит ли продукт в хранилище каталогом: по нему выбирается, каким
-    /// способом его смотреть (см. `handlers::preview`).
+    /// Whether the product is stored as a folder in the repository: it selects
+    /// the way the product is viewed (see `handlers::preview`).
     pub folder: bool,
-    /// Вид поиска, из выдачи которого продукт взят: его жизнью наложение и
-    /// живёт — уходит с продуктом из выдачи и с закрытием вкладки. `None` —
-    /// продукт восстановлен по ключу (каталог, загрузки) и от выдач не
-    /// зависит: снимает его только «убрать».
+    /// The search view the product was taken from: the overlay lives its life —
+    /// leaves with the product from the results and with the tab closing. `None` —
+    /// the product was restored by key (catalogue, downloads) and does not depend
+    /// on results: only "remove" takes it down.
     pub source: Option<ViewId>,
-    /// Четырёхугольник футпринта (UL, UR, LR, LL) — запасная привязка для
-    /// продуктов без рамки UTM. `None` — у продукта не было геометрии вовсе.
+    /// The footprint quad (UL, UR, LR, LL) — a fallback binding for products
+    /// without a UTM frame. `None` — the product had no geometry at all.
     pub quad: Option<[(f64, f64); 4]>,
-    /// Квад — не углы контура, а его габарит: сам контур сложнее
-    /// четырёхугольника. Натягивать по нему растр нельзя, и глобус этого не
-    /// делает — он ждёт привязки от растра (см. `Overlay.rough` в контракте).
+    /// The quad is not the contour's corners but its bounding box: the contour
+    /// itself is more complex than a quad. A raster must not be fitted by it, and
+    /// the globe does not — it waits for the binding from the raster (see
+    /// `Overlay.rough` in the contract).
     pub rough: bool,
-    /// Куда смотреть, чтобы увидеть снимок целиком. Считается один раз, из
-    /// продукта, который был под рукой в момент показа: спрашивать каталог
-    /// заново ради наводки — это сетевой запрос за тем, что уже известно.
-    /// `None` — у продукта не было геометрии, и наводить не на что.
+    /// Where to look to see the whole image. Computed once, from the product at
+    /// hand at the moment of showing: asking the catalogue again for the sake of
+    /// aiming would be a network request for what is already known. `None` — the
+    /// product had no geometry, and there is nothing to aim at.
     pub focus: Option<crate::module::footprint::Frame>,
-    /// Прозрачность слоя, 0..1.
+    /// Layer opacity, 0..1.
     pub opacity: f32,
-    /// Слой скрыт: остаётся в списке и в наборе у глобуса вместе со своими
-    /// ресурсами, но не рисуется. Тем и отличается от «убрать»: вернуть его
-    /// обратно — это ничего не открывать заново.
+    /// The layer is hidden: it stays in the list and in the globe's set together
+    /// with its resources, but is not drawn. That is how it differs from "remove":
+    /// bringing it back opens nothing anew.
     pub hidden: bool,
-    /// Корреляция запроса растров, пока ответ в пути. Помнится, чтобы снять
-    /// запрос с учёта, когда слой убирают: иначе ответ убранного слоя опознался
-    /// бы слоем, положенным под тем же ключом заново, и завёл бы ему вторую
-    /// сборку поверх первой.
+    /// The rasters-request correlation while the answer is in flight. Remembered
+    /// so the request can be taken into account when the layer is removed: else the
+    /// answer of a removed layer would be recognized as a layer placed under the
+    /// same key again, and would start a second assembly on top of the first.
     pub imagery: Option<String>,
-    /// Открытие растров ресурсами; появляется с ответом провайдера и живёт до
-    /// передачи владения глобусу.
+    /// The opening of rasters with resources; appears with the provider's answer
+    /// and lives until ownership is handed to the globe.
     pub assembly: Option<Assembly>,
-    /// Ход добычи тайлов, каким его рассказал глобус. Своего смысла у этих
-    /// чисел здесь нет — их показывают, и всё.
+    /// Tile mining progress as the globe reported it. These numbers have no
+    /// meaning of their own here — they are displayed, and that is all.
     pub progress: Progress,
-    /// Чего у слоя не будет, хотя сам он лёг: один из его растров не описался.
-    /// Рядом с ходом, но это не ход, а его предел, — и говорится он тогда,
-    /// когда ход уже кончился и сказать больше нечего.
+    /// What the layer will not have, although the layer itself landed: one of its
+    /// rasters failed to describe. Next to the progress, but not progress — its
+    /// limit, and it is spoken when the progress is over and there is nothing more
+    /// to say.
     pub trouble: String,
-    /// Ключи файлов, которыми провайдер ответил на запрос растров, по номеру
-    /// в ответе: превью, подробный и запасные за ним. Глобус имён не знает и
-    /// называет лежащий подробным номером (`OverlayProgress.detailed`) — здесь
-    /// номер становится именем файла.
+    /// File keys the provider answered the rasters request with, by position in
+    /// the answer: preview, detailed, and spares after it. The globe knows no names
+    /// and calls the one lying detailed by its number (`OverlayProgress.detailed`)
+    /// — here the number becomes a file name.
     pub files: Vec<String>,
-    /// Имя файла, лежащего подробным сейчас. Пусто — подробного нет или глобус
-    /// о нём ещё не сказал.
+    /// The name of the file lying detailed right now. Empty — there is no detailed
+    /// one or the globe has not spoken about it yet.
     pub detailed: Option<String>,
-    /// Что сказано о подробном растре — его отказ и предел, когда деталь решает
-    /// он (`OverlayProgress.detailed_trouble`); в `trouble` этого нет. Имя
-    /// файла ставится перед этим и только перед этим.
+    /// What is said about the detailed raster — its refusal and limit when detail
+    /// is decided by it (`OverlayProgress.detailed_trouble`); `trouble` has none of
+    /// this. The file name is set right before this and only before this.
     pub detailed_trouble: String,
-    /// Какая величина лежащего подробным файла показана
-    /// (`OverlayProgress.detailed_variable`): у файла многих величин выбор
-    /// делает тайлер, и в строке слоя это единственное место, где он назван.
-    /// Пусто — подробного нет, не описан или величина у него одна (снимок).
+    /// Which variable of the file lying detailed is shown
+    /// (`OverlayProgress.detailed_variable`): for a file of many variables the
+    /// choice is made by the tiler, and in the layer row this is the only place
+    /// where it is named. Empty — there is no detailed one, it is not described, or
+    /// it has a single variable (an image).
     pub variable: Option<Variable>,
-    /// Величины лежащего подробным файла, из каких выбирают
-    /// (`OverlayProgress.detailed_variables`), от последнего отчёта с ними.
+    /// Variables of the file lying detailed, to choose from
+    /// (`OverlayProgress.detailed_variables`), from the last report carrying them.
     pub variables: Vec<Variable>,
-    /// Номер лежащего подробным (`OverlayProgress.detailed`) — к нему
-    /// относится названная величина.
+    /// The number of the one lying detailed (`OverlayProgress.detailed`) — the
+    /// named variable refers to it.
     pub detailed_ordinal: Option<u32>,
-    /// Файл, которым смотрящий просил положить снимок (`ImageryRequest.wanted`):
-    /// он ложится подробным, выбор провайдера — за ним запасным. Пусто —
-    /// выбор провайдера.
+    /// The file the viewer asked to place as the image (`ImageryRequest.wanted`):
+    /// it lands detailed, the provider's choice lands as its spare. Empty — the
+    /// provider's choice.
     pub wanted_file: Option<String>,
-    /// Названная смотрящим величина: номер файла и путь. Уезжает глобусу в
-    /// `OverlayRaster.variable` того растра; снимается, когда подробным лёг
-    /// другой файл (запасной) — названное про прежний к нему не относится.
+    /// The variable named by the viewer: file number and path. Goes to the globe
+    /// in `OverlayRaster.variable` of that raster; cleared when another file (a
+    /// spare) lands detailed — what was named about the previous one does not
+    /// refer to it.
     pub variable_wanted: Option<(u32, String)>,
-    /// Растры, уже переданные глобусу, и рамка, уехавшая вместе с ними.
-    /// Владения за ними больше нет — это имена, которыми набор пересылается
-    /// целиком, когда меняется его состав или показ: глобус узнаёт по ним, что
-    /// наложение прежнее, и не переоткрывает его (см. его `Overlays`).
+    /// Rasters already handed to the globe, and the frame that went along with
+    /// them. Ownership over them is gone — these are the names by which the set is
+    /// re-sent in full when its composition or display changes: the globe
+    /// recognizes the overlay as the same and does not reopen it (see its
+    /// `Overlays`).
     pub rasters: Vec<OverlayRaster>,
     pub utm: Option<UtmFrame>,
 }
@@ -134,104 +139,110 @@ impl OverlayState {
         }
     }
 
-    /// Наложение доехало до шара. Пока нет — оно в сборке: спрашиваем растры
-    /// или открываем их.
+    /// The overlay has reached the globe. Until then it is being assembled:
+    /// asking for rasters or opening them.
     pub fn on_globe(&self) -> bool {
         !self.rasters.is_empty()
     }
 }
 
-/// Ход добычи тайлов слоя — то, что о нём рассказал глобус (см. его
+/// Tile mining progress of a layer — what the globe reported about it (see its
 /// `OverlayProgress`).
 ///
-/// Снимок ложится на шар не сразу: пирамида набирается сверху вниз, и от
-/// «нажали значок» до подробной картинки проходят десятки секунд. По шару этого
-/// не видно — там либо уже что-то есть, либо ещё нет, — а список слоёв стоит
-/// прямо перед глазами, и место такой подписи здесь.
+/// An image does not land on the globe at once: the pyramid is filled from the
+/// top down, and from "icon clicked" to a detailed picture tens of seconds pass.
+/// On the globe this is invisible — there is either already something or there is
+/// not — but the layer list stands right before the eyes, and that is where such
+/// a label belongs.
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct Progress {
-    /// Ячеек последнего заказа добыто и сколько их в нём.
+    /// Cells of the latest order mined and how many there are in it.
     pub ready: u32,
     pub total: u32,
-    /// Доля пути слоя, 0..1. Считает её глобус ступенями пирамиды — панорама
-    /// её не двигает (см. его `OverlayProgress`).
+    /// The layer's share of the way, 0..1. The globe counts it in pyramid steps —
+    /// the panorama does not move it (see its `OverlayProgress`).
     pub share: f32,
-    /// Работа не кончилась. Отдельно от доли: доля бывает единицей и у слоя,
-    /// который вот-вот попросят подробнее.
+    /// Work is not over. Separate from the share: a share can be one even for a
+    /// layer that is about to be asked for more detail.
     pub working: bool,
-    /// Какая ступень пирамиды набирается и сколько их всего — то самое, что
-    /// доля и отсчитывает.
+    /// Which pyramid step is being filled and how many there are in total —
+    /// exactly what the share counts off.
     pub step: u32,
     pub steps: u32,
-    /// Слой на шаре есть, а нарисовать по нему пока нечего: растр ещё
-    /// описывают. Своего ответа на это у нас нет и быть не может — «лежит на
-    /// шаре» и «виден на шаре» отсюда неразличимы, — поэтому его говорит
-    /// глобус (см. его `OverlayProgress.blank`).
+    /// The layer is on the globe, but there is nothing to draw from it yet: the
+    /// raster is still being described. We have no answer to this and cannot have
+    /// one — "lies on the globe" and "visible on the globe" are indistinguishable
+    /// from here — so the globe says it (see its `OverlayProgress.blank`).
     pub blank: bool,
-    /// Прочитано байт источника из скольки — то, что глобус посчитал годным к
-    /// показу. Нулевой знаменатель значит «мерить нечем», а не «ноль байт», и
-    /// поводов у него четыре: разбирает их пирамида, а не мы (см.
-    /// `OverlayProgress.pass_read` в контракте глобуса).
+    /// Bytes of the source read out of how many — what the globe counted fit for
+    /// display. A zero denominator means "nothing to measure with", not "zero
+    /// bytes", and it has four reasons: the pyramid disentangles them, not us (see
+    /// `OverlayProgress.pass_read` in the globe's contract).
     ///
-    /// Своего смысла у этих чисел здесь нет — их показывают, и всё.
+    /// These numbers have no meaning of their own here — they are displayed, and
+    /// that is all.
     pub pass: (u64, u64),
 }
 
-/// Чем полоса под строкой отвечает на вопрос «сколько ещё».
+/// What the bar under a row answers to the question "how much longer".
 ///
-/// Перечислением, а не долей с нулём вместо ответа: «работа идёт, а доли нет»
-/// и «сделано ноль» — разные вещи, и записанные одним числом они рисуются
-/// одинаково, то есть никак. Пустая дорожка в три точки — это и есть «никак»,
-/// а именно с неё начинается всякий показ на шаре: пока растр описывают,
-/// считать в нём нечего, и длится это десятки секунд.
+/// An enumeration, not a share with zero standing in for the answer: "work is
+/// going, but there is no share" and "nothing done yet" are different things, and
+/// recorded as one number they render the same — that is, not at all. An empty
+/// three-dot track is exactly "not at all", and every showing on the globe starts
+/// from it: while the raster is being described, there is nothing to count in it,
+/// and this lasts tens of seconds.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Pace {
-    /// Работа кончилась — полосе взяться не от чего.
+    /// Work is over — the bar has nothing to take off from.
     Idle,
-    /// Работа идёт, а доли у неё нет: растры открываются или растр описывают.
+    /// Work is going, but there is no share: rasters are opening or the raster is
+    /// being described.
     Unknown,
-    /// Доля пути, 0..1.
+    /// Share of the way, 0..1.
     Share(f32),
 }
 
 impl Progress {
-    /// Ход по частям, от старшей к младшей. Пусто — сказать нечего: всё, что
-    /// нужно этому взгляду, уже на шаре.
+    /// Progress in parts, from senior to junior. Empty — there is nothing to say:
+    /// everything this view needs is already on the globe.
     ///
-    /// Частями, а не готовой фразой, потому что мест у неё два и они разной
-    /// ширины: в ячейку колонки влезают две части, в подсказку — все. Собранная
-    /// порознь, фраза разошлась бы у них словами, а не только длиной.
+    /// Parts, not a ready-made phrase, because it has two places and they are of
+    /// different widths: two parts fit into a column cell, all of them into a
+    /// tooltip. Assembled separately, the phrase would diverge between them in
+    /// words, not just in length.
     ///
-    /// Каждая часть объясняет то, чего не объясняют соседние. Ступень — единица
-    /// измерения полосы: без неё смотрящий видит, что полоса сдвинулась, и не
-    /// знает, на ступень или на четверть тайла. Байты — единственное, что
-    /// движется, пока ступень стои́т на одной ячейке: последовательный источник
-    /// читается целиком, и по ячейкам всё это время сделано ноль. Ячейки — то,
-    /// что едет прямо сейчас внутри ступени.
+    /// Each part explains what the neighbors do not. The step is the measuring
+    /// unit of the bar: without it the viewer sees that the bar moved and does not
+    /// know whether by a step or by a quarter of a tile. Bytes are the only thing
+    /// moving while the step stands still on one cell: a sequential source is read
+    /// in full, and per cell nothing is done all that time. Cells are what is
+    /// driving right now inside the step.
     ///
-    /// Порядок здесь и есть старшинство: ужимаясь, подпись отбрасывает части с
-    /// хвоста (см. `components::table::fit_label`).
+    /// The order here is the seniority: when squeezed, the label drops parts from
+    /// the tail (see `components::table::fit_label`).
     pub fn parts(&self) -> Vec<String> {
         if !self.working {
             return Vec::new();
         }
         let mut said = Vec::new();
         if self.steps > 0 {
-            said.push(format!("ступень {}/{}", self.step + 1, self.steps));
+            said.push(format!("step {}/{}", self.step + 1, self.steps));
         }
         if self.pass.1 > 0 {
             said.push(crate::module::components::format::progress(self.pass.0, self.pass.1));
         }
         said.push(match self.total {
-            // Спрашивать было нечего: растр описывают либо ступень уже закрыта.
-            0 => "готовим…".to_string(),
-            total => format!("тайлы {}/{}", self.ready, total),
+            // Nothing to ask for: the raster is being described or the step is
+            // already closed.
+            0 => "preparing…".to_string(),
+            total => format!("tiles {}/{}", self.ready, total),
         });
         said
     }
 
-    /// Тот же ход одной фразой — для подсказки, где место есть на всё.
-    /// `None` — сказать нечего.
+    /// The same progress as one phrase — for the tooltip, where there is room for
+    /// everything. `None` — there is nothing to say.
     pub fn said(&self) -> Option<String> {
         let parts = self.parts();
         match parts.is_empty() {
@@ -240,12 +251,12 @@ impl Progress {
         }
     }
 
-    /// Чем рисовать полосу под строкой списка (см. [`Pace`]).
+    /// What draws the bar under a list row (see [`Pace`]).
     ///
-    /// Долю отменяет не её значение, а `blank`: доля бывает нулевой и у честно
-    /// начатой ступени, а у пирамиды в один уровень ступеней ноль и тогда,
-    /// когда картинка давно на месте. Выведенная из чисел, «доли нет»
-    /// путалась бы то с одним, то с другим.
+    /// The share is cancelled not by its value but by `blank`: a share can be zero
+    /// for an honestly started step, and for a one-level pyramid there are zero
+    /// steps even when the picture has long been in place. Derived from numbers,
+    /// "no share" would be confused now with one, now with the other.
     pub fn pace(&self) -> Pace {
         match (self.working, self.blank) {
             (false, _) => Pace::Idle,
@@ -255,32 +266,36 @@ impl Progress {
     }
 }
 
-/// Чем открываемый файл приходится наложению. Растр — то, что покажут;
-/// координаты — соседний файл, в котором у Sentinel-3 лежит широта с долготой
-/// его пикселей. Различать их надо: в наложение они уезжают разными полями, а
-/// приезжают одним и тем же ответом об открытии.
+/// What the file being opened is to the overlay. The raster is what will be
+/// shown; the coordinates are a neighboring file in which Sentinel-3 holds the
+/// latitude and longitude of its pixels. They must be distinguished: into the
+/// overlay they travel in different fields, yet they arrive in the very same
+/// open reply.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Part {
     Raster,
     Geolocation,
 }
 
-/// Сборка наложения: рамка от провайдера и открываемые растры.
+/// Overlay assembly: the frame from the provider and the rasters being opened.
 pub struct Assembly {
     pub utm: Option<UtmFrame>,
-    /// Ключи файлов ответа провайдера по номеру — в `OverlayState::files`
-    /// ложатся вместе с растрами, в `finish`: до замены набора глобус
-    /// отчитывается о прежнем, и его номера читались бы по новому списку.
+    /// File keys of the provider's answer by position — they land in
+    /// `OverlayState::files` together with the rasters, in `finish`: before the set
+    /// is replaced the globe reports on the old one, and its numbers would be read
+    /// against the new list.
     pub files: Vec<String>,
-    /// Корреляции открытий, которых ещё ждём. Список, а не таблица: таблица на
-    /// этот топик одна и живёт в State (см. `State::opens`) — здесь только то,
-    /// чем сборку снять с неё, когда наложение убирают. Иначе ответ оборванной
-    /// сборки опознался бы следующей сборкой того же ключа.
+    /// Correlations of the openings still awaited. A list, not a table: the table
+    /// for this topic is one and it lives in State (see `State::opens`) — here is
+    /// only what takes the assembly off it when the overlay is removed. Else the
+    /// answer of an aborted assembly would be recognized as the next assembly of
+    /// the same key.
     pub opens: Vec<String>,
-    /// Открытые файлы (роль, номер растра в ответе провайдера и что это за
-    /// файл → ресурс); владение у нас до передачи глобусу. Роль уже переведена
-    /// в ту, которую понимает глобус, — перевод делается один раз, на границе
-    /// (см. handlers::overlay::role_for_globe). Номер — чтобы координаты нашли
-    /// свой растр, когда подробных несколько.
+    /// Opened files (role, raster number in the provider's answer, and what kind
+    /// of file it is → resource); ownership stays with us until handover to the
+    /// globe. The role is already translated into the one the globe understands —
+    /// the translation is done once, at the boundary (see
+    /// handlers::overlay::role_for_globe). The number is so that the coordinates
+    /// find their raster when there are several detailed ones.
     pub collected: Vec<(crate::proto::globe::OverlayRole, u32, Part, ResourceHandle)>,
 }

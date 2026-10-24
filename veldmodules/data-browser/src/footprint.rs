@@ -1,69 +1,71 @@
-//! Контур снимка: где он лежит и что в него попадает.
+//! Contour of a snapshot: where it lies and what falls inside it.
 //!
-//! Две задачи, и обе про место, а не про рисование: навести на снимок камеру и
-//! понять, в него ли ткнули. Рисующему модулю их не поручить — он не знает про
-//! снимки вовсе; провайдеру тем более — он отдаёт геометрию и на этом всё.
-//! Сводить одно с другим может только тот, у кого на экране и список, и шар.
+//! Two tasks, and both about place, not drawing: aim the camera at the snapshot
+//! and tell whether a click landed on it. The drawing module cannot be entrusted
+//! with them — it knows nothing of snapshots at all; the provider even less — it
+//! hands over geometry and that is all. Only the one who has both the list and
+//! the globe on screen can put one with the other.
 //!
-//! Считается на шаре, а не на паре углов и не на эллипсоиде. Не на эллипсоиде —
-//! потому что сжатие даёт доли процента, а числа эти нужны, чтобы отойти от
-//! снимка на расстояние, с которого он виден целиком, и чтобы понять, ткнули в
-//! него или мимо.
+//! Counted on the sphere, not on a pair of angles and not on the ellipsoid. Not
+//! on the ellipsoid — because flattening adds fractions of a percent, while
+//! these numbers serve to pull away from the snapshot to a distance from which
+//! it is seen whole, and to tell whether it was hit or missed.
 //!
-//! Сама арифметика при этом не своя: и ведение ребра, и единичный вектор, и
-//! обратный ход к углам, и разворот долготы берутся из
-//! `veldmap_globe_wrap::geodesy` — того же файла, которым глобус и рисует. Своё
-//! тут одно — азимут: он нужен для счёта оборотов и больше нигде.
+//! The arithmetic itself is not its own: edge tracing, the unit vector, the
+//! inverse path back to angles, and longitude unwinding all come from
+//! `veldmap_globe_wrap::geodesy` — the same file the globe draws with. The one
+//! thing of its own here is the azimuth: it is needed to count turns and
+//! nowhere else.
 //!
-//! Общее не ради экономии строк, а ради одного ответа на два вопроса. Ребро
-//! контура ведётся тремя разными способами (`geodesy::along`): у полосы съёмки
-//! дугой, у растра в градусной сетке — параллелью или меридианом. Считай мы
-//! «внутри» по вершинам, все рёбра вышли бы дугами, а дуга между концами
-//! параллели уходит к полюсу тем дальше, чем длиннее ребро в градусах долготы:
-//! полоса вдоль верхнего края выбиралась бы щелчком, будучи нарисована
-//! снаружи, а вдоль нижнего — наоборот (это закрепляет
-//! `covers_agrees_with_the_drawn_box`). Поэтому кольцо здесь ведут тем же
-//! ходом, что и рисуют.
+//! Shared not to save lines but for one answer to two questions. The contour
+//! edge is traced in three different ways (`geodesy::along`): an imaging swath
+//! by an arc, a raster on a degree grid by a parallel or a meridian. Were
+//! "inside" counted from the vertices, all edges would come out as arcs, and an
+//! arc between the ends of a parallel bows toward the pole the farther the
+//! longer the edge is in degrees of longitude: a strip along the top edge would
+//! be picked by a click while drawn outside, and along the bottom edge the other
+//! way around. So the ring here is traced with the same walk as it is drawn.
 //!
-//! Совпадение при этом не точное, и обещать его нельзя: обороты считаются по
-//! ломаной, вписанной в этот ход, а вписанная в параллель ломаная проходит
-//! севернее её. Остаток — это шаг ломаной (см. [`traced`]): он много меньше
-//! той дуги, а к полюсу растёт. Точным его сделал бы только счёт вдоль самой
-//! параллели, а не по хорде.
+//! The agreement is not exact, and it cannot be promised: turns are counted
+//! along the polyline inscribed in that walk, and a polyline inscribed in a
+//! parallel passes north of it. The remainder is the polyline step (see
+//! [`traced`]): it is much smaller than that arc, and grows toward the pole.
+//! Only counting along the parallel itself instead of the chord would make it
+//! exact.
 //!
-//! Пары углов не хватает, и это не придирка: у широты с долготой есть полюс и
-//! есть шов. Полярная гранула Sentinel-1 обходит макушку кольцом, у которого
-//! все вершины лежат южнее любой точки внутри него, — счёт пересечений вдоль
-//! широты отвечает на такую «снаружи», а среднее сырых долгот кладёт её центр
-//! на противоположную сторону Земли. Единичных векторов ни того, ни другого не
-//! знают.
+//! A pair of angles is not enough, and that is no quibble: latitude with
+//! longitude has a pole and has a seam. A Sentinel-1 polar granule skirts the
+//! cap with a ring whose vertices all lie south of any point inside it —
+//! intersection counting along latitude answers "outside" for such a ring, and
+//! averaging raw longitudes puts its centre on the opposite side of the Earth.
+//! Unit vectors know neither failure.
 
 use glam::DVec3;
 use veldmap_globe_wrap::geodesy;
 
 use crate::proto::data_provider::Ring;
 
-/// Круг, в который вписан контур.
+/// The circle the contour is inscribed in.
 #[derive(Clone, Copy)]
 pub struct Frame {
     pub lat: f64,
     pub lon: f64,
-    /// Угловой радиус в градусах дуги: 1° — около 111 км.
+    /// Angular radius in degrees of arc: 1° is about 111 km.
     pub radius_deg: f64,
 }
 
-/// Куда смотреть, чтобы увидеть эти кольца целиком. `None` — колец нет: у
-/// снимка не было геометрии, и наводить камеру не на что.
+/// Where to look to see these rings whole. `None` — there are no rings: the
+/// snapshot had no geometry, and there is nothing to aim the camera at.
 pub fn frame(rings: &[Ring]) -> Option<Frame> {
     let first = rings.iter().flat_map(|ring| &ring.points).next()?;
 
-    // Вершины разошлись по всей сфере и погасили друг друга — середины у такого
-    // набора нет. Берём первую вершину: радиус выйдет большим, и снимок в кадр
-    // всё равно поместится.
+    // Vertices spread over the whole sphere and cancelled each other out — such
+    // a set has no middle. Take the first vertex: the radius comes out larger,
+    // and the snapshot fits into the frame all the same.
     let (lat, lon) = middle(points(rings)).unwrap_or((first.lat, first.lon));
 
-    // Радиус — по самой дальней вершине, а не по половине рамки: у контура,
-    // вытянутого по диагонали, рамка вдвое уже того, что в него не влезло.
+    // Radius to the farthest vertex, not half the bounding box: for a contour
+    // stretched along a diagonal, the box is half of what failed to fit.
     let radius_deg = points(rings)
         .map(|point| geodesy::separation((lat, lon), point))
         .fold(0.0, f64::max);
@@ -71,54 +73,57 @@ pub fn frame(rings: &[Ring]) -> Option<Frame> {
     Some(Frame { lat, lon: wrap(lon), radius_deg })
 }
 
-/// Накрывают ли кольца эту точку.
+/// Do the rings cover this point.
 ///
-/// Дырки полигона приходят кольцами наравне с внешним контуром, и здесь это
-/// незаметно: точка в дырке лежит внутри обоих, а вопрос — «попал ли я в
-/// снимок», и ответ на него от дырки не меняется.
+/// Polygon holes arrive as rings on equal footing with the outer contour, and
+/// here it goes unnoticed: a point in a hole lies inside both, and the question
+/// is "did the click land on the snapshot", whose answer a hole does not
+/// change.
 pub fn covers(rings: &[Ring], lat: f64, lon: f64) -> bool {
     rings.iter().any(|ring| inside(&angles(ring), lat, lon))
 }
 
-/// Все вершины набора колец парами углов.
+/// All vertices of the ring set as pairs of angles.
 fn points(rings: &[Ring]) -> impl Iterator<Item = (f64, f64)> + '_ {
     rings.iter().flat_map(|ring| &ring.points).map(|point| (point.lat, point.lon))
 }
 
-/// Кольцо парами углов — в том виде, в каком его понимает `geodesy`.
+/// Ring as pairs of angles — in the form `geodesy` understands it.
 fn angles(ring: &Ring) -> Vec<(f64, f64)> {
     ring.points.iter().map(|point| (point.lat, point.lon)).collect()
 }
 
-/// Кольцо, уплотнённое тем же ходом, каким его рисуют.
+/// Ring densified with the same walk as it is drawn.
 ///
-/// Шаг здесь нужен не для гладкости линии, а чтобы счёт оборотов шёл по той же
-/// кривой, — и мерой ему поэтому служат не пиксели, а метры промаха: ломаная,
-/// вписанная в параллель, отходит от неё на `R·s²/(8·cos φ)`, и четверть
-/// градуса оставляет полсотни метров на семидесятых широтах против трёх
-/// километров у двух градусов. Промах в полсотни метров — это меньше пикселя
-/// на любом приближении, с которого снимок виден целиком.
+/// The step here is needed not for line smoothness but so that the turn count
+/// follows the same curve — and its measure is therefore not pixels but metres
+/// of miss: a polyline inscribed in a parallel departs from it by
+/// `R·s²/(8·cos φ)`, and a quarter degree leaves fifty metres at seventies
+/// latitudes against three kilometres for two degrees. A fifty-metre miss is
+/// less than a pixel at any zoom from which the snapshot is seen whole.
 ///
-/// Величина своя, а не занятая у рисующего: у того шаг выведен из выноса над
-/// поверхностью, здесь — из метров на местности, и совпадение их порядка
-/// (рисующий делит мельче трети градуса) — следствие, а не правило.
+/// The value is its own, not borrowed from the drawer: there the step derives
+/// from the height above the surface, here from metres on the ground, and the
+/// agreement of their magnitudes (the drawer divides finer than a third of a
+/// degree) is a consequence, not a rule.
 ///
-/// Мера шага — длина ребра по поверхности (`geodesy::edge_span`), поэтому у
-/// параллели он растёт в долготе к полюсу, а вместе с ним и остаток
-/// расхождения (см. шапку).
+/// The measure of the step is the edge length along the surface
+/// (`geodesy::edge_span`), so for a parallel it grows with longitude toward the
+/// pole, and with it grows the remainder of the disagreement (see the header).
 fn traced(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
     const MAX_EDGE_DEG: f64 = 0.25;
 
     let mut out = Vec::with_capacity(ring.len());
     for (at, &from) in ring.iter().enumerate() {
         let to = ring[(at + 1) % ring.len()];
-        // Шагов не больше, чем нужно ребру в полный круг: длиннее ребра не
-        // бывает, а приведение к `u32` насыщается вместо переполнения — из
-        // числа, пришедшего по шине, вышло бы четыре миллиарда шагов.
+        // No more steps than an edge needs for the full circle: an edge is
+        // never longer, and the `u32` cast saturates instead of overflowing —
+        // from a number that arrived over the bus, four billion steps would
+        // come out.
         //
-        // Предел ставится шагам, а не размаху: `f64::min` не-число пропускает
-        // вторым доводом, и зажатый им размах дал бы полный круг там, где
-        // вести нечего вовсе.
+        // The bound applies to the steps, not the span: `f64::min` lets a
+        // non-number through as the second argument, and a span clamped by it
+        // would give a full circle where there is nothing to trace at all.
         const MOST: f64 = geodesy::TURN_DEG / MAX_EDGE_DEG;
         let steps = (geodesy::edge_span(from, to) / MAX_EDGE_DEG).ceil().max(1.0).min(MOST) as u32;
         for step in 0..steps {
@@ -128,24 +133,25 @@ fn traced(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
     out
 }
 
-/// Лежит ли точка внутри кольца.
+/// Does the point lie inside the ring.
 ///
-/// Считается азимутами: смотрим из точки на каждую вершину по очереди и
-/// складываем повороты взгляда. Кольцо, обошедшее точку, вернёт взгляд на
-/// место, провернув его ровно на полный оборот; кольцо в стороне — качнёт
-/// туда-сюда и вернёт в ноль.
+/// Counted by azimuths: look from the point at each vertex in turn and sum the
+/// turns of the gaze. A ring that went around the point returns the gaze to its
+/// place, turning it exactly one full revolution; a ring off to the side swings
+/// back and forth and returns to zero.
 ///
-/// Так, а не чётностью пересечений вдоль широты: у той есть полюс. Кольцо,
-/// обходящее макушку, лежит целиком южнее точки внутри себя, ни одно его ребро
-/// широту этой точки не пересекает, и ответ выходит «снаружи» — а это ровно
-/// полярная гранула, попасть по которой хочется не меньше, чем по любой другой.
-/// У азимутов особой точки нет: полюс для них такое же место, как всякое другое.
+/// This way, not by crossing parity along latitude: the latter has a pole. A
+/// ring skirting the cap lies entirely south of a point inside itself, no edge
+/// of it crosses that latitude, and the answer comes out "outside" — which is
+/// exactly the polar granule, worth clicking no less than any other. Azimuths
+/// have no special point: the pole is to them a place like any other.
 ///
-/// Одного оборота при этом мало, и это не придирка к формуле: на шаре у
-/// замкнутой линии нет наружной стороны — она делит шар надвое, и кольцо вокруг
-/// северной макушки обходит кругом и её, и всё остальное вместе с южной. Стороны
-/// различает знак, а какая из двух — снимок, говорит его собственная середина:
-/// снимков крупнее половины Земли не бывает.
+/// One revolution is not enough at that, and that is no quibble with the
+/// formula: on a sphere a closed line has no outer side — it divides the sphere
+/// in two, and a ring around the north cap goes round both it and everything
+/// else together with the south. The sign tells the sides apart, and which of
+/// the two is the snapshot is told by its own middle: there are no snapshots
+/// larger than half the Earth.
 fn inside(ring: &[(f64, f64)], lat: f64, lon: f64) -> bool {
     if ring.len() < 3 {
         return false;
@@ -153,23 +159,25 @@ fn inside(ring: &[(f64, f64)], lat: f64, lon: f64) -> bool {
     let traced = traced(ring);
     let turned = turn(&traced, lat, lon);
     if turned.abs() > 180.0 {
-        // Середина кольца — заведомо его сторона. Выродилась (вершины разошлись
-        // по всей сфере и погасили друг друга) — сторону назвать нечем, и
-        // остаётся сам оборот.
+        // The middle of the ring is certainly on its side. Degenerate (vertices
+        // spread over the whole sphere and cancelled each other out) — there is
+        // nothing to name the side with, and the turn itself is what remains.
         let Some((centre_lat, centre_lon)) = middle(ring.iter().copied()) else {
             return true;
         };
         return turned.signum() == turn(&traced, centre_lat, centre_lon).signum();
     }
 
-    // Обход не сошёлся ни во что. У кольца в стороне это и значит «мимо», но
-    // так же выглядит и пояс: два его полных круга обходят шар в разные стороны
-    // и сокращаются в любой точке планеты. Различает их то, осталась ли на шаре
-    // долгота, свободная от кольца, — у пояса не осталось, и вопрос к нему
-    // другой: не «обошли ли точку», а «между какими параллелями он лежит».
+    // The walk did not converge to anything. For a ring off to the side this
+    // does mean "missed", but a belt looks the same: its two full circles go
+    // round the sphere in opposite directions and cancel at any point of the
+    // planet. What tells them apart is whether a longitude free of the ring
+    // remains on the sphere — for a belt none remains, and the question to it
+    // is a different one: not "did it go round the point", but "between which
+    // parallels does it lie".
     //
-    // Полярная шапка сюда не попадает: её обход честно сходится в полный
-    // оборот, и отвечает на неё ветка выше.
+    // A polar cap does not come here: its walk honestly converges to a full
+    // revolution, and the branch above answers for it.
     geodesy::encircles(&traced) && {
         let (low, high) = ring
             .iter()
@@ -178,7 +186,7 @@ fn inside(ring: &[(f64, f64)], lat: f64, lon: f64) -> bool {
     }
 }
 
-/// На сколько провернётся взгляд из точки, если обойти кольцо.
+/// By how much the gaze from the point turns when going round the ring.
 fn turn(ring: &[(f64, f64)], lat: f64, lon: f64) -> f64 {
     let mut turned = 0.0;
     for (index, from) in ring.iter().enumerate() {
@@ -188,15 +196,16 @@ fn turn(ring: &[(f64, f64)], lat: f64, lon: f64) -> f64 {
     turned
 }
 
-/// Середина набора точек — направление суммы их единичных векторов. Ни шва, ни
-/// полюса для неё не существует: складываются точки, а не углы.
-/// `None` — точек нет вовсе либо они погасили друг друга.
+/// Middle of a point set — the direction of the sum of their unit vectors. No
+/// seam and no pole exists for it: points are summed, not angles.
+/// `None` — there are no points at all or they cancelled each other out.
 fn middle(points: impl Iterator<Item = (f64, f64)>) -> Option<(f64, f64)> {
     let sum: DVec3 = points.map(|(lat, lon)| geodesy::unit(lat, lon)).sum();
     (sum.length() > 1e-9).then(|| geodesy::angles(sum.normalize()))
 }
 
-/// Азимут взгляда из первой точки на вторую, градусы. Ноль — на север.
+/// Azimuth of the gaze from the first point to the second, degrees. Zero is
+/// north.
 fn bearing(from_lat: f64, from_lon: f64, to_lat: f64, to_lon: f64) -> f64 {
     let (from, to) = (from_lat.to_radians(), to_lat.to_radians());
     let delta = (to_lon - from_lon).to_radians();
@@ -205,163 +214,11 @@ fn bearing(from_lat: f64, from_lon: f64, to_lat: f64, to_lon: f64) -> f64 {
     east.atan2(north).to_degrees()
 }
 
-/// Разница углов в −180..180 — та же сторона, с которой её видит глаз.
+/// Angle difference wrapped into −180..180 — the same side the eye sees it
+/// from.
 ///
-/// Тем же разворотом, что и у решётки привязки, только от нуля: там долготу
-/// разворачивают к соседнему узлу, здесь — к началу отсчёта.
+/// The same unwinding as the binding grid, only from zero: there the longitude
+/// is unwound toward the neighbouring node, here toward the origin.
 fn wrap(degrees: f64) -> f64 {
     geodesy::unwind(0.0, degrees)
-}
-
-#[cfg(test)]
-mod tests {
-
-    /// Кольцо, размах которого не с Земли, ведётся числом шагов, а не
-    /// миллиардом; кольцо без размаха — одним шагом на ребро.
-    #[test]
-    fn a_ring_wider_than_the_earth_is_not_traced_forever() {
-        let endless = traced(&[(0.0, 0.0), (1.0e9, 0.0), (0.0, 1.0)]);
-        assert!(endless.len() < 5000, "вершин {}", endless.len());
-
-        let nowhere = traced(&[(0.0, 0.0), (f64::NAN, 0.0), (0.0, 1.0)]);
-        assert!(nowhere.len() < 20, "вершин {}", nowhere.len());
-    }
-
-    use super::*;
-    use crate::proto::data_provider::GeoPoint;
-
-    fn ring(points: &[(f64, f64)]) -> Ring {
-        Ring {
-            points: points.iter().map(|&(lat, lon)| GeoPoint { lat, lon }).collect(),
-        }
-    }
-
-    #[test]
-    fn covers_a_plain_square() {
-        let rings = [ring(&[(10.0, 10.0), (10.0, 20.0), (20.0, 20.0), (20.0, 10.0)])];
-        assert!(covers(&rings, 15.0, 15.0));
-        assert!(!covers(&rings, 25.0, 15.0));
-        assert!(!covers(&rings, 15.0, 25.0));
-    }
-
-    /// Контур через 180-й меридиан: точка на самом шве — внутри, точки по ту
-    /// сторону его краёв — снаружи. Ровно тот случай, ради которого разница
-    /// долгот всюду считается через `wrap`.
-    #[test]
-    fn covers_across_the_seam() {
-        let rings = [ring(&[(10.0, 175.0), (10.0, -175.0), (20.0, -175.0), (20.0, 175.0)])];
-        assert!(covers(&rings, 15.0, 180.0));
-        assert!(covers(&rings, 15.0, -178.0));
-        assert!(!covers(&rings, 15.0, 170.0));
-        assert!(!covers(&rings, 15.0, -170.0));
-    }
-
-    /// Рамка разрезанного швом контура — на шве, а не на противоположной
-    /// стороне Земли, куда усреднились бы сырые долготы.
-    #[test]
-    fn frame_stays_on_the_seam() {
-        let rings = [ring(&[(10.0, 175.0), (10.0, -175.0), (20.0, -175.0), (20.0, 175.0)])];
-        let frame = frame(&rings).expect("у контура есть геометрия");
-        // Середина шаровая, а не средняя по рамке, поэтому от 15° она отходит
-        // на десятые доли: у широт 10 и 20 разная длина параллели, и сумма
-        // точек это учитывает, а полусумма углов — нет.
-        assert!((frame.lat - 15.0).abs() < 0.2, "{}", frame.lat);
-        assert!(frame.lon.abs() > 179.0, "центр на шве, а не на нулевом меридиане: {}", frame.lon);
-        assert!(frame.radius_deg > 5.0 && frame.radius_deg < 12.0, "{}", frame.radius_deg);
-    }
-
-    #[test]
-    fn frame_of_nothing_is_none() {
-        assert!(frame(&[]).is_none());
-        assert!(frame(&[ring(&[])]).is_none());
-    }
-
-    /// Кольцо вокруг макушки: обычное дело у радара в Арктике. Все его вершины
-    /// лежат южнее точки внутри него, поэтому счёт пересечений вдоль широты
-    /// отвечал бы «снаружи» — щелчок по такому снимку не выбирал бы его.
-    #[test]
-    fn covers_a_ring_around_the_pole() {
-        let around: Vec<(f64, f64)> =
-            (0..12).map(|step| (80.0, -180.0 + f64::from(step) * 30.0)).collect();
-        let rings = [ring(&around)];
-
-        assert!(covers(&rings, 89.0, 0.0), "точка у самого полюса");
-        assert!(covers(&rings, 89.0, 150.0), "она же с другой долготы");
-        assert!(covers(&rings, 85.0, -60.0));
-        assert!(!covers(&rings, 70.0, 0.0), "точка южнее кольца");
-        assert!(!covers(&rings, -85.0, 0.0), "и у противоположного полюса");
-    }
-
-    /// Растр в градусной сетке очерчивается по своим краям, а не по дугам между
-    /// углами, — и выбирается щелчком там же. Дуга между концами верхнего ребра
-    /// ушла бы к полюсу на четверть градуса, и полоса в двадцать шесть
-    /// километров выбиралась бы за пределами нарисованного.
-    #[test]
-    fn covers_agrees_with_the_drawn_box() {
-        let rings = [ring(&[(72.0, 10.0), (72.0, 30.0), (73.0, 30.0), (73.0, 10.0)])];
-
-        assert!(covers(&rings, 72.5, 20.0), "середина коробки");
-        assert!(covers(&rings, 72.1, 20.0), "у нижнего края — внутри нарисованного");
-        assert!(!covers(&rings, 73.1, 20.0), "за верхним краем: там дуга, а нарисована параллель");
-        assert!(!covers(&rings, 71.9, 20.0), "под нижним краем");
-        // И у самого края тоже: ломаная, вписанная в параллель, проходит
-        // севернее её, и чем крупнее шаг, тем дальше. Сотая доля градуса — это
-        // километр, и при грубом шаге коробка ловила бы щелчок там, где
-        // нарисована её граница, а не она сама.
-        assert!(!covers(&rings, 73.01, 20.0), "щелчок в километре за краем считается попаданием");
-    }
-
-    /// Глобальный растр обходит Землю по долготе целиком. Обороты у такого
-    /// кольца сокращаются в ноль в любой точке планеты, поэтому щелчком он не
-    /// выбирался бы никогда — а он самый крупный из всего, что бывает на шаре.
-    #[test]
-    fn covers_a_whole_earth_band() {
-        let rings = [ring(&[
-            (-70.0125, -180.0125),
-            (70.0125, -180.0125),
-            (70.0125, 179.9875),
-            (-70.0125, 179.9875),
-        ])];
-
-        assert!(covers(&rings, 0.0, 0.0), "середина пояса");
-        assert!(covers(&rings, 45.0, 30.0));
-        assert!(covers(&rings, -69.0, 150.0), "у самого края пояса");
-        assert!(!covers(&rings, 80.0, 0.0), "севернее пояса");
-        assert!(!covers(&rings, -80.0, 50.0), "южнее пояса");
-    }
-
-    /// Тот же пояс, записанный лишними вершинами вдоль параллелей. Полного
-    /// круга в одном ребре у него нет, и признак, считанный по рёбрам, его бы
-    /// не узнал — а это тот же самый продукт, только уплотнённый поставщиком.
-    #[test]
-    fn covers_a_band_written_with_extra_vertices() {
-        let rings = [ring(&[
-            (-70.0125, -180.0125),
-            (70.0125, -180.0125),
-            (70.0125, -90.0),
-            (70.0125, 0.0),
-            (70.0125, 90.0),
-            (70.0125, 179.9875),
-            (-70.0125, 179.9875),
-            (-70.0125, 90.0),
-            (-70.0125, 0.0),
-            (-70.0125, -90.0),
-        ])];
-
-        assert!(covers(&rings, 0.0, 0.0));
-        assert!(covers(&rings, 45.0, 30.0));
-        assert!(!covers(&rings, 80.0, 0.0));
-    }
-
-    /// Середина такого кольца — сам полюс, а не точка на экваторе, куда
-    /// усреднились бы сырые долготы. От неё же считается радиус: наводка,
-    /// промахнувшаяся мимо цели на десять градусов, показывает пустой лёд.
-    #[test]
-    fn frame_of_a_polar_ring_sits_on_the_pole() {
-        let around: Vec<(f64, f64)> =
-            (0..12).map(|step| (80.0, -180.0 + f64::from(step) * 30.0)).collect();
-        let frame = frame(&[ring(&around)]).expect("у контура есть геометрия");
-        assert!(frame.lat > 89.9, "середина уехала с полюса: {}", frame.lat);
-        assert!((frame.radius_deg - 10.0).abs() < 1e-6, "{}", frame.radius_deg);
-    }
 }

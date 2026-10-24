@@ -1,20 +1,22 @@
-//! Жизненный цикл поверхности окна.
+//! Window surface lifecycle.
 //!
-//! Хост не знает, кто рендерит наше окно: на app/window_resized мы сами
-//! выделяем текстуру нужного размера, делегируем её рендереру write-lease'ом
-//! и аттачим хосту. Выделение и грант — общий обряд `veldsdk::surface`
-//! (им же отдаётся место под глобус); аттач — уже наше дело, окно наше.
+//! The host does not know who renders our window: on app/window_resized we
+//! allocate a texture of the needed size ourselves, delegate it to the renderer
+//! with a write lease, and attach it to the host. Allocation and grant are the
+//! shared rite of `veldsdk::surface` (the globe slot is handed out the same way);
+//! the attachment is ours to do — the window is ours.
 //!
-//! Топик адресован (target = имя владельца окна): диспетчер хоста доставляет
-//! это событие только нам, фильтровать по plugin_id самим не нужно.
+//! The topic is addressed (target = the window owner's name): the host dispatcher
+//! delivers this event only to us, so there is no need to filter by plugin_id.
 
 use crate::module::state::State;
 use veldsdk::proto::app::{SetSurface, WindowResized};
 
 pub fn on_window_resized(state: &mut State, ev: WindowResized) {
-    // Первое объявление окна — самый ранний момент, когда спрашивать других
-    // уже можно: к нему все плагины загружены и подписаны (см. runners/desktop,
-    // `announce`). До него запросы стартовой вкладки некому доставить.
+    // The first window announcement is the earliest point at which others can
+    // already be asked: by then all plugins are loaded and subscribed (see
+    // runners/desktop, `announce`). Before it there is nobody to deliver the
+    // starting tab's requests to.
     if state.window == (0, 0) {
         super::nav::bootstrap(state);
     }
@@ -28,14 +30,15 @@ pub fn on_window_resized(state: &mut State, ev: WindowResized) {
         ev.scale_factor,
         ev.format,
         "ui-service",
-        // Читателей нет: поверхность окна забирает композитор хоста, а он не
-        // модуль и в правах реестра не значится.
+        // There are no readers: the host compositor takes the window surface, and
+        // it is not a module and is not listed in the registry rights.
         &[],
         crate::calls::ui_service::on_set_surface,
     );
 
-    // Аттачится то, что лежит в состоянии, а не то, что вернул вызов: при
-    // отказе там осталась прежняя текстура, и композить надо именно её.
+    // What gets attached is what lies in the state, not what the call returned:
+    // on refusal the old texture stays there, and that is exactly what must be
+    // composited.
     if let Some(surface) = &state.window_surface {
         crate::calls::app::on_set_surface(&SetSurface {
             plugin_id: ev.plugin_id.clone(),

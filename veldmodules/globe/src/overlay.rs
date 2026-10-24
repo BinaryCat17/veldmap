@@ -1,24 +1,26 @@
-//! Наложения: снимки, натянутые на поверхность тайлами пирамиды.
+//! Overlays: imagery draped over the surface as pyramid tiles.
 //!
-//! Наложение — это привязка и до двух растров по ролям: превью даёт картинку
-//! сразу одним мелким файлом, к подробному конвейер идёт на приближении. Тайлы
-//! добываются тем же танцем, что у канвы превью: describe → query кэшу →
-//! produce промахов, — а рисуются патчами варп-сетки: узлы каждой ячейки
-//! переводятся привязкой в градусы и дальше геодезией в мир, GPU интерполирует
-//! между ними. Растр при этом не ресемплится вовсе — искажение проекции берёт
-//! на себя сетка.
+//! An overlay is a binding plus up to two rasters by role: the preview gives a
+//! picture at once from one small file, while the detailed one goes through the
+//! pipeline on zoom-in. Tiles are fetched with the same dance as the preview
+//! canvas: describe -> cache query -> produce misses, and drawn as warp-mesh
+//! patches: the nodes of each cell are mapped by the binding to degrees and
+//! further by geodesy to the world, and the GPU interpolates between them. The
+//! raster itself is never resampled -- the mesh takes over the projection
+//! distortion.
 //!
-//! Привязки — варианты [`Binding`], и старшинство у них — порядок объявления,
-//! от младшей к старшей: четырёхугольник футпринта из каталога, рамка зоны от
-//! того, кто знает раскладку продукта, проекция, записанная в самом растре, и
-//! решётка его опорных точек. Младшая отвечает на другой вопрос (какой кусок
-//! Земли снят, а не каким пикселем куда) и потому остаётся догадкой: пока
-//! описания растров не кончились, наложение на ней не рисуется и тайлов не
-//! просит (см. [`Overlay::binding_pending`]).
+//! Bindings are the variants of [`Binding`], and their precedence is the order
+//! of declaration, from weakest to strongest: the footprint quad from the
+//! catalogue, the zone frame from whoever knows the product layout, the
+//! projection recorded in the raster itself, and the grid of its tie points.
+//! The weakest answers a different question (which piece of Earth was shot,
+//! not which pixel goes where) and therefore stays a guess: until the raster
+//! descriptions finish, the overlay neither draws on it nor requests tiles
+//! (see [`Overlay::binding_pending`]).
 //!
-//! Ячейка рисуется ровно одним носителем — точным тайлом или куском ближайшего
-//! предка (parent-fallback, та же арифметика pyramid.rs, что у канвы), поэтому
-//! перекрытий внутри наложения нет.
+//! A cell is drawn by exactly one carrier -- the exact tile or a piece of the
+//! nearest ancestor (parent-fallback, the same pyramid.rs arithmetic as on the
+//! canvas) -- so there are no overlaps inside an overlay.
 
 use veldmap_image_tiler_wrap::pyramid;
 use veldmap_image_tiler_wrap::tiles::{self, Addr, Fetch, Meta, Passes, Store};
@@ -33,32 +35,32 @@ use super::mesh;
 use super::perf::Toll;
 use super::projection;
 
-/// На сколько сегментов бьётся сторона ячейки варп-сетки — меньше этого не
-/// бывает. Восьми хватает ячейке во всю гранулу (110 км): звено выходит в 14 км,
-/// то есть втрое короче предельного.
+/// How many segments a warp-mesh cell side is split into -- never fewer.
+/// Eight suffice for a whole granule-sized cell (110 km): a link comes out at
+/// 14 km, that is three times shorter than the limit.
 const PATCH_SEGMENTS: u32 = 8;
 
-/// Потолок густоты. Ячейка верхней ступени глобального растра занимает все
-/// 360°, и честное деление до `mesh::max_quad_side_deg()` стоило бы девятисот
-/// звеньев на сторону, то есть под миллион квадов на неё одну. Дешевле добрать
-/// оставшееся высотой — см. [`nodes_of`].
+/// Density ceiling. A cell of the top level of a global raster spans all 360°,
+/// and honest division down to `mesh::max_quad_side_deg()` would cost nine
+/// hundred links per side, close to a million quads for that one cell. It is
+/// cheaper to make up the rest with height -- see [`nodes_of`].
 ///
-/// Упирается в потолок не только она: шестьдесят четыре звена покрывают размах
-/// до двадцати четырёх градусов, а всё, что шире, поднимается над общим
-/// выносом. Видно это только с той дистанции, с которой такая ячейка целиком
-/// помещается в кадр, — а там подъём уходит под пиксель.
+/// Not only it hits the ceiling: sixty-four links cover a span up to
+/// twenty-four degrees, and anything wider rises above the common lift. This
+/// is visible only from a distance at which such a cell fits entirely in the
+/// frame -- and there the rise hides under a pixel.
 const MAX_PATCH_SEGMENTS: u32 = 64;
 
-/// Роль растра — те же две, что в types.proto.
+/// Raster role -- the same two as in types.proto.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
     Preview,
     Detailed,
 }
 
-/// Узел сетки привязки: доля растра (0..1) и место на Земле. Пиксели в доли
-/// переводятся при сборке сетки — растров у наложения два, разного размера, а
-/// лежат они одинаково.
+/// A node of the binding grid: a raster fraction (0..1) and a place on Earth.
+/// Pixels are converted to fractions when the grid is assembled -- the overlay
+/// has two rasters of different sizes, and they lie the same way.
 #[derive(Clone, Copy)]
 pub struct Tie {
     pub fx: f64,
@@ -67,82 +69,89 @@ pub struct Tie {
     pub lon: f64,
 }
 
-/// Привязка растра к Земле.
+/// Binding of a raster to the Earth.
 pub enum Frame {
-    /// Точная привязка проекцией: доля растра → метры зоны → градусы, и перевод
-    /// считается на каждом узле варп-сетки, а не между углами. Оттого ошибки
-    /// интерполяции у неё нет вовсе: линия постоянного северного отступа не есть
-    /// линия постоянной широты, и всякий, кто идёт между углами, этот выгиб
-    /// срезает. У квада, чьи рёбра ведутся дугой — то есть у всякой косой
-    /// съёмки, — срез невелик: два десятка метров на сцене Landsat в 239 км.
-    /// Прямой в градусах он был бы километром на средних широтах, но так здесь
-    /// не ходит никто (см. [`Frame::geodetic`]).
+    /// Exact projection binding: raster fraction -> zone metres -> degrees, and
+    /// the conversion is computed at every warp-mesh node, not between corners.
+    /// Hence it has no interpolation error at all: a line of constant northern
+    /// offset is not a line of constant latitude, and anyone walking between
+    /// corners cuts that curve off. For a quad whose edges are led by an arc --
+    /// that is, for any slanted acquisition -- the cut is small: two dozen
+    /// metres on a 239 km Landsat scene. Straight in degrees it would be a
+    /// kilometre at mid-latitudes, but nobody walks that way here (see
+    /// [`Frame::geodetic`]).
     ///
-    /// Аффинным, а не краями: тем же полем ложится и повёрнутый растр
-    /// (ModelTransformation), а прямоугольник по осям — его частный случай с
-    /// нулями вне диагонали (см. [`Frame::utm`]). Отдельный вариант для него
-    /// был бы вторым именем одного и того же.
+    /// Affine, not by edges: the same field also lays a rotated raster
+    /// (ModelTransformation), and the axis-aligned rectangle is its special
+    /// case with zeros off the diagonal (see [`Frame::utm`]). A separate variant
+    /// for it would be a second name for the same thing.
     ///
-    /// `x = a[0]·fx + a[1]·fy + a[2]`, `y = a[3]·fx + a[4]·fy + a[5]`, где
-    /// `fx`, `fy` — доли растра.
+    /// `x = a[0]·fx + a[1]·fy + a[2]`, `y = a[3]·fx + a[4]·fy + a[5]`, where
+    /// `fx`, `fy` are raster fractions.
     Projected { system: projection::Projection, affine: [f64; 6] },
-    /// Четырёхугольник футпринта по обходу растра: UL, UR, LR, LL. Долготы
-    /// развёрнуты в непрерывную ветвь заранее (см. [`Frame::quad`]).
+    /// The footprint quad in raster order: UL, UR, LR, LL. Longitudes are
+    /// unwound into a continuous branch in advance (see [`Frame::quad`]).
     ///
-    /// Догадка, а не привязка: каталог говорит, какой кусок Земли снят, но не
-    /// тем, каким пикселем куда, — порядок вершин у него свой. Годится, пока
-    /// от растра не приехала сетка (см. [`Frame::Grid`]).
+    /// A guess, not a binding: the catalogue says which piece of Earth was
+    /// shot, but not which pixel goes where -- its vertex order is its own. It
+    /// suffices until a grid arrives from the raster itself (see
+    /// [`Frame::Grid`]).
     Quad([(f64, f64); 4]),
-    /// Габарит сложного контура — место, а не привязка. Полоса съёмки очерчена
-    /// десятками вершин, и натянуть растр на её габарит значит показать не там
-    /// и не так. Поэтому по такой рамке не рисуется и не просится ничего
-    /// (см. [`Overlay::binding_pending`]): она держит место, пока привязку не
-    /// принесёт сам растр. Не принёс — накладывать нечего, и слой кончается
-    /// ошибкой.
+    /// Bounds of a complex outline -- a place, not a binding. An imaging strip
+    /// is traced by dozens of vertices, and stretching the raster onto its
+    /// bounds means showing it in the wrong place and the wrong way. So nothing
+    /// is drawn or requested by such a frame (see
+    /// [`Overlay::binding_pending`]): it holds the place until the raster itself
+    /// brings the binding. If it never does, there is nothing to overlay, and
+    /// the layer ends with an error.
     ///
-    /// Координаты в ней всё же настоящие: середина габарита — это середина
-    /// снятого куска Земли, и наводка на слой по ней работает.
+    /// The coordinates in it are still real: the middle of the bounds is the
+    /// middle of the shot piece of Earth, and aiming at the layer works through
+    /// it.
     Rough([(f64, f64); 4]),
-    /// Решётка опорных точек из самого растра — единственная привязка, которую
-    /// никто не выдумывал.
+    /// The grid of tie points from the raster itself -- the only binding nobody
+    /// invented.
     Grid(Grid),
 }
 
 impl Frame {
-    /// Рамка проекции по краям в метрах зоны; `y1` — северный край.
+    /// A projection frame by its edges in zone metres; `y1` is the northern
+    /// edge.
     ///
-    /// Так её называет раскладка MGRS — квадратом от угла стоклетки, — и так
-    /// же её удобно называть в проверках. Внутри она то же аффинное
-    /// преобразование, что у привязки из файла: одна дорога до градусов, а не
-    /// две похожие.
+    /// This is how the MGRS layout names it -- a 100 m grid square from its
+    /// corner -- and it is equally convenient to name it this way in checks.
+    /// Inside it is the same affine transform as a binding from the file: one
+    /// road to degrees, not two similar ones.
     pub fn utm(system: impl Into<projection::Projection>, x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
-        // Доля растра идёт вниз, а северная координата — вверх: отсюда минус.
+        // The raster fraction goes down while the northern coordinate goes up:
+        // hence the minus.
         Self::Projected { system: system.into(), affine: [x1 - x0, 0.0, x0, 0.0, -(y1 - y0), y1] }
     }
 
-    /// Рамка из привязки, прочитанной в самом растре: та названа в пикселях, а
-    /// рамка живёт в долях растра.
+    /// A frame from the binding read in the raster itself: that one is named in
+    /// pixels, while the frame lives in raster fractions.
     ///
-    /// Долями, потому что растров у наложения два и они разного размера —
-    /// превью и подробный, — а лежат оба одинаково: привязка у снимка одна, и
-    /// пересчитанная в доли она годится обоим.
-    /// Рамка из привязки, прочитанной в самом растре.
+    /// In fractions because the overlay has two rasters of different sizes --
+    /// preview and detailed -- and both lie the same way: the image has one
+    /// binding, and converted to fractions it serves both.
+    /// A frame from the binding read in the raster itself.
     ///
-    /// `Err` — систему нечем перевести либо у преобразования нет протяжённости.
-    /// Причина словами, потому что сказать её надо вслух: по «привязки нет»
-    /// неумение от молчания файла не отличить, и разбирать жалобу будет не по
-    /// чему.
+    /// `Err` -- the system cannot be converted or the transform has no extent.
+    /// The reason is in words because it must be spoken aloud: with "there is no
+    /// binding" one cannot tell inability from the file's silence, and there
+    /// would be nothing to examine.
     pub fn from_placement(said: &Placement) -> Result<Self, String> {
         let system = projection::Projection::from_epsg(said.epsg)
-            .ok_or_else(|| format!("EPSG:{}, а такой системы мы не знаем", said.epsg))?;
+            .ok_or_else(|| format!("EPSG:{}, and we know no such system", said.epsg))?;
         let affine =
             [said.x_per_i, said.x_per_j, said.x0, said.y_per_i, said.y_per_j, said.y0];
         let frame = Self::placed(system, affine, said.width, said.height);
-        // Рамка без протяжённости ломает выбор уровня насмерть (см.
-        // [`Frame::ground_m_per_px`]), а контур каталога от неё ещё цел.
-        // Сюда доезжает и то, чего тайлер не отдаёт: `NaN` в шестёрке.
+        // A frame without extent breaks level selection fatally (see
+        // [`Frame::ground_m_per_px`]), while the catalogue outline is still
+        // whole. This also catches what the tiler will not emit: `NaN` among
+        // the six.
         if !frame.measurable() {
-            return Err(format!("привязка EPSG:{} без протяжённости", said.epsg));
+            return Err(format!("EPSG:{} binding has no extent", said.epsg));
         }
         Ok(frame)
     }
@@ -153,8 +162,8 @@ impl Frame {
         width: u32,
         height: u32,
     ) -> Self {
-        // По ширине растра идёт `fx`, по высоте — `fy`; перепутанные, они
-        // положили бы неквадратный снимок с перекосом.
+        // `fx` goes along the raster width, `fy` along its height; swapped,
+        // they would lay a non-square image with a skew.
         let (across, down) = (f64::from(width), f64::from(height));
         Self::Projected {
             system,
@@ -169,108 +178,119 @@ impl Frame {
         }
     }
 
-    /// Квад из вершин по обходу растра. Долготы разворачиваются к первой
-    /// вершине: футпринт через антимеридиан иначе интерполировался бы через
-    /// всю Землю.
+    /// A quad from vertices in raster order. Longitudes are unwound toward the
+    /// first vertex: otherwise a footprint across the antimeridian would be
+    /// interpolated through the whole Earth.
     pub fn quad(points: [(f64, f64); 4]) -> Self {
         let base = points[0].1;
         Self::Quad(points.map(|(lat, lon)| (lat, geodesy::unwind(base, lon))))
     }
 
-    /// Габарит сложного контура — тем же разворотом долгот, по той же причине.
+    /// Bounds of a complex outline -- with the same longitude unwinding, for
+    /// the same reason.
     pub fn rough(points: [(f64, f64); 4]) -> Self {
         let base = points[0].1;
         Self::Rough(points.map(|(lat, lon)| (lat, geodesy::unwind(base, lon))))
     }
 
-    /// Доля растра (0..1 слева направо и сверху вниз) → широта и долгота.
+    /// Raster fraction (0..1 left to right and top to bottom) -> latitude and
+    /// longitude.
     pub fn geodetic(&self, fx: f64, fy: f64) -> (f64, f64) {
         match self {
             Self::Projected { system, affine } => {
                 let x = affine[0] * fx + affine[1] * fy + affine[2];
                 let y = affine[3] * fx + affine[4] * fy + affine[5];
-                // Разворачивать долготу здесь нечем и незачем: обратная
-                // проекция отдаёт её как «осевой меридиан плюс смещение», то
-                // есть уже непрерывной ветвью, и растр крайней зоны за стыком
-                // получает долготу больше 180° вместо скачка к −180°. Своего
-                // разворота узел и не смог бы сделать — он считается сам по
-                // себе и соседа не видит (ср. [`Grid::unwind`]).
+                // There is nothing to unwind the longitude with here, and no
+                // need: the inverse projection returns it as "central meridian
+                // plus offset", that is already on a continuous branch, and a
+                // raster of the edge zone past the seam gets a longitude above
+                // 180° instead of jumping to -180°. A node could not do its own
+                // unwinding anyway -- it is computed on its own and sees no
+                // neighbour (cf. [`Grid::unwind`]).
                 system.to_geodetic(x, y)
             }
-            // Между углами футпринта нет ничего, кроме поверхности, и ведут по
-            // ней ребро так, как его назвали (`geodesy::edge_point`): совпали
-            // широты — это параллель, совпали долготы — меридиан, прочее —
-            // кратчайшая дуга. Тем же правилом обводят этот же футпринт
-            // (`outlines::edge`) и ловят по нему щелчок (`footprint::traced`),
-            // и спрашивать его порознь нельзя: растр, лёгший дугой по ребру,
-            // которое обвели параллелью, промахивается мимо собственной
-            // обводки на сотню метров у клетки в градус.
+            // Between the footprint corners there is nothing but the surface,
+            // and the edge is led along it exactly as it was named
+            // (`geodesy::edge_point`): matching latitudes mean a parallel,
+            // matching longitudes a meridian, anything else the shortest arc.
+            // The same rule outlines this very footprint (`outlines::edge`) and
+            // catches the click (`footprint::traced`), and it cannot be asked
+            // about separately: a raster laid by an arc along an edge that was
+            // outlined as a parallel misses its own outline by a hundred metres
+            // at a one-degree cell.
             //
-            // Плата названа там же, где само правило: род ребра решается
-            // совпадением координат, а каталог отдаёт их округлёнными. Сойдись
-            // широты двух углов случайно — и полоса съёмки ляжет параллелью
-            // вместо дуги, то есть мимо на километры. Зато мимо одинаково:
-            // обводка со щелчком читали футпринт одним правилом и прежде, а
-            // растр — своим, и расходился с ними он один.
+            // The price is named where the rule is: the kind of edge is decided
+            // by coordinate coincidence, and the catalogue hands them out
+            // rounded. Should two corner latitudes coincide by chance, the
+            // imaging strip lies along a parallel instead of an arc -- that is,
+            // off by kilometres. But it is off the same way: the outline and
+            // the click read the footprint with one rule, the raster with its
+            // own, and only the raster diverged from them.
             Self::Quad([ul, ur, lr, ll]) | Self::Rough([ul, ur, lr, ll]) => {
                 let top = geodesy::edge_point(*ul, *ur, fx);
                 let bottom = geodesy::edge_point(*ll, *lr, fx);
-                // Род вертикального хода спрашивается у вычисленных концов, а
-                // не у боковых рёбер: ветка меридиана отдаёт долготу начала, и
-                // взятая у бокового ребра, она увела бы нижний край растра от
-                // его же угла — на десятки километров у косого квада.
+                // The kind of vertical run is asked of the computed ends, not
+                // the side edges: the meridian branch returns the longitude of
+                // the start, and taken from the side edge it would drag the
+                // bottom edge of the raster away from its own corner -- tens of
+                // kilometres on a slanted quad.
                 geodesy::edge_point(top, bottom, fy)
             }
             Self::Grid(grid) => grid.geodetic(fx, fy),
         }
     }
 
-    /// Метров земли на пиксель растра шириной `width`. У квада и сетки — по
-    /// самому широкому из трёх рядов и грубой метрике градусов: спрашивают это,
-    /// чтобы выбрать уровень пирамиды, а он меняется вдвое за раз.
+    /// Metres of ground per pixel of a raster `width` pixels wide. For a quad
+    /// and a grid -- across the widest of the three rows and by the coarse
+    /// degree metric: this is asked in order to pick the pyramid level, and
+    /// that changes twofold per step.
     ///
-    /// Три ряда, а не верхний: у полярного растра верхний вырождается в точку,
-    /// и мерка по нему занижается в косинус его широты — на восьмидесятой
-    /// параллели впятеро, а на самом полюсе в шестнадцать квадриллионов раз
-    /// (`cos(90°)` в `f64` — это 6·10⁻¹⁷, а не ноль, поэтому и отказа не
-    /// выходит). Занижённая, она уводит `sharpest` на столько ступеней, что тот
-    /// упирается в вершину пирамиды: снимок во всю Землю показывается размером
-    /// в один тайл и резче не становится никогда, без единого отказа.
+    /// Three rows, not the top one: on a polar raster the top row degenerates
+    /// into a point, and measuring by it understates by the cosine of its
+    /// latitude -- fivefold at the eightieth parallel, and sixteen quadrillion
+    /// times at the pole itself (`cos(90°)` in `f64` is 6·10⁻¹⁷ rather than
+    /// zero, so no error even comes out). Understated, it drives `sharpest`
+    /// down so many levels that it hits the top of the pyramid: an image of the
+    /// whole Earth is shown at one tile across and never gets sharper, without
+    /// a single failure.
     ///
-    /// Тем же вырождением бывают биты и оба края разом — у рамки от полюса до
-    /// полюса, — и спасает только середина. Рамку шириной в целый круг это не
-    /// спасает: `Frame::quad` разворачивает долготы к первой вершине без охраны
-    /// полного круга, и такая рамка складывается в меридиан ещё до всякой
-    /// мерки. Круговые контуры до неё, впрочем, и не доходят — шире 350°
-    /// заказчик уводит их в габарит.
+    /// The same degeneration can bite both edges at once -- on a frame from
+    /// pole to pole -- and only the middle saves it. It does not save a frame a
+    /// full turn wide: `Frame::quad` unwinds longitudes toward the first vertex
+    /// without guarding the full turn, and such a frame folds into a meridian
+    /// even before any measuring. Circular outlines never reach it, though --
+    /// wider than 350° the caller sends them to bounds.
     ///
-    /// Самый широкий, а не средний: занижённая мерка оставляет часть растра
-    /// мутной навсегда, а завышенную загрубляет потолок аппетита
-    /// (`tiles::want`). Ошибка в одну сторону исправима, в другую нет.
+    /// The widest, not the average: an understated measure leaves part of the
+    /// raster blurry forever, while an overstated one is coarsened by the
+    /// appetite ceiling (`tiles::want`). An error one way is fixable, the other
+    /// way it is not.
     ///
-    /// Спрашивается это у самой привязки, а не у узлов решётки: у глобального
-    /// градусного растра узлов всего четыре, и лежат они по углам, то есть на
-    /// полюсах — среди них середины нет вовсе.
+    /// This is asked of the binding itself, not of the grid nodes: a global
+    /// degree raster has only four nodes, sitting at the corners, that is at
+    /// the poles -- there is no middle among them at all.
     ///
-    /// `None` — рамку нечем измерить, и это не «очень мелко», а «нет ширины
-    /// вовсе»: так лежит квад с совпавшими вершинами. Отданный числом, ноль
-    /// делит выбор уровня на себя — `sharpest` уходит в `u32::MAX`, слой
-    /// навсегда остаётся вершиной пирамиды, а сравнение «превью хватает»
-    /// становится вечно истинным, и подробный растр не просится ни разу.
+    /// `None` -- the frame cannot be measured, and that is not "very fine" but
+    /// "no width at all": this is how a quad with coinciding vertices lies.
+    /// Returned as a number, zero divides level selection by itself --
+    /// `sharpest` goes to `u32::MAX`, the layer stays at the top of the pyramid
+    /// forever, and the "preview suffices" comparison becomes eternally true,
+    /// and the detailed raster is never requested.
     ///
-    /// У проекции — длина вектора, которым ширина растра ложится на зону, а не
-    /// один его член по восточной оси: повёрнутый растр отчитался бы тогда о
-    /// косинусной доле своей ширины и уехал бы на уровень мимо. Длина заодно
-    /// неотрицательна сама по себе, а какой край рамки левее, контракт не
-    /// оговаривает — отрицательная ширина дала бы `log2` от отрицательного, то
-    /// есть `NaN`, то есть нулевой уровень целиком.
+    /// For a projection -- the length of the vector by which the raster width
+    /// lies on the zone, not its eastern component alone: a rotated raster
+    /// would then report the cosine share of its width and land a level off.
+    /// The length is also non-negative by itself, and which frame edge is more
+    /// to the left the contract does not specify -- a negative width would give
+    /// `log2` of a negative, that is `NaN`, that is the zero level outright.
     pub fn ground_m_per_px(&self, width: u32) -> Option<f64> {
-        // Три ряда — доли 0, 0,5 и 1 по высоте. По звеньям, а не по хорде между
-        // концами: между пробами ряд бывает выпуклым, и хорда эту выпуклость
-        // теряет. У решётки к пробам добавляется её самый широкий ряд по узлам:
-        // без него принятая `Grid::new` решётка перестала бы быть гарантированно
-        // измеримой — ворота там считают по узлам, а проба берёт доли, и широкий
-        // ряд между долями они увидели бы по-разному.
+        // Three rows -- fractions 0, 0.5 and 1 down the height. By links, not by
+        // the chord between the ends: between probes a row can bulge, and the
+        // chord loses that bulge. For a grid its widest row by nodes is added to
+        // the probes: without it an accepted `Grid::new` grid would stop being
+        // guaranteed measurable -- the gates there count by nodes, while a probe
+        // takes fractions, and a wide row between fractions they would see
+        // differently.
         let probed = || {
             [0.0, 0.5, 1.0]
                 .iter()
@@ -288,28 +308,31 @@ impl Frame {
         (span.is_finite() && span > 0.0).then(|| span / f64::from(width.max(1)))
     }
 
-    /// Идут ли ряды рамки по параллелям, а столбцы по меридианам.
+    /// Do the frame rows run along parallels and the columns along meridians.
     ///
-    /// У такой рамки широта зависит только от доли по высоте, а долгота — только
-    /// от доли по ширине, и узлы варп-сетки считаются по ряду и по столбцу, а не
-    /// по каждому в отдельности (см. [`nodes_of`]). Так лежит всякий растр в
-    /// градусах; съёмка со своей гнутой решёткой и растр в проекции — нет.
+    /// For such a frame latitude depends only on the vertical fraction and
+    /// longitude only on the horizontal one, and the warp-mesh nodes are
+    /// computed by row and by column rather than each on its own (see
+    /// [`nodes_of`]). This is how every raster in degrees lies; an acquisition
+    /// with its own bent grid and a projected raster are not like that.
     pub fn axial(&self) -> bool {
         match self {
-            // Веб-Меркатор оси не мешает: долгота у него зависит только от
-            // восточной координаты, широта — только от северной. Осями рамка
-            // ложится тогда, когда так же не мешает их аффинное — то есть у
-            // растра по осям, без поворота и перекоса.
+            // Web Mercator does not disturb the axes: its longitude depends
+            // only on the eastern coordinate and latitude only on the northern
+            // one. The frame lies along the axes when its affine transform
+            // equally does not disturb them -- that is, for an axis-aligned
+            // raster, without rotation or skew.
             Self::Projected { system: projection::Projection::WebMercator, affine } => {
                 affine[1] == 0.0 && affine[3] == 0.0
             }
-            // Поперечная мешает: у метровой сетки UTM широта меняется вдоль
-            // строки, а долгота — вдоль столбца.
+            // The transverse one does: on the UTM metre grid latitude changes
+            // along a row, and longitude along a column.
             Self::Projected { .. } => false,
-            // У квада ход по ребру решает совпадение координат
-            // (`geodesy::edge_point`): сошлись широты — ребро ведётся
-            // параллелью, сошлись долготы — меридианом. Совпало и то и другое —
-            // ряды и столбцы квада и есть параллели с меридианами.
+            // For a quad the run along an edge is decided by coordinate
+            // coincidence (`geodesy::edge_point`): matched latitudes -- the
+            // edge is led by a parallel, matched longitudes -- by a meridian.
+            // When both match, the rows and columns of the quad are precisely
+            // parallels and meridians.
             Self::Quad([ul, ur, lr, ll]) | Self::Rough([ul, ur, lr, ll]) => {
                 ul.0 == ur.0 && ll.0 == lr.0 && ul.1 == ll.1 && ur.1 == lr.1
             }
@@ -317,75 +340,78 @@ impl Frame {
         }
     }
 
-    /// Есть ли у рамки протяжённость на Земле — то есть можно ли по ней вообще
-    /// выбрать уровень и нарисовать ячейку.
+    /// Whether the frame has any extent on Earth -- that is, whether one can
+    /// pick a level and draw a cell by it at all.
     pub fn measurable(&self) -> bool {
         self.ground_m_per_px(1).is_some()
     }
 }
 
-/// Решётка опорных точек: узлы стоят по сетке долей растра, между ними
-/// показ интерполирует.
+/// Tie point grid: nodes stand on a grid of raster fractions, and the display
+/// interpolates between them.
 ///
-/// Сеткой, а не четырьмя углами: снимок радара лежит в геометрии съёмки, и
-/// четырёхугольник её не описывает — кривизна набегает километрами. Файл несёт
-/// решётку (у гранулы Sentinel-1 — 21×21), и она же отвечает на вопрос, каким
-/// углом растр повёрнут: у квада футпринта порядок вершин свой, и совпадать с
-/// обходом растра он не обязан.
+/// A grid, not four corners: a radar image lies in the acquisition geometry,
+/// and a quad does not describe it -- curvature accumulates in kilometres. The
+/// file carries the grid (21x21 for a Sentinel-1 granule), and it also answers
+/// the question of the raster's rotation angle: the footprint quad has its own
+/// vertex order and is not obliged to match the raster order.
 pub struct Grid {
-    /// Доли растра, на которых стоят узлы, по осям — возрастающие.
+    /// Raster fractions at which the nodes stand, by axes -- increasing.
     xs: Vec<f64>,
     ys: Vec<f64>,
-    /// Узлы построчно (ys × xs): широта и долгота. Долготы развёрнуты в
-    /// непрерывный ход вдоль самой решётки — см. [`Grid::new`].
+    /// Nodes row by row (ys x xs): latitude and longitude. Longitudes are
+    /// unwound into a continuous run along the grid itself -- see
+    /// [`Grid::new`].
     nodes: Vec<(f64, f64)>,
-    /// Осевая ли решётка: у каждого её ряда общая широта, у каждого столбца —
-    /// общая долгота. Так лежит всякий растр в градусах — от гранулы до
-    /// глобального, — и не лежит ни съёмка (её решётка гнётся вдоль трека), ни
-    /// растр в проекции.
+    /// Whether the grid is axial: every row of it shares one latitude and
+    /// every column shares one longitude. This is how every raster in degrees
+    /// lies -- from granule to global -- and neither an acquisition (its grid
+    /// bends along the track) nor a projected raster lies this way.
     ///
-    /// Спрашивают это ради узлов варп-сетки: у осевой рамки широта не зависит
-    /// от долготы и наоборот, и тригонометрия считается по разу на ряд и на
-    /// столбец вместо разу на узел (см. [`nodes_of`]).
+    /// This is asked for the sake of the warp-mesh nodes: on an axial frame
+    /// latitude does not depend on longitude and vice versa, and the
+    /// trigonometry is computed once per row and once per column instead of
+    /// once per node (see [`nodes_of`]).
     ///
-    /// Считается при сборке: решётка после неё не меняется.
+    /// Computed at assembly: the grid does not change afterwards.
     axial: bool,
-    /// Самый длинный ряд решётки на Земле, метры (см. [`Grid::widest_row`]).
+    /// The longest row of the grid on Earth, metres (see [`Grid::widest_row`]).
     ///
-    /// Считается один раз, при сборке: решётка после неё не меняется — поля
-    /// закрыты, а единственный `&mut self` у неё это разворот, и зовётся он
-    /// оттуда же. Спрашивают эту величину на кадровом пути, через
-    /// [`Frame::ground_m_per_px`], по нескольку раз за кадр движения, а стои́т
-    /// она обхода всех звеньев решётки с корнем на каждое.
+    /// Computed once, at assembly: the grid does not change afterwards -- the
+    /// fields are closed and its only `&mut self` is the unwinding, and it is
+    /// called from there as well. This quantity is asked on the frame path,
+    /// through [`Frame::ground_m_per_px`], several times per moving frame,
+    /// while it costs a walk over all grid links with a square root on each.
     widest_row_m: f64,
 }
 
-/// Насколько узлы могут разойтись, оставаясь на одной линии решётки.
+/// How far nodes may diverge while staying on one grid line.
 ///
-/// Доли растра — числа порядка единицы, и приходят они делением пикселя на
-/// сторону, так что разойтись могут только в последних разрядах. Миллионная
-/// доля — это меньше пикселя у растра в сто тысяч точек и много меньше
-/// расстояния между линиями: узлы стоят не ближе отсчёта друг к другу, то есть
-/// не ближе доли пикселя, и слиплись бы только у растра шириной в миллион.
+/// Raster fractions are numbers of order one, and they come from dividing a
+/// pixel by the side, so they can diverge only in the last digits. A millionth
+/// is less than a pixel of a hundred-thousand-point raster and much less than
+/// the distance between lines: nodes stand no closer than one sample to each
+/// other, that is no closer than a pixel fraction, and would merge only on a
+/// raster a million wide.
 const SAME_LINE: f64 = 1e-6;
 
-/// Номер линии решётки, на которой стои́т эта доля.
+/// The grid line number this fraction stands on.
 fn line(axis: &[f64], at: f64) -> Option<usize> {
     let index = axis.partition_point(|line| *line < at - SAME_LINE);
     axis.get(index).filter(|line| (**line - at).abs() <= SAME_LINE).map(|_| index)
 }
 
 impl Grid {
-    /// Решётка из опорных точек. `None` — точки решётки не образуют: их меньше
-    /// четырёх, они не полны или стоят вразброс. Догадываться тут не о чем —
-    /// привязка остаётся прежней.
+    /// A grid from tie points. `None` -- the points do not form a grid: there
+    /// are fewer than four, they are incomplete or scattered. There is nothing
+    /// to guess here -- the binding stays as it was.
     ///
-    /// Линии решётки узнаются с допуском, а не точным равенством: доли растра
-    /// приходят делением пикселя на сторону, и у файла, где узел записан хоть
-    /// немного по-своему, точное сравнение развалило бы решётку на столько
-    /// линий, сколько в ней узлов. Терялась бы при этом вся привязка целиком —
-    /// снимок ложился бы по квадру каталога, то есть, скорее всего,
-    /// повёрнутым (см. [`SAME_LINE`]).
+    /// Grid lines are recognized with a tolerance, not by exact equality:
+    /// raster fractions come from dividing a pixel by the side, and on a file
+    /// where a node is recorded even slightly its own way, exact comparison
+    /// would shatter the grid into as many lines as it has nodes. The whole
+    /// binding would be lost with it -- the image would lie by the catalogue
+    /// quad, that is, most likely, rotated (see [`SAME_LINE`]).
     pub fn new(ties: &[Tie]) -> Option<Self> {
         let axis = |values: Vec<f64>| {
             let mut values = values;
@@ -408,46 +434,50 @@ impl Grid {
         let nodes: Option<Vec<(f64, f64)>> = nodes.into_iter().collect();
         let mut grid = Self { xs, ys, nodes: nodes?, axial: false, widest_row_m: 0.0 };
         grid.unwind();
-        // После разворота: он двигает долготы, и осевая решётка со швом внутри
-        // становится осевой только развёрнутой.
+        // After the unwinding: it moves longitudes, and an axial grid with a
+        // seam inside becomes axial only once unwound.
         grid.axial = grid.axial();
-        // После разворота, а не до: у ряда через шов сырые долготы прыгают на
-        // круг, и посчитанная по ним ширина завышена в разы — по решётке из
-        // теста `unwinding_does_not_care_where_the_zero_meridian_is` это
-        // сорок тысяч километров вместо восьмисот восьмидесяти.
+        // After the unwinding, not before: for a row across the seam the raw
+        // longitudes jump a full turn, and the width computed from them is
+        // overstated several times -- by the grid from the test
+        // `unwinding_does_not_care_where_the_zero_meridian_is` it is forty
+        // thousand kilometres instead of eight hundred eighty.
         grid.widest_row_m = grid.widest_row();
-        // Решётчатость долей растра — ещё не привязка: у надирного прибора
-        // поперёк трека протяжённости нет вовсе, и узлы, разложенные по долям
-        // в честную сетку, ложатся на Земле в одну линию. Квады такой решётки
-        // выходят нулевой площади — рисуется ничто, — а деление на её ширину
-        // прибивает слой к вершине пирамиды. Отказ здесь возвращает снимок на
-        // уже написанный путь «точек нет, ляжет по контуру каталога».
+        // A lattice of raster fractions is not yet a binding: a nadir
+        // instrument has no extent across the track at all, and nodes laid out
+        // by fractions into an honest grid fall on the ground in one line. The
+        // quads of such a grid come out zero-area -- nothing is drawn -- while
+        // dividing by its width pins the layer to the top of the pyramid. A
+        // refusal here returns the image to the already written path "there are
+        // no points, it lies by the catalogue outline".
         (grid.widest_row_m > 0.0 && grid.widest_column() > 0.0).then_some(grid)
     }
 
-    /// Долготы — в непрерывный ход вдоль решётки: каждый узел разворачивается
-    /// к соседу, а не к одной общей вершине.
+    /// Longitudes -- into a continuous run along the grid: each node is unwound
+    /// toward its neighbour, not toward one common vertex.
     ///
-    /// К общей вершине разворачивать нельзя: сетка глобального растра идёт на
-    /// все 360°, и такой разворот сложил бы её в меридиан — противоположный
-    /// край оказался бы в полуметре от первого. Соседние узлы решётки стоят в
-    /// десятках километров друг от друга, и разница между ними больше
-    /// полукруга не бывает — значит шов между ними виден однозначно.
+    /// Unwinding toward a common vertex is not allowed: the grid of a global
+    /// raster goes all 360°, and such unwinding would fold it into a meridian
+    /// -- the opposite edge would end up half a metre from the first.
+    /// Neighbouring grid nodes stand tens of kilometres apart, and the
+    /// difference between them is never more than a half-turn -- so the seam
+    /// between them is seen unambiguously.
     fn unwind(&mut self) {
         let across = self.xs.len();
-        // Полный круг остаётся кругом, и случай этот ровно один — строка в два
-        // узла. Так лежит глобальный растр, у которого край записан как
-        // −180 → 180: свёрнутый к ближней ветви, он даёт нулевую ширину, ту
-        // самую, на которую потом делят, выбирая ступень.
+        // A full turn stays a turn, and this case is exactly one -- a row of two
+        // nodes. This is how a global raster lies, whose edge is recorded as
+        // -180 -> 180: folded to the nearest branch it gives zero width -- the
+        // very width later divided by when picking a level.
         //
-        // Строке из трёх узлов и больше ворота не нужны и вредны. Не нужны —
-        // потому что глобальный ряд идёт по ней шагами в полкруга, и разворот
-        // берёт их сам. Вредны — потому что круг узнаётся с допуском
-        // ([`geodesy::FULL_CIRCLE_DEG`]), а `previous` к этому месту уже
-        // развёрнут: у полярной строки цепочка уползает за 180°, разность с
-        // сырым узлом сама подбирается к кругу, и узел падает обратно к сырому
-        // значению — в 359° от соседа. Ответ при этом зависел бы от того, где у
-        // файла ноль долготы, а он зависеть не должен.
+        // For a row of three nodes and more the gates are neither needed nor
+        // helpful. Not needed -- because a global row goes along it in half-turn
+        // steps and the unwinding takes them by itself. Harmful -- because the
+        // turn is recognized with a tolerance ([`geodesy::FULL_CIRCLE_DEG`])
+        // while `previous` is already unwound by this place: on a polar row the
+        // chain creeps past 180°, the difference from the raw node approaches a
+        // turn by itself, and the node falls back to the raw value -- 359° from
+        // its neighbour. The answer would then depend on where the file keeps
+        // its zero longitude, and it must not.
         let whole_circle = across == 2;
         for row in 0..self.ys.len() {
             for col in 1..across {
@@ -458,22 +488,22 @@ impl Grid {
                 }
                 node.1 = geodesy::unwind(previous, node.1);
             }
-            // Строка развёрнута сама в себе, а к предыдущей её надо ещё
-            // придвинуть — целиком, чтобы ход внутри неё не сломался.
+            // The row is unwound within itself, but toward the previous one it
+            // still has to be shifted -- as a whole, so the run inside it is
+            // not broken.
             //
-            // На сколько придвинуть, решают все столбцы, а не первый: у витка,
-            // проходящего рядом с полюсом, первый столбец и есть пóлюсный край,
-            // и его долгота перебирает круг за полсотни строк, тогда как
-            // дальний край стои́т почти на месте. Придвинутая по такому столбцу
-            // строка уезжает на круг целиком, и дальний её край оказывается в
-            // 359° от соседнего.
+            // How much to shift is decided by all the columns, not the first:
+            // on a pass running near the pole the first column is the polar
+            // edge, and its longitude sweeps a full turn over fifty rows while
+            // the far edge barely moves. A row shifted by such a column travels
+            // a whole turn, and its far edge ends up 359° from the neighbour.
             //
-            // Считается это оборотами, а не градусами: сдвиг обязан остаться
-            // кратным кругу, а среднее двух несогласных голосов дало бы
-            // полкруга. Голоса поровну — идёт наименьший по модулю: ноль значит
-            // «строки и так непрерывны». Модули поровну — идёт отрицательный;
-            // выбор здесь безразличен, важно лишь, что он один и тот же от
-            // запуска к запуску.
+            // Counted in turns, not degrees: the shift must stay a multiple of
+            // a full turn, while the average of two disagreeing votes would
+            // give a half-turn. Votes even -- the smallest in magnitude wins:
+            // zero means "the rows are continuous as they are". Magnitudes
+            // even -- the negative one wins; the choice is indifferent here,
+            // what matters is only that it is the same from run to run.
             if row > 0 {
                 let mut votes: Vec<i32> = (0..across)
                     .map(|col| {
@@ -499,13 +529,14 @@ impl Grid {
         }
     }
 
-    /// Общая ли широта у каждого ряда и общая ли долгота у каждого столбца.
+    /// Whether every row shares one latitude and every column shares one
+    /// longitude.
     ///
-    /// Сравнением до последнего разряда, а не с допуском: у растра в градусах
-    /// углы ряда выведены из одного и того же числа (`adapters::geo_ties`), и
-    /// сойтись обязаны точно. Допуск же признал бы осевой чуть скошенную
-    /// решётку — а по ней узлы легли бы мимо привязки, и увидеть это можно было
-    /// бы только глазом.
+    /// By comparison to the last digit, not with a tolerance: on a raster in
+    /// degrees the row corners are derived from one and the same number
+    /// (`adapters::geo_ties`) and must coincide exactly. A tolerance would
+    /// accept a slightly skewed grid as axial -- and nodes on it would land off
+    /// the binding, and that could be seen only by eye.
     fn axial(&self) -> bool {
         let across = self.xs.len();
         let rows = self.nodes.chunks_exact(across);
@@ -524,29 +555,29 @@ impl Grid {
         lerp(top, bottom, ty)
     }
 
-    /// Описывает ли решётка что-то, чего линейное преобразование не описывает.
+    /// Whether the grid describes something a linear transform cannot.
     ///
-    /// Четыре узла — это углы, и между ними интерполируется ровно линейное, то
-    /// есть то же самое, что задаёт привязка проекцией. Гуще четырёх — уже нет:
-    /// каждый лишний узел говорит, что раскладка от линейной отходит, и тем
-    /// решётка и ценна.
+    /// Four nodes are the corners, and between them exactly linear is
+    /// interpolated -- the same thing a projection binding provides. Denser
+    /// than four is already not: every extra node says the layout departs from
+    /// linear, and that is what makes the grid valuable.
     pub fn is_dense(&self) -> bool {
         self.xs.len() * self.ys.len() > 4
     }
 
-    /// Самый длинный ряд решётки на Земле, метры, растянутый с его доли ширины
-    /// на единицу.
+    /// The longest row of the grid on Earth, metres, stretched from its share
+    /// of the width to one.
     ///
-    /// Длина по звеньям, а не по хорде от первого узла к последнему: долготы у
-    /// решётки развёрнуты вдоль неё самой ([`Grid::unwind`]), так что ряд в
-    /// полный круг честно даёт свои 360°, а вот выпуклость ряда между узлами
-    /// хорда теряет.
+    /// Length by links, not by the chord from the first node to the last: the
+    /// grid's longitudes are unwound along the grid itself ([`Grid::unwind`]),
+    /// so a full-turn row honestly gives its 360°, while the row's bulge
+    /// between nodes the chord loses.
     ///
-    /// Самый длинный, а не верхний: у полярного растра верхний ряд вырождается
-    /// в точку, и по нему решётка выглядела бы линией. Спрашивают об этом двое
-    /// — [`Grid::new`], чтобы отличить решётку от линии (вопрос там ровно
-    /// такой: вырождено ли всё до единого, а не первое попавшееся), и
-    /// [`Frame::ground_m_per_px`], чтобы принятая решётка осталась измеримой.
+    /// The longest, not the top: on a polar raster the top row degenerates into
+    /// a point, and by it the grid would look like a line. Two ask about this --
+    /// [`Grid::new`], to tell a grid from a line (the question there is exactly
+    /// this: whether everything degenerated, not some first row), and
+    /// [`Frame::ground_m_per_px`], so that an accepted grid stays measurable.
     fn widest_row(&self) -> f64 {
         let across = self.xs.len();
         let width = (self.xs[across - 1] - self.xs[0]).max(f64::EPSILON);
@@ -558,7 +589,7 @@ impl Grid {
             .fold(0.0, f64::max)
     }
 
-    /// То же по столбцам: самый длинный столбец решётки на Земле.
+    /// The same by columns: the longest column of the grid on Earth.
     fn widest_column(&self) -> f64 {
         let across = self.xs.len();
         let height = (self.ys[self.ys.len() - 1] - self.ys[0]).max(f64::EPSILON);
@@ -575,114 +606,126 @@ impl Grid {
     }
 }
 
-/// Ячейка оси и доля внутри неё. За краем решётки доля выходит за [0, 1]:
-/// крайние узлы стоят в центрах крайних пикселей, а показывать надо и половину
-/// пикселя за ними — там сетка продолжается прямой.
+/// An axis cell and the fraction inside it. Beyond the grid edge the fraction
+/// goes outside [0, 1]: the outer nodes stand at the centers of the outer
+/// pixels, while half a pixel beyond them must be shown too -- there the grid
+/// continues with a straight line.
 fn cell(axis: &[f64], at: f64) -> (usize, f64) {
     let last = axis.len() - 2;
     let i = axis.partition_point(|edge| *edge <= at).saturating_sub(1).min(last);
     (i, (at - axis[i]) / (axis[i + 1] - axis[i]))
 }
 
-/// Линейно между узлами решётки — там, где идти по дуге незачем: узлы стоят в
-/// двух десятках километров друг от друга, и дуга с хордой расходятся на метры
-/// (у квада, где между углами четыре сотни километров, всё иначе).
+/// Linear between grid nodes -- where walking an arc is pointless: nodes stand
+/// twenty-odd kilometres apart, and the arc and the chord diverge by metres
+/// (on a quad, where four hundred kilometres lie between corners, everything
+/// is different).
 fn lerp(a: (f64, f64), b: (f64, f64), t: f64) -> (f64, f64) {
     (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
 }
 
-/// Расстояние между точками по поверхности, метры — по шару с большой
-/// полуосью: сжатие даёт треть процента, а спрашивают это ради выбора уровня
-/// пирамиды, который меняется вдвое за раз.
+/// Distance between points along the surface, metres -- on a sphere with the
+/// semi-major axis: flattening gives a third of a percent, and this is asked
+/// for picking the pyramid level, which changes twofold per step.
 fn ground_span(from: (f64, f64), to: (f64, f64)) -> f64 {
     arc_deg(from, to).to_radians() * geodesy::SEMI_MAJOR_M
 }
 
-/// Угловое расстояние между точками привязки, градусы.
+/// Angular distance between binding points, degrees.
 ///
-/// Меряется по самим координатам, а не хордой шара, и разница здесь не в
-/// точности. Долготы у привязки развёрнуты вдоль неё самой (см.
-/// [`Grid::unwind`] и [`Frame::quad`]), поэтому ребро в полный круг честно
-/// даёт 360°, — а хорда между его концами равна нулю: концы её одна и та же
-/// точка шара. Именно на этом нуле глобальный растр и терял всё сразу: ширину,
-/// по которой выбирают уровень, и густоту варп-сетки.
+/// Measured by the coordinates themselves, not by the chord of a sphere, and
+/// the difference here is not about precision. Longitudes of the binding are
+/// unwound along the binding itself (see [`Grid::unwind`] and [`Frame::quad`]),
+/// so an edge of a full turn honestly gives 360° -- while the chord between
+/// its ends is zero: its ends are one and the same point of the sphere. It was
+/// exactly on this zero that a global raster lost everything at once: the
+/// width by which the level is picked and the warp-mesh density.
 ///
-/// Грубости довольно: спрашивают об этом, чтобы выбрать ступень пирамиды и
-/// поделить ячейку, а обе меняются вдвое за раз.
+/// Coarseness is enough: this is asked to pick the pyramid level and split the
+/// cell, and both change twofold per step.
 fn arc_deg(from: (f64, f64), to: (f64, f64)) -> f64 {
     let along = (to.1 - from.1) * ((from.0 + to.0) * 0.5).to_radians().cos();
     (to.0 - from.0).hypot(along)
 }
 
-/// Величина на провод — как есть.
+/// A variable to the wire -- as is.
 fn wire_variable(variable: &tiles::Variable) -> crate::proto::globe::Variable {
     crate::proto::globe::Variable { path: variable.path.clone(), said: variable.said.clone(), units: variable.units.clone() }
 }
 
-/// Один растр наложения и все его ожидания.
+/// One overlay raster and all of its expectations.
 pub struct Raster {
     pub role: Role,
     pub resource: veldsdk::OwnedResource,
-    /// Файл с координатами пикселей растра, когда они лежат отдельно от него
-    /// (Sentinel-3). Держится ровно затем, чтобы освободиться вместе с
-    /// растром: спрашивают его один раз, при описании.
+    /// The file with the pixel coordinates of the raster, when they lie
+    /// separately from it (Sentinel-3). Held exactly so that it is released
+    /// together with the raster: it is asked for once, at description.
     pub geolocation: Option<veldsdk::OwnedResource>,
-    /// Номер растра у приславшего (`OverlayRaster.ordinal`): им приславший
-    /// узнаёт, какой файл лежит подробным, — имён здесь нет.
+    /// The raster number at the sender (`OverlayRaster.ordinal`): with it the
+    /// sender learns which file lies as the detailed one -- there are no names
+    /// here.
     pub ordinal: u32,
-    /// Названная приславшим величина этого файла (`OverlayRaster.variable`);
-    /// пусто — выбор тайлера. Едет в описание и в каждый проход. У запасного
-    /// — пусто: он другой файл, и названное про прежний к нему не относится.
+    /// The variable of this file named by the sender (`OverlayRaster.variable`);
+    /// empty -- the tiler chooses. It travels into the description and into
+    /// every pass. For a spare it is empty: that is another file, and what was
+    /// named about the previous one does not apply to it.
     pub variable: String,
-    /// Величины файла, из каких выбирают, — от последнего описания, которое
-    /// их назвало (`Meta.variables`). Переживают отказ описания: отказавшее
-    /// названной величине списка не несёт, а выбрать другую нужно как раз
-    /// тогда.
+    /// The file's variables to choose from -- from the last description that
+    /// named them (`Meta.variables`). They outlive a refused description: one
+    /// refused over a named variable carries no list, while picking another is
+    /// needed exactly then.
     pub variables: Vec<tiles::Variable>,
-    /// Запасные файлы той же роли — номер, ресурс и координаты, в порядке
-    /// предпочтения: провайдер называет их за выбранным, когда выбор по именам
-    /// может ошибиться (пустой ночью видимый канал SLSTR), и следующий встаёт
-    /// на место не описавшегося ([`Raster::next_spare`]). Отпускаются вместе с
-    /// растром.
+    /// Spare files of the same role -- number, resource and coordinates, in
+    /// order of preference: the provider names them after the chosen one when
+    /// the choice by names may err (the SLSTR visible channel empty at night),
+    /// and the next one takes the place of the one that failed to describe
+    /// ([`Raster::next_spare`]). Released together with the raster.
     pub spares: Vec<(u32, veldsdk::OwnedResource, Option<veldsdk::OwnedResource>)>,
-    /// Описание растра. Присваивается только через [`Raster::describe_as`]: с
-    /// размерами меняются и узлы варп-сеток, а кэш их об этом иначе не узнает.
+    /// Raster description. Assigned only through [`Raster::describe_as`]: with
+    /// the sizes the warp-mesh nodes change too, and their cache would not
+    /// learn about it otherwise.
     pub meta: Option<Meta>,
-    /// Чего у слоя не будет из-за этого растра, хотя сам слой лёг вторым.
-    /// Рядом с `Overlay::error`, но это другой ответ — «резче не станет» против
-    /// «смотреть не на что», и слой при нём остаётся на шаре.
+    /// What the layer will lack because of this raster, even though the layer
+    /// itself landed fine. Alongside `Overlay::error`, but a different answer --
+    /// "it will not get sharper" versus "there is nothing to look at" -- and
+    /// the layer stays on the globe with it.
     ///
-    /// У растра, а не у слоя: причин бывает две, по одной на растр, и вторая не
-    /// отменяет первую. Сложенные в одно поле, они отменяли бы друг друга по
-    /// порядку описания — описавшийся успешно стирал бы жалобу соседа.
+    /// On the raster, not on the layer: there can be two reasons, one per
+    /// raster, and the second does not cancel the first. Piled into one field
+    /// they would cancel each other in description order -- the one that
+    /// described successfully would erase its neighbour's complaint.
     pub trouble: Option<String>,
     pub describe: veldsdk::Latest,
-    /// Что уже спрошено, что производится и чего больше не просить — общий
-    /// учёт потребителя тайлов (см. `veldmap_image_tiler_wrap::tiles`).
+    /// What has already been requested, what is being produced and what must
+    /// not be requested again -- the shared tile consumer accounting (see
+    /// `veldmap_image_tiler_wrap::tiles`).
     pub fetch: Fetch,
-    /// Шары ячеек по уровням, от нулевого к вершине (см. [`Overlay::bounds`]).
+    /// Cell balls by levels, from the zeroth to the top (see
+    /// [`Overlay::bounds`]).
     ///
-    /// Строятся по привязке и размерам растра, а от взгляда не зависят вовсе,
-    /// поэтому считаются раз на описание, а не на кадр. Пусто — описания ещё не
-    /// было: тогда отсева нет и всякая ячейка идёт к точному тесту.
+    /// Built from the binding and the raster sizes and independent of the view
+    /// at all, so they are computed once per description, not per frame. Empty
+    /// -- no description yet: then there is no culling and every cell goes to
+    /// the exact test.
     pub bounds: Vec<Vec<cull::Ball>>,
-    /// Ход идущего прохода производителя: прочитано байт источника из скольки.
-    /// Нулевой знаменатель — прохода нет.
+    /// Progress of the running producer pass: source bytes read out of how
+    /// many. Zero denominator -- there is no pass.
     ///
-    /// Хранится, потому что ступень бывает в один тайл, а чтобы его отдать,
-    /// последовательный источник читается целиком: по ячейкам всё это время
-    /// сделано ровно ноль, и сказать о работе больше нечем.
+    /// Stored because a level can be a single tile, and to give it out, a
+    /// sequential source is read whole: by cells exactly zero is done all that
+    /// time, and there is nothing else to say about the work.
     pub pass: (u64, u64),
-    /// Узлы варп-сеток по ячейкам — то, что в патче стои́т дороже всего и
-    /// меняется реже всего (см. [`Nodes`]).
+    /// Warp-mesh nodes by cells -- the dearest thing in a patch and the one
+    /// that changes most rarely (see [`Nodes`]).
     ///
-    /// У растра, а не у слоя: место узла выводится из привязки слоя **и** из
-    /// размеров растра, а растров у слоя два и размеры у них разные. Держатся
-    /// здесь только ячейки последней пересборки — остальные выпадают сами
-    /// (см. [`patches`]).
+    /// On the raster, not on the layer: a node's place is derived from the
+    /// layer's binding **and** the raster's sizes, and the layer has two
+    /// rasters with different sizes. Only the cells of the last rebuild are
+    /// held here -- the rest fall out by themselves (see [`patches`]).
     mesh: std::collections::HashMap<tiles::Addr, Nodes>,
-    /// Перекладка слоя, при которой узлы посчитаны. Разошлась с `Overlay::relaid`
-    /// — сетка стои́т по прежней рамке, и считать её надо заново.
+    /// The layer relay at which the nodes were computed. If it diverges from
+    /// `Overlay::relaid` -- the mesh stands by the old frame, and it must be
+    /// recomputed.
     meshed: u64,
 }
 
@@ -707,10 +750,12 @@ impl Raster {
         }
     }
 
-    /// Следующий запасной файл — на место не описавшегося: растр остаётся тем
-    /// же (роль, место в наложении), а всё, что знал о прежнем файле, начинает
-    /// с чистого. Ответ — ресурсы нового файла для описания; `None` — запасных
-    /// не осталось. Прежний файл отпускается здесь же, вместе с координатами.
+    /// The next spare file -- into the place of the one that failed to
+    /// describe: the raster stays the same (role, place in the overlay), while
+    /// everything it knew about the old file starts from a clean slate. The
+    /// answer is the new file's resources for description; `None` -- no spares
+    /// left. The previous file is released right here, together with its
+    /// coordinates.
     pub fn next_spare(&mut self) -> Option<(veldsdk::ResourceHandle, Option<veldsdk::ResourceHandle>)> {
         if self.spares.is_empty() {
             return None;
@@ -725,11 +770,12 @@ impl Raster {
         Some((self.resource.as_ref().clone(), self.geolocation.as_ref().map(|owned| owned.as_ref().clone())))
     }
 
-    /// Отказ описания. Названной величине — жалоба словами тайлера, файл на
-    /// месте: отказали не файлу, а выбору, и приславший назовёт другую —
-    /// запасной на его место не встаёт. Без названной — следующий запасной
-    /// файл на место (ответ — его ресурсы для описания), а нет запасных —
-    /// жалоба о растре, названная ролью.
+    /// Refused description. With a named variable -- a complaint in the
+    /// tiler's words, the file stays: it was not the file that was refused but
+    /// the choice, and the sender will name another one -- a spare does not
+    /// take its place. Without a named one -- the next spare file takes the
+    /// place (the answer is its resources for description), and with no spares
+    /// left -- a complaint about the raster, named by role.
     pub fn refused(&mut self, error: String) -> Option<(veldsdk::ResourceHandle, Option<veldsdk::ResourceHandle>)> {
         if !self.variable.is_empty() {
             self.trouble = Some(error);
@@ -739,22 +785,24 @@ impl Raster {
             return Some(next);
         }
         self.trouble = Some(match self.role {
-            Role::Detailed => format!("подробный растр не открылся: {}", error),
-            Role::Preview => format!("превью не открылось: {}", error),
+            Role::Detailed => format!("detailed raster did not open: {}", error),
+            Role::Preview => format!("preview did not open: {}", error),
         });
         None
     }
 
-    /// Принять описание растра.
+    /// Accept the raster description.
     ///
-    /// Методом, а не присваиванием поля: из размеров растра считаются узлы
-    /// варп-сеток, и посчитанное по прежним не годится — а адреса ячеек у
-    /// нового описания те же самые, так что по ним расхождения не видно.
+    /// A method, not field assignment: the warp-mesh nodes are computed from
+    /// the raster sizes, and what was computed for the old ones does not serve
+    /// -- while the cell addresses of the new description are the same, so the
+    /// divergence is invisible by them.
     ///
-    /// Сегодня чистить нечего: описание растр получает один раз за свою жизнь
-    /// (`describe` заводится в `adopt_overlay`, а у запасного — в
-    /// `describe_settled`, на растре, начатом с чистого), а до него кэш пуст.
-    /// Правило стои́т здесь, чтобы второе описание не оказалось тихой поломкой.
+    /// Today there is nothing to clean: a raster receives a description once
+    /// in its life (`describe` is created in `adopt_overlay`, and for a spare
+    /// in `describe_settled`, on a raster started from a clean slate), and
+    /// before that the cache is empty. The rule stands here so that a second
+    /// description does not become a quiet breakage.
     pub fn describe_as(&mut self, meta: Meta) {
         if !meta.variables.is_empty() {
             self.variables = meta.variables.clone();
@@ -763,20 +811,21 @@ impl Raster {
         self.mesh.clear();
     }
 
-    /// Оставить в кэше узлов ровно эти ячейки — и только если считались они при
-    /// этой же перекладке слоя.
+    /// Keep exactly these cells in the node cache -- and only if they were
+    /// computed at this same layer relay.
     ///
-    /// Перекладка отменяет посчитанное целиком: узлы стоя́т по прежней рамке, а
-    /// адреса ячеек у новой те же самые — по ним расхождения не видно.
+    /// A relay cancels the computed ones entirely: the nodes stand by the old
+    /// frame, while the cell addresses of the new one are the same -- the
+    /// divergence is invisible by them.
     ///
-    /// Остальные выпадают затем, что кэш иначе рос бы на всё, что когда-либо
-    /// попадало в кадр: ячейка глобального растра — это узлы по густоте её
-    /// варп-сетки (`segments_for`), каждый размером с `OverlayVertex`, и так
-    /// на каждой ступени пирамиды.
-    /// `cells` — по возрастанию: ищется в них каждая ячейка кэша, и линейный
-    /// поиск дал бы квадрат по числу ячеек. При нынешнем потолке это тысячи
-    /// сравнений, а потолок задан бюджетом видеопамяти из конфига и растёт
-    /// вместе с ним.
+    /// The rest fall out because otherwise the cache would grow on everything
+    /// that ever entered the frame: a cell of a global raster is nodes by the
+    /// density of its warp mesh (`segments_for`), each the size of
+    /// `OverlayVertex`, and so on every pyramid level.
+    /// `cells` -- in ascending order: every cache cell is searched among them,
+    /// and a linear search would give a square in the cell count. At the
+    /// current ceiling that is thousands of comparisons, and the ceiling is
+    /// set by the video memory budget from the config and grows with it.
     fn keep_mesh(&mut self, relaid: u64, cells: &[tiles::Addr]) {
         if self.meshed != relaid {
             self.mesh.clear();
@@ -785,8 +834,8 @@ impl Raster {
         self.mesh.retain(|addr, _| cells.binary_search(addr).is_ok());
     }
 
-    /// Доля прочитанного идущим проходом, 0..1. Ноль — прохода нет либо он
-    /// только начался.
+    /// The fraction read by the running pass, 0..1. Zero -- there is no pass
+    /// or it has just started.
     pub fn read(&self) -> f64 {
         match self.pass {
             (_, 0) => 0.0,
@@ -799,68 +848,72 @@ pub struct Overlay {
     pub key: String,
     pub label: String,
     pub frame: Frame,
-    /// Сколько раз слой перекладывали на другую привязку.
+    /// How many times the layer was relayed to another binding.
     ///
-    /// Счётчиком, а не самой рамкой: в отпечаток нарисованного
-    /// ([`Overlay::built`]) она не входит — сравнивать решётку из четырёх
-    /// сотен узлов на каждом кадре дороже, чем собрать вершины заново, — а
-    /// заметить перекладку он обязан.
+    /// A counter, not the frame itself: it does not enter the fingerprint of
+    /// the drawn ([`Overlay::built`]) -- comparing a grid of four hundred nodes
+    /// every frame costs more than assembling the vertices anew -- while a
+    /// relay must be noticed.
     pub relaid: u64,
-    /// Чем рамка получена. Рядом с ней, а не выводится из её вида: рамкой
-    /// проекции приходит и раскладка MGRS из имени продукта, и привязка самого
-    /// файла, — по варианту `Frame` их не различить (см. [`Binding`]).
+    /// How the frame was obtained. Next to it, not derived from its kind: a
+    /// projection frame comes both from the MGRS layout in the product name and
+    /// from the file's own binding -- by the `Frame` variant they are
+    /// indistinguishable (see [`Binding`]).
     pub binding: Binding,
-    /// Почему привязка из растра не взята, хотя растр её нёс.
+    /// Why the binding from the raster was not taken although the raster
+    /// carried it.
     ///
-    /// У слоя, а не у растра: привязка у снимка одна, и неудача одного растра
-    /// отменяется удачей другого — а жалоба, приписанная растру, пережила бы
-    /// эту удачу и врала бы. Уезжает она вместе с причинами растров
-    /// ([`Overlay::trouble`]), потому что для смотрящего это один вопрос:
-    /// чего у слоя не будет.
+    /// On the layer, not on the raster: the image has one binding, and the
+    /// failure of one raster is cancelled by the success of another -- while a
+    /// complaint pinned to a raster would outlive that success and lie. It
+    /// leaves together with the raster reasons ([`Overlay::trouble`]), because
+    /// for the viewer this is one question: what the layer will lack.
     pub binding_trouble: Option<String>,
     pub rasters: Vec<Raster>,
-    /// Ресурсы, которыми наложение прислали, — в том виде, в каком они пришли.
-    /// По ним и решается «то же самое наложение или другое»: сравнивать с
-    /// принятыми нельзя, потому что принято бывает меньше присланного (растр,
-    /// которому отказали в гранте, пропускается), и тогда набор расходился бы
-    /// сам с собой навсегда — каждая пересылка выглядела бы новым наложением.
+    /// The resources the overlay was sent with -- exactly as they arrived. By
+    /// them it is decided "the same overlay or another": comparing against the
+    /// accepted ones is not possible, because fewer can be accepted than sent
+    /// (a raster refused a grant is skipped), and then the set would diverge
+    /// from itself forever -- every resend would look like a new overlay.
     pub sources: Vec<u64>,
-    /// Названные величины присланных растров, по одной на растр в порядке
-    /// присылки (`OverlayRaster.variable`). Вторая половина тождества набора:
-    /// те же ресурсы с другой величиной — то же наложение, но растр с ней
-    /// описывается заново ([`Overlay::revariabled`]).
+    /// Named variables of the sent rasters, one per raster in sending order
+    /// (`OverlayRaster.variable`). The second half of the set identity: the
+    /// same resources with another variable -- the same overlay, but the
+    /// raster with it is described anew ([`Overlay::revariabled`]).
     pub variables: Vec<String>,
-    /// Прозрачность слоя, 0..1. Доезжает до пикселя множителем к альфе
-    /// носителя, поэтому прозрачное поле квиклука так и остаётся прозрачным,
-    /// а не проступает вполсилы.
+    /// Layer opacity, 0..1. Reaches the pixel as a multiplier on the carrier's
+    /// alpha, so the transparent field of a quicklook stays transparent
+    /// instead of showing through at half strength.
     pub opacity: f32,
-    /// Слой скрыт: ни патчей, ни запросов тайлов. Уже добытые тайлы остаются в
-    /// хранилище на попечение вытеснения — показ обратно тогда мгновенный, а
-    /// платить за них памятью приходится только пока их не вытеснили.
+    /// The layer is hidden: no patches, no tile requests. Already fetched tiles
+    /// stay in the store at the mercy of eviction -- showing it back is then
+    /// instant, and paying memory for them only lasts until they are evicted.
     pub hidden: bool,
-    /// Почему слой не ляжет: ни один растр не описался. Пусто — всё в порядке.
-    /// Причина уезжает приславшему ходом добычи: убрать наложение — его дело,
-    /// набор принадлежит ему (см. `OverlayProgress.error`).
+    /// Why the layer will not lie: not a single raster described. Empty -- all
+    /// is well. The reason travels to the sender along the fetch progress:
+    /// removing the overlay is their business, the set belongs to them (see
+    /// `OverlayProgress.error`).
     pub error: String,
-    /// Ход добычи, каким его посчитал последний кадр (см. [`Progress`]).
+    /// Fetch progress as computed by the last frame (see [`Progress`]).
     ///
-    /// Хранится, а не выводится на месте: вывести его можно только при живом
-    /// взгляде — ступень считается матрицей кадра, — а рассказать о слое надо и
-    /// тогда, когда вкладку с шаром закрыли. Молча замерший счёт у получателя
-    /// выглядит зависшей загрузкой.
+    /// Stored rather than derived in place: it can only be derived with a live
+    /// view -- the step is computed by the frame matrix -- while the layer must
+    /// be told about even when the globe tab is closed. A silently frozen
+    /// counter at the receiver looks like a hung download.
     pub progress: Progress,
 }
 
-/// Привязка растра к проекции, как её прочитал тайлер, — с размерами того
-/// растра, у которого она взята.
+/// Raster-to-projection binding as read by the tiler -- with the sizes of the
+/// raster it was taken from.
 ///
-/// Полями, а не шестёркой чисел: числа приезжают из сообщения, где у них те же
-/// имена, и переписанные по именам они сходятся сами. Позиционный список сошёлся
-/// бы и с перепутанной парой — а перепутанная пара кладёт снимок перекошенным,
-/// и по виду рамки это не отличить от честного поворота.
+/// Fields, not a six of numbers: the numbers arrive from a message where they
+/// carry the same names, and rewritten by names they converge by themselves. A
+/// positional list would also converge with a swapped pair -- and a swapped
+/// pair lays the image skewed, and by the look of the frame that is
+/// indistinguishable from an honest rotation.
 pub struct Placement {
     pub epsg: u32,
-    /// Пиксель растра → метры системы:
+    /// Raster pixel -> system metres:
     /// `x = x_per_i·i + x_per_j·j + x0`, `y = y_per_i·i + y_per_j·j + y0`.
     pub x_per_i: f64,
     pub x_per_j: f64,
@@ -868,84 +921,88 @@ pub struct Placement {
     pub y_per_i: f64,
     pub y_per_j: f64,
     pub y0: f64,
-    /// Размеры того растра, в чьих пикселях названо преобразование: рамка живёт
-    /// в долях, а растров у наложения два и они разного размера.
+    /// The sizes of the raster whose pixels name the transform: the frame
+    /// lives in fractions, and the overlay has two rasters of different sizes.
     pub width: u32,
     pub height: u32,
 }
 
-/// Откуда взята привязка слоя — и тем самым насколько ей верить.
+/// Where the layer's binding came from -- and hence how much to trust it.
 ///
-/// Старшинство по роду, а не по приходу. У наложения два растра, превью и
-/// подробный, и описываются они независимо: какой опишется первым, решает время
-/// разбора двух файлов, то есть ничего осмысленного. Правило «приехавшая первой
-/// и остаётся» годится, пока обе привязки одного рода — тогда они об одном и том
-/// же снимке, — и врёт, как только рода разные.
+/// Precedence by kind, not by arrival. An overlay has two rasters, preview and
+/// detailed, and they are described independently: which one describes first
+/// is decided by the parse time of two files, that is by nothing meaningful.
+/// The rule "the one that arrived first stays" serves while both bindings are
+/// of one kind -- then they are about the same image -- and lies as soon as
+/// the kinds differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Binding {
-    /// Контур каталога: он говорит, какой кусок Земли снят, а не каким пикселем
-    /// куда, и порядок его вершин обходу растра не обязан совпадать.
+    /// Catalogue outline: it says which piece of Earth was shot, not which
+    /// pixel goes where, and its vertex order is not obliged to match the
+    /// raster order.
     Catalogue,
-    /// Рамка зоны, выведенная провайдером из имени продукта (MGRS). Точная, но
-    /// обещанная именем, а не сказанная файлом: раскладка продукта может
-    /// разойтись с тем, что в растре записано.
+    /// The zone frame derived by the provider from the product name (MGRS).
+    /// Exact, but promised by the name rather than stated by the file: the
+    /// product layout may diverge from what is recorded in the raster.
     Named,
-    /// Проекция, записанная в самом растре: линейная раскладка, и этим о ней
-    /// сказано всё.
+    /// The projection recorded in the raster itself: a linear layout, and that
+    /// is all there is to say about it.
     Projected,
-    /// Решётка опорных точек из растра, гуще четырёх узлов. Старше проекции, и
-    /// не по знатности источника: такая решётка описывает раскладку
-    /// **нелинейную** — снимок радара лежит в геометрии съёмки, — а шестёрка
-    /// чисел линейна по определению. Подменить её проекцией значит соврать
-    /// ровно тем, ради отказа от чего проекционная решётка отвергается в
-    /// тайлере.
+    /// The tie point grid from the raster, denser than four nodes. Stronger
+    /// than the projection, and not by the prestige of the source: such a grid
+    /// describes a **nonlinear** layout -- a radar image lies in the
+    /// acquisition geometry -- while a six of numbers is linear by definition.
+    /// Substituting it with the projection would be lying exactly about what
+    /// the projection is rejected for in the tiler.
     ///
-    /// Решётка ровно в четыре узла нелинейного не описывает — между ними
-    /// интерполируется то же линейное, — и старше проекции не становится (см.
-    /// [`Grid::is_dense`]).
+    /// A grid of exactly four nodes describes nothing nonlinear -- between
+    /// them the same linear is interpolated -- and does not become stronger
+    /// than the projection (see [`Grid::is_dense`]).
     Lattice,
 }
 
-/// Ход добычи одного слоя.
+/// Fetch progress of a single layer.
 ///
-/// `share` — доля пути слоя, и считается она ступенями пирамиды, а не ячейками
-/// кадра: ступеней столько, сколько их есть, и каждая закрывается один раз, а
-/// видимых ячеек столько, сколько сейчас попало в кадр. Полоса, выведенная из
-/// второго, ездит взад-вперёд на каждом движении камеры, ничего при этом не
-/// сообщая.
+/// `share` is the layer's fraction of the way, and it is counted by pyramid
+/// levels, not by frame cells: there are as many levels as there are and each
+/// closes once, while visible cells are as many as have just entered the
+/// frame. A bar derived from the latter would ride back and forth on every
+/// camera move, reporting nothing.
 #[derive(Clone, Copy, Default, PartialEq)]
 pub struct Progress {
-    /// Ячеек текущего заказа доведено и сколько их в нём. Заказ, а не кадр:
-    /// см. `tiles::Fetch::ordered`.
+    /// Cells of the current order done and how many are in it. The order, not
+    /// the frame: see `tiles::Fetch::ordered`.
     pub ready: u32,
     pub total: u32,
     pub share: f32,
-    /// Какая ступень лестницы набирается и сколько их всего — то, что доля и
-    /// отсчитывает. Едет наружу вместе с ней: доля без них — число без
-    /// единицы измерения.
+    /// Which rung of the ladder is being filled and how many there are in
+    /// total -- what the fraction counts. Travels out with it: the fraction
+    /// without them is a number without a unit.
     pub step: u32,
     pub steps: u32,
-    /// Доля внутри нынешней ступени, 0..1 — то же самое, чем считается `share`,
-    /// но без деления на лестницу.
+    /// The fraction within the current level, 0..1 -- the same thing `share` is
+    /// computed from, but without dividing by the ladder.
     ///
-    /// Держится отдельно, потому что спрашивают её не для полосы: ею меряется
-    /// сила ряби на грузящихся ячейках, и лестница там ни при чём — рябит
-    /// ступень, а не путь к цели.
+    /// Held separately because it is not asked for the bar: it measures the
+    /// ripple strength on the loading cells, and the ladder has nothing to do
+    /// with it -- the level ripples, not the way to the goal.
     pub within: f32,
-    /// Байты прохода, годные к показу (см. `tiles::Inside::read`).
+    /// Pass bytes fit for display (see `tiles::Inside::read`).
     pub pass: (u64, u64),
 }
 
-/// Ход добычи слоя по растру, который сейчас рисуют, и по ступени, к которой
-/// идут.
+/// Layer fetch progress by the raster currently drawn and the level being
+/// climbed to.
 ///
-/// Чистой функцией и здесь, а не в обработчике: считается она из двух чисел и
-/// одного правила, а проверить её иначе нечем — в `module.rs` тестов нет вовсе,
-/// и не может быть, пока всё в нём трогает состояние целиком.
+/// A pure function and here rather than in the handler: it is computed from
+/// two numbers and one rule, and there is nothing else to check it with --
+/// `module.rs` has no tests at all, and cannot have them while everything in
+/// it touches the whole state.
 pub fn progress_of(raster: &Raster, want: &tiles::Want) -> Progress {
     let (ready, total) = raster.fetch.ordered();
-    // Точечно ли читается ИМЕННО ЭТА ступень: у полосного источника подробная
-    // идёт окном, а грубая — проходом, и байты честны только у второй.
+    // Whether EXACTLY THIS level is read pointwise: for a strip source the
+    // detailed one goes by a window while the coarse one goes by a pass, and
+    // bytes are honest only for the latter.
     let pointwise =
         raster.meta.as_ref().is_some_and(|meta| meta.pointwise(want.level));
     let inside = tiles::inside((ready, total), raster.pass, pointwise);
@@ -961,7 +1018,7 @@ pub fn progress_of(raster: &Raster, want: &tiles::Want) -> Progress {
     }
 }
 
-/// Что рисовать у наложения прямо сейчас: какой растр и каким уровнем.
+/// What to draw on the overlay right now: which raster and at what level.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Choice {
     pub role: Role,
@@ -969,56 +1026,62 @@ pub struct Choice {
     pub level: u32,
 }
 
-/// То, из чего собраны вершины наложения. Совпало у всех — пересобирать нечего.
+/// What the overlay's vertices are assembled from. If it matches for all --
+/// there is nothing to reassemble.
 ///
-/// Именованными полями, а не кортежем: забытое поле здесь не ошибка
-/// компилятора, а снимок, оставшийся лежать по прежней привязке или в прежнем
-/// месте кадра, — и заметить это можно только глазом.
+/// With named fields, not a tuple: a forgotten field here is not a compiler
+/// error but an image left lying by the old binding or at the old place of the
+/// frame -- and that can be seen only by eye.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Built {
     key: String,
     opacity: f32,
     relaid: u64,
     choice: Choice,
-    /// Ячейки, у которых нашёлся носитель: сама ячейка, чем она накрыта и какой
-    /// bind group у той текстуры.
+    /// Cells for which a carrier was found: the cell itself, what covers it and
+    /// which bind group that texture has.
     ///
-    /// Носителями, а не одними ячейками: приехавший тайл меняет накрытие одной
-    /// ячейки, а поколение хранилища двигает всякий приезд и всякое вытеснение,
-    /// в том числе чужие. Меренный поколением, отпечаток звал бы пересобирать
-    /// всё на каждый тайл; меренный носителями — зовёт ровно тогда, когда
-    /// нарисованное и правда стало бы другим.
+    /// By carriers, not just cells: an arrived tile changes the cover of one
+    /// cell, while the store generation moves every arrival and every
+    /// eviction, including foreign ones. Measured by the generation, the
+    /// fingerprint would call for reassembling everything on every tile;
+    /// measured by the carriers, it calls exactly when the drawn would indeed
+    /// become different.
     ///
-    /// Bind group здесь потому, что тайл переезжает: приехав заново, он ложится
-    /// в новую текстуру, и `uv` с привязкой у него другие при том же адресе.
-    /// Держится это на том, что номера ресурсов хост не переиспользует
-    /// (`ResourceRegistry::register`): совпал номер — тот же самый носитель.
+    /// The bind group is here because the tile moves: having arrived anew, it
+    /// lands in a new texture, and its `uv` and binding differ while the
+    /// address is the same. This relies on the host not reusing resource ids
+    /// (`ResourceRegistry::register`): a matched number -- the same carrier.
     cells: Vec<Drawn>,
 }
 
-/// Он же вместе с тем, что из него видно: ячейки выбранного уровня, попавшие в
-/// кадр. Одним значением, потому что считаются они вместе и порознь не имеют
-/// смысла — уровень выбирается как раз по тому, сколько его ячеек видно.
+/// The same along with what can be seen from it: cells of the chosen level
+/// that entered the frame. As one value because they are computed together and
+/// separately make no sense -- the level is picked precisely by how many of
+/// its cells are visible.
 pub struct Wanted {
     pub choice: Choice,
-    /// Ступень к цели и её ячейки — ответ общей лестницы, целиком.
+    /// The rung toward the goal and its cells -- the answer of the shared
+    /// ladder, in full.
     ///
-    /// Целиком, а не полями по одному: ход добычи слоя меряется ступенями
-    /// (`climbed` из `steps`), и знаменатель у них не число уровней, а длина
-    /// лестницы — у источника, которому ступень стоит целого прохода, их две
-    /// на всю пирамиду. Разложив их здесь по своим полям, мы завели бы вторую
-    /// копию того же счёта, расходящуюся с той, по которой считается «работа
-    /// идёт» (`tiles::working`).
+    /// In full, not field by field: the layer's fetch progress is measured in
+    /// levels (`climbed` of `steps`), and their denominator is not the number
+    /// of levels but the length of the ladder -- for a source where a level
+    /// costs a whole pass there are two for the entire pyramid. Having split
+    /// them here into their own fields, we would create a second copy of the
+    /// same count, diverging from the one "work is going" is computed by
+    /// (`tiles::working`).
     pub want: tiles::Want,
 }
 
-/// Взгляд, которым меряется желаемое: чем проецировать, откуда смотрят и какой
-/// кусок земли приходится на пиксель кадра. Одной штукой — спрашивают их всегда
-/// вместе и всегда об одном кадре.
+/// The view by which the desired is measured: what to project with, where the
+/// eye is and how much ground falls per frame pixel. As one thing -- they are
+/// always asked together and always about one frame.
 ///
-/// Сравним затем, что им же и стерегут холостой пересчёт: ключ, собранный из
-/// доводов взгляда порознь, рано или поздно недосчитается одного из них, а
-/// сравнение самого взгляда недосчитаться не может.
+/// Compared as one because that is also what guards against needless
+/// recomputation: a key assembled from the view's arguments one by one will
+/// sooner or later miss one of them, while a comparison of the view itself
+/// cannot miss anything.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Look {
     pub view_proj: camera::Mat4,
@@ -1027,11 +1090,12 @@ pub struct Look {
 }
 
 impl Overlay {
-    /// Чего у слоя не будет, хотя сам он лёг, — обо всех растрах сразу.
+    /// What the layer will lack although it has landed -- about all rasters at
+    /// once.
     ///
-    /// Собирается при показе, а не хранится: причин бывает две, и сложенные в
-    /// одно поле они отменяли бы друг друга по порядку описания. Пусто — сказать
-    /// нечего.
+    /// Assembled at the time of display rather than stored: there can be two
+    /// causes, and stacked into one field they would cancel each other by the
+    /// order of description. Empty -- there is nothing to say.
     ///
     pub fn trouble(&self) -> String {
         let said: Vec<String> = self
@@ -1043,12 +1107,14 @@ impl Overlay {
         said.join("; ")
     }
 
-    /// Каким слой выглядит снаружи. Здесь, а не у рассылки, потому что
-    /// проверяемо только это: рассылка публикует, а публикация в нативной
-    /// сборке — заглушка (`veldsdk::abi`), и отправленное тесту не видно.
+    /// How the layer looks from the outside. Here rather than at the dispatch,
+    /// because only this is verifiable: the dispatch publishes, and publication
+    /// in the native build is a stub (`veldsdk::abi`), so what is sent is
+    /// invisible to the test.
     ///
-    /// `mine` — желаемое этого слоя в нынешнем кадре; `None` значит, что кадра
-    /// он не спрашивает вовсе (скрыт, места нет, пересчёт ещё не дошёл).
+    /// `mine` -- what this layer wants in the current frame; `None` means it
+    /// does not ask for a frame at all (hidden, no room, the recomputation has
+    /// not reached it yet).
     pub fn report<K: PartialEq>(
         &self,
         mine: Option<&Wanted>,
@@ -1056,17 +1122,19 @@ impl Overlay {
     ) -> crate::proto::globe::OverlayProgress {
         let live = mine.is_some();
         let working = self.working(passes, mine, live);
-        // Кадр рисует **тот самый** растр, чей потолок называем, и работы за
-        // ним нет — только тогда предел отвечает на заданный вопрос (см.
-        // [`Overlay::said`]). Роль в этой паре не придирка: у Sentinel-2 кадр
-        // добрал превью и рисует его, пока подробный только описался, — и
-        // «резче не будет» про подробный в этот миг сказано про то, чего на
-        // экране ещё нет вовсе.
+        // The frame draws **the very** raster whose cap we name, and there is
+        // no work behind it -- only then does the cap answer the question
+        // asked (see [`Overlay::said`]). The role in this pair is not a
+        // quibble: with Sentinel-2 the frame has reached the preview and draws
+        // it while the detailed raster has only just been described -- and
+        // "it will not get sharper" about the detailed raster at that instant
+        // speaks of what is not yet on the screen at all.
         //
-        // Отдельного «слой в кадре» рядом нет намеренно: у слоя, кадра не
-        // спрашивающего, роли нет, и совпасть ей не с чем — кроме случая, когда
-        // решающего растра нет тоже. А без него нет и предела, так что ответ
-        // `said` от этого не зависит вовсе.
+        // There is deliberately no separate "layer in frame" flag beside it: a
+        // layer that does not ask for a frame has no role, and it has nothing
+        // to match -- except the case where the deciding raster is missing
+        // too. And without it there is no cap, so the `said` answer does not
+        // depend on this at all.
         let drawn = mine.map(|wanted| wanted.choice.role);
         let settled = !working && drawn == self.decider().map(|it| it.role);
         let (detailed_trouble, trouble) = self.said_split(settled);
@@ -1097,18 +1165,21 @@ impl Overlay {
         }
     }
 
-    /// То же для провода — вместе с пределом детали (`Meta::capped`).
+    /// The same for the wire -- together with the detail cap
+    /// (`Meta::capped`).
     ///
-    /// Врозь с [`Overlay::trouble`] затем, что предел уместен не всегда:
-    /// жалоба — про случившееся и верна с той секунды, как случилась, а предел
-    /// отвечает на «резче уже не будет» и над недобранным слоем читается как
-    /// «добыча кончилась, вот её потолок».
+    /// Kept apart from [`Overlay::trouble`] because the cap is not always in
+    /// place: a complaint is about what has happened and is true from the
+    /// second it happened, while the cap answers "it will not get any sharper"
+    /// and over an unfinished layer reads as "the fetch is over, here is its
+    /// ceiling".
     ///
-    /// `settled` — слой в полёте и работы за ним нет. Обе половины нужны, и
-    /// вторая одна не годится: сразу после описания пересчёт желаемого ещё не
-    /// прошёл, слой в набор не попал, и [`Overlay::working`] честно отвечает
-    /// «нет» — при одном проценте прочитанного растра. Канва считает
-    /// `settled` тем же способом и по той же причине (`View::said`).
+    /// `settled` -- the layer is showing and there is no work behind it. Both
+    /// halves are needed, and the second alone is not enough: right after the
+    /// description the recomputation of the wanted has not run yet, the layer
+    /// has not made it into the set, and [`Overlay::working`] honestly answers
+    /// "no" -- with one percent of the raster read. The canvas computes
+    /// `settled` the same way and for the same reason (`View::said`).
     pub fn said(&self, settled: bool) -> String {
         let cap = settled.then(|| self.detail_cap()).flatten();
         let said: Vec<String> = self
@@ -1121,12 +1192,13 @@ impl Overlay {
         said.join("; ")
     }
 
-    /// То же, разложенное по тому, о ком сказано: (о подробном растре, обо
-    /// всём остальном). О подробном — его отказ и предел детали, когда деталь
-    /// решает он; остальное — отказ превью, предел превью, отказ привязки.
-    /// Приславшему нужна эта граница: имя файла он ставит перед словами о нём,
-    /// а предел превью или отказ привязки под именем подробного файла читались
-    /// бы как сказанное о нём.
+    /// The same, split by whom it is about: (about the detailed raster,
+    /// everything else). About the detailed -- its failure and the detail cap
+    /// when the detail is decided by it; the rest -- the preview failure, the
+    /// preview cap, the binding failure. The sender needs this boundary: it
+    /// puts the file name before the words about it, and a preview cap or a
+    /// binding failure under the detailed file's name would read as said about
+    /// it.
     pub fn said_split(&self, settled: bool) -> (String, String) {
         let cap = settled.then(|| self.detail_cap()).flatten();
         let cap_about_detailed = self.decider().is_some_and(|raster| raster.role == Role::Detailed);
@@ -1149,43 +1221,47 @@ impl Overlay {
         (about_detailed.join("; "), rest.join("; "))
     }
 
-    /// Растр, решающий деталь слоя: самый подробный из кладущихся.
+    /// The raster that decides the layer's detail: the most detailed of the
+    /// ones that get laid down.
     ///
-    /// Не всякий: превью грубее подробного всегда — иначе подробный отвергнут
-    /// ([`Overlay::detail_eclipsed`]), — и говорить о пределе превью значило бы
-    /// обещать мутность там, где приближение её снимет. У Sentinel-2 оба растра
-    /// JP2, и предел бывает у обоих, так что случай этот не выдуманный.
+    /// Not just any: the preview is always coarser than the detailed raster --
+    /// otherwise the detailed one is eclipsed ([`Overlay::detail_eclipsed`]) --
+    /// and speaking of the preview's cap would mean promising blur where
+    /// zooming removes it. With Sentinel-2 both rasters are JP2, and both can
+    /// have a cap, so this case is not made up.
     ///
-    /// Считается по [`Overlay::budgeted`], а не по всем растрам: отвергнутый
-    /// подробный не рисуется, и деталь решает не он. Тем же ходом ответ
-    /// оказывается верным и когда подробного нет вовсе, и когда он отвергнут, —
-    /// в обоих случаях деталь решает превью.
+    /// Counted over [`Overlay::budgeted`], not over all rasters: an eclipsed
+    /// detailed raster is not drawn, and the detail is not decided by it. By
+    /// the same token the answer is correct both when there is no detailed
+    /// raster at all and when it is eclipsed -- in both cases the preview
+    /// decides the detail.
     fn decider(&self) -> Option<&Raster> {
         self.budgeted()
             .filter(|raster| raster.meta.is_some())
-            .max_by_key(|raster| raster.meta.as_ref().expect("отобраны по наличию").reachable().0)
+            .max_by_key(|raster| raster.meta.as_ref().expect("selected by presence").reachable().0)
     }
 
-    /// Предел детали **слоя** — предел решающего растра, и `None`, если тот
-    /// отдаёт своё разрешение целиком.
+    /// The detail cap of the **layer** -- the cap of the deciding raster, and
+    /// `None` if it gives up its resolution entirely.
     fn detail_cap(&self) -> Option<String> {
         self.decider()?.meta.as_ref()?.capped()
     }
 
-    /// Слою нечем лечь и ждать нечего: ни один растр не описался, и ни у
-    /// одного нет названной величины. Отказ названной величине слоя не
-    /// хоронит: растр без описания, но при своём списке, и приславший назовёт
-    /// другую — снятый слой этого не даст.
+    /// The layer has nothing to lie on and nothing to wait for: no raster is
+    /// described, and none has a named variable. A failure of the named
+    /// variable does not bury the layer: a raster without a description but
+    /// with its own list still lets the sender name another one -- a removed
+    /// layer cannot offer that.
     pub fn doomed(&self) -> bool {
         !self.rasters.iter().any(|raster| raster.meta.is_some())
             && self.rasters.iter().all(|raster| raster.variable.is_empty())
     }
 
-    /// Лежащие растры, для которых приславший назвал другую величину, чем та,
-    /// с которой они описаны: `wanted` — величина по ресурсу, как в присланном
-    /// наборе. Запасные не считаются: названное относится к файлу, который
-    /// лежит, а не к тем, что за ним. Ответ — роли, чьи растры описывать
-    /// заново.
+    /// The laid rasters for which the sender named a different variable than
+    /// the one they are described with: `wanted` -- the variable by resource,
+    /// as in the sent set. Spares do not count: the name refers to the file
+    /// that lies here, not to the ones behind it. The answer is the roles
+    /// whose rasters are to be described again.
     pub fn revariabled(&self, wanted: &[(u64, String)]) -> Vec<Role> {
         self.rasters
             .iter()
@@ -1209,19 +1285,20 @@ impl Overlay {
         self.rasters.iter().find(|raster| raster.role == role)
     }
 
-    /// Наложению ещё есть чего ждать. Описание в пути — своё; всё остальное
-    /// считает общее правило (`tiles::working`) — то же, по которому отвечает
-    /// на этот вопрос канва.
+    /// The overlay still has something to wait for. The description in flight
+    /// is its own; everything else is counted by the shared rule
+    /// (`tiles::working`) -- the same one the canvas answers this question by.
     ///
-    /// `wanted` — то, что слою нужно прямо сейчас, по растру; `live` — дают ли
-    /// слою считать вообще (не скрыт, есть место под кадр). Добыча без этого
-    /// не идёт, и говорить о ней «идёт» было бы неправдой.
+    /// `wanted` -- what the layer needs right now, per raster; `live` -- whether
+    /// the layer is allowed to count at all (not hidden, there is room for a
+    /// frame). Fetching does not run without this, and saying it "is running"
+    /// would be a lie.
     ///
-    /// Описание живёт по другому правилу и спрашивается раньше обоих: оно уже
-    /// в полёте, кадра не спрашивает и кончится само. У растра, лежащего по
-    /// сети, оно и есть самая долгая часть пути — десятки секунд, — и
-    /// объявленная стоящей, она оставляет нажавшего значок без единого
-    /// признака работы.
+    /// The description lives by another rule and is asked before both: it is
+    /// already in flight, does not ask for a frame and finishes on its own. For
+    /// a raster that lies over the network it is the longest part of the path
+    /// -- tens of seconds -- and, were it declared idle, it would leave the
+    /// person who clicked the icon without a single sign of work.
     pub fn working<K: PartialEq>(
         &self,
         passes: &Passes<K>,
@@ -1243,35 +1320,39 @@ impl Overlay {
         })
     }
 
-    /// Нарисовать по слою пока нечего.
+    /// There is nothing to draw from the layer yet.
     ///
-    /// Два повода, и оба про одно: ни один растр не описан — значит нет ни
-    /// ячеек, ни размера, — либо привязка ещё может смениться, и тогда слой
-    /// не рисуют нарочно (см. [`Self::binding_pending`]). Второй повод не
-    /// лишний: у слоя из двух растров превью описывается первым, а рисовать по
-    /// нему всё равно нельзя, пока подробный может принести решётку.
+    /// Two causes, and both about one thing: no raster is described -- meaning
+    /// there are neither cells nor size -- or the binding can still change, and
+    /// then the layer is deliberately left undrawn (see
+    /// [`Self::binding_pending`]). The second cause is not superfluous: with two
+    /// rasters the preview is described first, but drawing from it is still
+    /// impossible while the detailed one may bring the grid.
     ///
-    /// Спрашивает это приславший — по нему он рисует и полосу без доли, и
-    /// место снимка на шаре (см. `OverlayProgress.blank`): за эти секунды
-    /// сказать о снимке больше нечего, а длятся они у растра по сети десятками
-    /// секунд.
+    /// The sender asks this -- by it it draws both the bar without a share and
+    /// the place of the image on the globe (see `OverlayProgress.blank`): for
+    /// these seconds there is nothing more to say about the image, and for a
+    /// raster over the network they last tens of seconds.
     pub fn blank(&self) -> bool {
         self.binding_pending() || !self.rasters.iter().any(|raster| raster.meta.is_some())
     }
 
-    /// Привязка ещё может смениться, и потому наложение пока ни рисуют, ни
-    /// просят под него тайлов.
+    /// The binding can still change, and so the overlay is neither drawn nor
+    /// asked for tiles under it.
     ///
-    /// Квад футпринта — догадка о том, каким углом растр лёг на снятый кусок
-    /// Земли, а описание растра может принести сетку из самого файла. Нарисовать
-    /// по догадке значит показать снимок повёрнутым и через секунду повернуть
-    /// его на глазах; спросить по ней тайлы — спросить не те ячейки: видимость
-    /// считается той же привязкой. Рамка UTM — не догадка, и ждать ей нечего.
+    /// The footprint quad is a guess at the angle the raster landed at on the
+    /// captured piece of Earth, while the raster's description can bring a grid
+    /// from the file itself. Drawing by the guess means showing the image
+    /// rotated and turning it before the eyes a second later; asking for tiles
+    /// by it means asking for the wrong cells: visibility is counted by the
+    /// same binding. The UTM frame is not a guess, and it has nothing to wait
+    /// for.
     ///
-    /// Габарит сложного контура ([`Frame::Rough`]) ждёт всегда: догадкой он не
-    /// является даже приблизительно — растянуть по нему полосу съёмки значит
-    /// показать её вдвое шире снятого и не под тем углом. Не дождался — слой
-    /// кончается ошибкой (см. `module::on_described`), а не кривой картинкой.
+    /// The bounds of a complex contour ([`Frame::Rough`]) always wait: it is
+    /// not a guess even approximately -- stretching the acquisition strip along
+    /// it means showing it twice as wide as captured and at the wrong angle. If
+    /// it does not wait, the layer ends in an error (see `module::on_described`)
+    /// rather than a crooked picture.
     fn binding_pending(&self) -> bool {
         match self.frame {
             Frame::Rough(_) => true,
@@ -1280,16 +1361,17 @@ impl Overlay {
         }
     }
 
-    /// Что рисовать и чего хотеть под текущий взгляд: превью-база и подробный
-    /// растр — когда экран мельче родного разрешения базы и когда подробный и
-    /// правда подробнее её (см. [`Overlay::detail_eclipsed`]). Порядок и есть
-    /// порядок отрисовки: база всегда внизу, цель поверх — так снимок виден
-    /// квиклуком сразу, а подробные тайлы накрывают его по мере прихода
-    /// (дешёвый старт из дизайна фазы).
+    /// What to draw and what to want for the current view: the preview base and
+    /// the detailed raster -- when the screen is smaller than the base's native
+    /// resolution and when the detailed raster really is more detailed than it
+    /// (see [`Overlay::detail_eclipsed`]). The order is the drawing order: the
+    /// base is always underneath, the target on top -- this way the image is
+    /// visible at first glance, and detailed tiles cover it as they arrive (a
+    /// cheap start from the phase design).
     ///
-    /// Ответ один на обоих спрашивающих — на запрос тайлов и на сборку
-    /// патчей: заказанный уровень обязан быть тем же, который рисуют, а
-    /// видимость ячейки — тем же, по чему её просили.
+    /// One answer for both askers -- the tile request and the patch assembly:
+    /// the ordered level must be the same one that is drawn, and a cell's
+    /// visibility by the same one it was asked by.
     pub fn wanted(&self, look: &Look, cap_tiles: u64, store: &Store, toll: &Toll) -> Vec<Wanted> {
         if self.binding_pending() {
             return Vec::new();
@@ -1300,10 +1382,11 @@ impl Overlay {
             Some((raster, raster.meta.as_ref()?))
         };
 
-        // Неизмеримую рамку не спрашивают ни о чём: выбирать по ней уровень —
-        // делить на ноль. Такой слой уже назван ошибочным при описании
-        // (см. `module::on_described`), но из набора не убран — снятие
-        // слоя дело приславшего, — и сюда доходит на каждом кадре.
+        // An immeasurable frame is asked about nothing: choosing a level by it
+        // is division by zero. Such a layer is already named erroneous at
+        // description time (see `module::on_described`), but is not removed from
+        // the set -- removing the layer is the sender's business -- and it
+        // reaches here every frame.
         if !self.frame.measurable() {
             return Vec::new();
         }
@@ -1311,7 +1394,8 @@ impl Overlay {
         if let Some((raster, meta)) = base {
             wanted.push(self.at_level(raster, meta, look, cap_tiles, store, toll));
             if self.frame.ground_m_per_px(meta.width).is_some_and(|mpp| look.mpp >= mpp) {
-                // Родного разрешения превью хватает — подробный не нужен.
+                // The preview's native resolution is enough -- the detailed
+                // raster is not needed.
                 return wanted;
             }
         }
@@ -1323,51 +1407,57 @@ impl Overlay {
         wanted
     }
 
-    /// Подробный растр не подробнее базы — класть его незачем и вредно.
+    /// The detailed raster is no more detailed than the base -- laying it down
+    /// is pointless and harmful.
     ///
-    /// Рисуется он поверх (порядок списка — порядок отрисовки), и приближение,
-    /// дойдя до него, накрыло бы крупную картинку мелкой. Роль назначает
-    /// провайдер по раскладке продукта, а раскладку, которой он не знает,
-    /// разбирает сравнением имён — и подробным оказывается что придётся.
+    /// It is drawn on top (the list order is the drawing order), and zooming,
+    /// on reaching it, would cover the big picture with a small one. The role is
+    /// assigned by the provider from the product layout, and a layout it does
+    /// not know it sorts out by comparing names -- and whatever happens to come
+    /// turns out detailed.
     ///
-    /// Спрашивают об этом трое: выбор растров, счёт пирамид в бюджете
-    /// видеопамяти и тот, кто говорит человеку, чего у слоя не будет.
-    /// Разойдись они — растр либо ел бы бюджет, не рисуясь, либо пропадал бы
-    /// молча.
+    /// Three ask about this: the raster choice, the pyramid count in the video
+    /// memory budget, and the one who tells the human what the layer will lack.
+    /// Were they to diverge -- the raster would either eat the budget without
+    /// drawing, or vanish silently.
     pub fn detail_eclipsed(&self) -> bool {
         let width = |role| {
             let meta = self.raster(role)?.meta.as_ref()?;
-            // Достижимое разрешение, а не записанная ширина: подробнее своего
-            // предела детали источник не отдаст, сколько бы пикселей в нём ни
-            // было (`Meta::finest`). Считает это `Meta::reachable` — тот
-            // же ответ, что уходит в лог и в подпись слоя.
+            // Reachable resolution rather than the recorded width: no matter
+            // how many pixels the source has, it will give no finer than its
+            // detail cap (`Meta::finest`). `Meta::reachable` counts it -- the
+            // same answer that goes to the log and to the layer's caption.
             Some(meta.reachable().0)
         };
         match (width(Role::Preview), width(Role::Detailed)) {
             (Some(base), Some(detail)) => detail <= base,
-            // Сравнивать не с чем — значит и отвергать нечего.
+            // Nothing to compare against -- so nothing to eclipse.
             _ => false,
         }
     }
 
-    /// Растры, делящие бюджет видеопамяти: все, кроме отвергнутого подробного.
+    /// The rasters sharing the video memory budget: all but the eclipsed
+    /// detailed one.
     ///
-    /// Отвергнутый не рисуется, и делить бюджет ему не за что: потолок ячеек
-    /// считается на пирамиду, и лишняя загрубляла бы цель оставшемуся — то
-    /// есть возвращала бы ту самую мутность, ради которой растр и отвергнут.
+    /// The eclipsed one is not drawn, and it has no business sharing the
+    /// budget: the cell ceiling is counted for the pyramid, and a spare one
+    /// would coarsen the target for the one that stays -- that is, it would
+    /// bring back the very blur the raster was eclipsed for.
     pub fn budgeted(&self) -> impl Iterator<Item = &Raster> {
         let eclipsed = self.detail_eclipsed();
         self.rasters.iter().filter(move |raster| !(eclipsed && raster.role == Role::Detailed))
     }
 
-    /// Отпечаток нарисованного: всё, из чего собраны вершины этого наложения.
+    /// The fingerprint of what is drawn: everything the vertices of this
+    /// overlay are assembled from.
     ///
-    /// По нему решают, пересобирать ли геометрию. Ячейки здесь не для полноты:
-    /// набор их меняет всякое движение камеры, а отпечаток растра с уровнем
-    /// при этом остаются прежними — и без них панорама по уже добытому
-    /// оставляла бы вершины от прежнего положения. Привязка входит счётчиком
-    /// перекладок (см. [`Overlay::relaid`]), прозрачность — сама: она запечена
-    /// в вершину, и ползунок иначе не перерисовал бы снимок.
+    /// It decides whether the geometry is reassembled. The cells are not here
+    /// for completeness: any camera movement changes their set, while the
+    /// raster's fingerprint with the level stays the same -- and without them a
+    /// pan over the already fetched would leave the vertices at the previous
+    /// position. The binding enters as the relaying counter (see
+    /// [`Overlay::relaid`]), the opacity by itself: it is baked into the
+    /// vertex, and otherwise the slider would not redraw the image.
     pub fn built(&self, wanted: &Wanted, drawn: &[Drawn]) -> Built {
         Built {
             key: self.key.clone(),
@@ -1378,36 +1468,41 @@ impl Overlay {
         }
     }
 
-    /// Переложить слой на другую привязку.
+    /// Relays the layer onto another binding.
     ///
-    /// Методом, а не присваиванием полей: рядом с рамкой обязан двинуться
-    /// счётчик перекладок, иначе пересборка геометрии её не заметит.
+    /// As a method rather than field assignment: the relaying counter must
+    /// move along with the frame, otherwise the geometry reassembly will not
+    /// notice it.
     pub fn relay(&mut self, frame: Frame, binding: Binding) {
         self.frame = frame;
         self.binding = binding;
         self.relaid += 1;
-        // Привязка взята — жаловаться не на что: жалоба здесь всегда об одном,
-        // о том, что взять её не удалось. Снимается она рядом с рамкой, а не у
-        // зовущего: ставят её три места, и одно снимающее, отданное им на
-        // память, разошлось бы с ними порядком описаний.
+        // The binding is taken -- there is nothing to complain about: the
+        // complaint here is always about one thing, that taking it failed. It
+        // is cleared next to the frame, not by the caller: three places set it,
+        // and a single clearing place left to their memory would diverge from
+        // them by the order of descriptions.
         self.binding_trouble = None;
     }
 
-    /// Почему привязку из растра взять не удалось — то, что увидит смотрящий.
+    /// Why the binding could not be taken from the raster -- what the viewer
+    /// will see.
     ///
-    /// Спрашивается при этом слой, а не растр: растров два, лежат они на одной
-    /// привязке, и неудача одного ничего не значит, когда второй уже лёг
-    /// прочитанным. Отсюда охрана рангом — пока прочитанного не принёс никто,
-    /// жалоба нужна; принёс, и она устарела.
+    /// The layer is asked, not the raster: there are two rasters, they lie on
+    /// one binding, and one's failure means nothing when the second has already
+    /// landed as read. Hence the rank guard -- while nobody has brought a read
+    /// one, the complaint is needed; one brings it, and the complaint is stale.
     ///
-    /// Порядок описаний произволен, и итог от него не зависит: пришедшая позже
-    /// удача жалобу снимает ([`Overlay::relay`]), пришедшая позже жалоба к
-    /// удаче не добавляется.
+    /// The order of descriptions is arbitrary, and the outcome does not depend
+    /// on it: a success arriving later clears the complaint
+    /// ([`Overlay::relay`]), a complaint arriving later is not added to the
+    /// success.
     ///
-    /// Причины складываются, а не вытесняют друг друга: у двух растров они
-    /// разные, и вторая первую не отменяет. Одинаковую при этом не повторяют —
-    /// у двух файлов одного продукта беда сплошь и рядом одна и та же, а
-    /// сказанная дважды она читается как две.
+    /// Causes accumulate rather than crowd each other out: with two rasters
+    /// they are different, and the second does not cancel the first. The same
+    /// one, however, is not repeated -- with two files of one product the
+    /// trouble is more often than not one and the same, and said twice it reads
+    /// as two.
     pub fn complain(&mut self, said: String) {
         if self.binding >= Binding::Projected {
             return;
@@ -1422,13 +1517,13 @@ impl Overlay {
         }
     }
 
-    /// Ступень добычи под взгляд и видимые ячейки этой ступени.
+    /// The rung of fetching under the view and the visible cells of that rung.
     ///
-    /// Считает это общее правило (`tiles::want`) — то же, по которому выбирает
-    /// уровень канва просмотра: и цель под экранный пиксель с потолком
-    /// аппетита, и ступень к ней. Наложение приносит туда одно своё —
-    /// `sharpest` (какой уровень отвечает пикселю кадра при этой привязке) и
-    /// ответ на «что из уровня видно».
+    /// The shared rule counts it (`tiles::want`) -- the same one by which the
+    /// viewing canvas picks the level: both the target per screen pixel with
+    /// the appetite ceiling, and the rung toward it. The overlay brings one
+    /// thing of its own there -- `sharpest` (which level answers a frame pixel
+    /// at this binding) and the answer to "what of the level is visible".
     fn at_level(
         &self,
         raster: &Raster,
@@ -1452,13 +1547,14 @@ impl Overlay {
         }
     }
 
-    /// Уровень, чей пиксель не крупнее экранного, — единственное, что о выборе
-    /// уровня знает наложение и не знает канва: у растра на шаре масштаб
-    /// задаётся привязкой, а не камерой над картинкой.
+    /// The level whose pixel is no larger than the screen's -- the one thing
+    /// about level choice the overlay knows and the canvas does not: for a
+    /// raster on the globe the scale is set by the binding, not by a camera
+    /// over the picture.
     fn sharpest(&self, meta: &Meta, look: &Look) -> u32 {
-        // Рамку без ширины сюда не пускает `wanted`; ноль здесь — самый
-        // подробный уровень, то есть самый дорогой ответ на вопрос, которого
-        // не задавали.
+        // `wanted` does not let a frame without width in here; zero here is
+        // the most detailed level, that is the most expensive answer to a
+        // question nobody asked.
         let Some(mpp_raster) = self.frame.ground_m_per_px(meta.width) else { return 0 };
         match look.mpp <= mpp_raster {
             true => 0,
@@ -1466,20 +1562,21 @@ impl Overlay {
         }
     }
 
-    /// Шары, накрывающие ячейки растра, — по одному набору на уровень, от
-    /// нулевого к вершине.
+    /// Balls covering the raster's cells -- one set per level, from zero to the
+    /// top.
     ///
-    /// Ими отсекают ячейку до точного теста: шар против кадра стоит трёх
-    /// десятков сложений, а девять проб — шестисот трансцендентных вызовов
-    /// (см. [`crate::cull`]).
+    /// They cut a cell off before the exact test: a ball against the frame
+    /// costs three dozen additions, while nine probes cost six hundred
+    /// transcendental calls (see [`crate::cull`]).
     ///
-    /// Каждый уровень пробуется своими девятью точками, а не выводится из
-    /// уровня ниже. Слиянием четвёрок вышло бы дешевле и точнее, но точнее
-    /// здесь и есть поломка: точный тест прощает ячейке отвёрнутость на радиус
-    /// покрытия ЕЁ сетки проб, а он у каждой ступени свой и вдвое длиннее, чем
-    /// у ступени ниже. Слитый шар нёс бы запас нулевого уровня и оказывался бы
-    /// строже судьи, которому обязан не перечить, — то есть отвергал бы
-    /// видимое, и молча.
+    /// Each level is probed with its own nine points rather than derived from
+    /// the level below. Merging fours would come out cheaper and more accurate,
+    /// but more accurate is exactly the breakage here: the exact test forgives
+    /// a cell its turned-away-ness by the coverage radius of ITS probe grid,
+    /// and that radius is its own at every rung and twice as long as at the
+    /// rung below. A merged ball would carry the zero level's margin and would
+    /// turn out stricter than the judge it must not contradict -- that is, it
+    /// would reject what is visible, silently.
     pub fn bounds(&self, meta: &Meta) -> Vec<Vec<cull::Ball>> {
         (0..meta.levels())
             .map(|level| {
@@ -1493,29 +1590,31 @@ impl Overlay {
             .collect()
     }
 
-    /// Шар одной ячейки: по тем же девяти пробам, что берёт
-    /// [`Self::on_screen`], с запасом на непроверенное между ними.
+    /// The ball of a single cell: by the same nine probes that
+    /// [`Self::on_screen`] takes, with a margin for the unchecked between them.
     ///
-    /// Запас берётся у [`covering_radius_deg`] — той же мерки, которой
-    /// [`faces_cap`] прощает ячейке отвёрнутость всех девяти проб. И это не
-    /// удобство, а необходимость: шар обязан не отвергать того, что признал
-    /// точный тест, а точный тест признаёт ровно на этот запас дальше своих
-    /// проб. Заведи здесь вторую мерку — и разошлись бы они молча, ячейками,
-    /// пропавшими у самого лимба.
+    /// The margin comes from [`covering_radius_deg`] -- the same measure by
+    /// which [`faces_cap`] forgives the cell the turned-away-ness of all nine
+    /// probes. And this is not a convenience but a necessity: the ball must not
+    /// reject what the exact test admitted, and the exact test admits exactly
+    /// this margin beyond its probes. Introduce a second measure here -- and
+    /// they would diverge silently, with cells vanishing right at the limb.
     ///
-    /// Дуга, а не хорда: дуга длиннее, то есть щедрее, а щедрость здесь и
-    /// нужна. Мерка эта не строго верхняя — её недоборы перечислены там, где
-    /// она живёт, — но недоборы эти общие у обоих спрашивающих, и разойтись от
-    /// них ответы не могут.
+    /// The arc, not the chord: the arc is longer, that is more generous, and
+    /// generosity is what is needed here. This measure is not a strict upper
+    /// bound -- its shortfalls are listed where it lives -- but those shortfalls
+    /// are shared by both askers, and the answers cannot diverge because of
+    /// them.
     ///
-    /// Сверх запаса добавляется подъём: рисуется ячейка не на общем выносе, а
-    /// на своём (`mesh::lift_m`), и у грубо поделённой он выше пробы на
-    /// километры. Шар обязан накрывать нарисованное, а не задуманное.
+    /// On top of the margin goes the lift: a cell is drawn not on the common
+    /// lift but on its own (`mesh::lift_m`), and for a coarsely divided one it
+    /// is kilometres above the probe. The ball must cover what is drawn, not
+    /// what was meant.
     fn ball(&self, meta: &Meta, level: u32, x: u32, y: u32) -> cull::Ball {
         let (points, seen) = self.probes(meta, level, x, y);
-        // Размах берётся у тех же проб, а не считается заново: `span_deg`
-        // спрашивает привязку о тех же девяти точках, и второй ход по ней стоил
-        // бы дороже всего остального здесь вместе взятого.
+        // The span is taken from the same probes rather than counted anew:
+        // `span_deg` asks the binding about the same nine points, and a second
+        // pass over it would cost more than everything else here put together.
         let span = span_of(&seen);
         let lifted = mesh::lift_m(span / f64::from(segments_for(span)) * std::f64::consts::SQRT_2)
             - mesh::SURFACE_LIFT_M;
@@ -1523,11 +1622,13 @@ impl Overlay {
         cull::Ball::over(&points).widened(reach as f32 + geodesy::metres(lifted))
     }
 
-    /// Девять проб ячейки: точки мира и их широты с долготами.
+    /// The nine probes of a cell: world points and their latitudes with
+    /// longitudes.
     ///
-    /// Одним местом на всех, кому они нужны, — точному тесту, шару и тому, что
-    /// меряет радиус покрытия. Посчитанные порознь, они разошлись бы молча, а
-    /// обратный ход привязки в них и есть самое дорогое.
+    /// One place for everyone who needs them -- the exact test, the ball, and
+    /// the one that measures the coverage radius. Counted separately they would
+    /// diverge silently, and the inverse pass of the binding in them is the
+    /// most expensive part.
     fn probes(&self, meta: &Meta, level: u32, x: u32, y: u32) -> ([World; 9], [(f64, f64); 9]) {
         let cell = pyramid::cell_image_rect(x, y, level, meta.width, meta.height);
         let along = |from: f64, to: f64, at: usize| from + (to - from) * (at as f64) / 2.0;
@@ -1548,11 +1649,12 @@ impl Overlay {
         (points, seen)
     }
 
-    /// Ячейки уровня, попавшие в кадр.
+    /// The cells of the level that entered the frame.
     ///
-    /// Обойдённое отмечается в `toll`: сколько ячеек проверено и сколько из них
-    /// оказалось видно. Одним сложением на уровень, а не приростом на ячейку —
-    /// проверяются они все до одной, и число это известно заранее.
+    /// What is walked is noted in `toll`: how many cells are checked and how
+    /// many of them turn out visible. One addition per level rather than an
+    /// increment per cell -- every last one of them is checked, and the number
+    /// is known in advance.
     fn visible(
         &self,
         meta: &Meta,
@@ -1568,10 +1670,11 @@ impl Overlay {
         let mut cells = Vec::new();
         for y in 0..grid_h {
             for x in 0..grid_w {
-                // Грубый отсев перед точным тестом: шар отвечает «не видно» за
-                // десяток наносекунд, а девять проб — за двенадцать микросекунд.
-                // Шары могут не быть построены (описания ещё не было) — тогда
-                // отсева нет, и спрашивается только точный тест.
+                // A rough cut before the exact test: the ball answers "not
+                // visible" in a dozen nanoseconds, while nine probes take
+                // twelve microseconds. The balls may not be built (there has
+                // been no description yet) -- then there is no cut, and only
+                // the exact test is asked.
                 if let Some(ball) = balls.and_then(|balls| balls.get((y * grid_w + x) as usize))
                     && !frame.admits(ball)
                 {
@@ -1586,31 +1689,35 @@ impl Overlay {
         cells
     }
 
-    /// Видна ли ячейка: её точки переводятся привязкой в точки мира и
-    /// проецируются той же матрицей, которой рисуется кадр. Дальняя сторона
-    /// Земли отсеивается сама — её точки отвёрнуты от глаза.
+    /// Whether a cell is visible: its points are converted by the binding into
+    /// world points and projected by the same matrix the frame is drawn with.
+    /// The far side of the Earth filters itself out -- its points are turned
+    /// away from the eye.
     ///
-    /// Решает не попадание точки в кадр, а пересечение: ячейка бывает крупнее
-    /// экрана целиком, и тогда в кадре нет ни одного её угла, а видно только её.
+    /// What decides is not a point falling into the frame but an intersection:
+    /// a cell can be larger than the whole screen, and then none of its corners
+    /// is in the frame while only it is visible.
     ///
-    /// Берутся не четыре угла, а девять точек с серединами сторон и центром, и
-    /// это не запас на всякий случай. У ячейки верхней ступени глобального
-    /// растра углами оказываются полюса: при взгляде на экватор от глаза
-    /// отвёрнуты все четыре, и ячейка, занимающая весь кадр, объявляется
-    /// невидимой. Ступень тогда пропускается молча — а это ровно та ступень,
-    /// с которой снимок и должен появиться целиком.
+    /// Not four corners are taken but nine points with the side midpoints and
+    /// the center, and this is not a margin for safety's sake. For a cell of the
+    /// top rung of a global raster the corners turn out to be the poles: looking
+    /// at the equator all four are turned away from the eye, and the cell that
+    /// occupies the whole frame is declared invisible. The rung is then skipped
+    /// silently -- and that is exactly the rung from which the image is supposed
+    /// to appear whole.
     ///
-    /// Девяти точек мало и им: между пробами лежит непроверенное, а ячейка
-    /// бывает крупнее видимого куска Земли на четыре порядка. Поэтому отвёрнутая
-    /// девятка — ещё не ответ: за ней спрашивают [`faces_cap`], которому
-    /// отвёрнутость прощается на радиус покрытия сетки проб
-    /// ([`covering_radius_deg`]). Спрашивают только её: сказавшую «видно»
-    /// девятку запас не изменит, и платят за него лишь ячейки, которые иначе
-    /// были бы отброшены.
+    /// Nine points are not enough even for them: unchecked ground lies between
+    /// the probes, and a cell can be four orders of magnitude larger than the
+    /// visible piece of Earth. So a turned-away nine is still not an answer:
+    /// after it they ask [`faces_cap`], which forgives the turned-away-ness by
+    /// the coverage radius of the probe grid ([`covering_radius_deg`]). Only it
+    /// is asked: a nine that said "visible" will not be changed by the margin,
+    /// and only the cells that would otherwise be discarded pay for it.
     fn on_screen(&self, meta: &Meta, level: u32, x: u32, y: u32, look: &Look) -> bool {
-        // Пробы берутся общим местом ([`Self::probes`]) — тем же, которым
-        // строится шар: обратный ход привязки здесь самое дорогое, а две его
-        // копии разошлись бы молча, и шар начал бы отвергать признанное здесь.
+        // The probes are taken from the shared place ([`Self::probes`]) -- the
+        // same one the ball is built from: the inverse pass of the binding is
+        // the most expensive thing here, and two copies of it would diverge
+        // silently, and the ball would start rejecting what is admitted here.
         let (world, seen) = self.probes(meta, level, x, y);
 
         let (mut low, mut high) = ([f32::MAX; 2], [f32::MIN; 2]);
@@ -1619,20 +1726,23 @@ impl Overlay {
             faces |= faces_eye(point, look.eye);
 
             let clip = camera::project(&look.view_proj, point, look.eye);
-            // Точка за камерой: делить на такое w нельзя, а ячейка при этом
-            // заведомо близко — считаем её видимой и не гадаем.
+            // A point behind the camera: one must not divide by such a w, and
+            // the cell is knowingly close meanwhile -- we count it visible and
+            // do not guess.
             //
-            // Сюда не попадают вовсе, и не по случайности: матрица вида —
-            // чистый поворот, взгляд идёт в центр эллипсоида, отчего
-            // `w = |глаз| − ê·точка`, а точка лежит на выносе, то есть
-            // `w ≥ (H − вынос)/a`. Пол камеры выведен из выноса
-            // (`camera::HEIGHT_RANGE_M`), так что и у самого пола здесь тысяча
-            // квантов `f32` запаса. От края кадра `w` не зависит вовсе.
+            // Points do not land here at all, and not by chance: the view
+            // matrix is a pure rotation, the look goes to the center of the
+            // ellipsoid, whence `w = |eye| − ê·point`, and the point lies on
+            // the lift, that is `w ≥ (H − lift)/a`. The camera floor is
+            // derived from the lift (`camera::HEIGHT_RANGE_M`), so even at the
+            // very floor there are a thousand `f32` quanta to spare. `w` does
+            // not depend on the frame edge at all.
             //
-            // Ответ всё же свой, а не через `faces`: связь этих величин нигде
-            // не объявлена, а `faces || faces_eye(point, eye)` тождественно
-            // равно `faces`, то есть отвечало бы «не видно» по одной уже
-            // пройденной точке.
+            // The answer is still its own rather than via `faces`: the relation
+            // between these quantities is declared nowhere, and
+            // `faces || faces_eye(point, eye)` is identically equal to `faces`,
+            // that is it would answer "not visible" because of a single
+            // already-passed point.
             if clip[3] <= 0.0 {
                 return true;
             }
@@ -1648,47 +1758,54 @@ impl Overlay {
     }
 }
 
-/// Обращена ли точка поверхности к глазу. Считается по шару, а не по
-/// эллипсоиду: сжатие даёт доли процента, а вопрос грубый — по эту сторону
-/// горизонта точка или по ту.
+/// Whether a surface point faces the eye. Counted on the sphere rather than
+/// the ellipsoid: the flattening gives fractions of a percent, and the
+/// question is crude -- whether the point is on this side of the horizon or on
+/// that one.
 fn faces_eye(point: World, eye: World) -> bool {
     let to_eye = [eye[0] - point[0], eye[1] - point[1], eye[2] - point[2]];
     point[0] * to_eye[0] + point[1] * to_eye[1] + point[2] * to_eye[2] > 0.0
 }
 
-/// Насколько далеко от ближайшей пробы может лежать точка ячейки.
+/// How far from the nearest probe a cell's point may lie.
 ///
-/// Девять проб стоя́т сеткой 3×3, и дальше всех от них — середина подчетверти:
-/// от неё до каждой из четырёх окружающих проб половина диагонали подчетверти.
-/// Отсюда и мерка: половина диагонали, построенной на самых длинных шагах
-/// сетки.
+/// The nine probes stand in a 3×3 grid, and the farthest from them is the
+/// middle of a quarter-cell: from it to each of the four surrounding probes is
+/// half the diagonal of the quarter-cell. Hence the measure: half the diagonal
+/// built on the longest steps of the grid.
 ///
-/// Половина самого длинного шага, а не четверть размаха ячейки. Величины эти
-/// равны, только пока середина лежит посередине, а у решётки с неровными
-/// опорными точками она там не лежит: на ряде с долготами 0, 1 и 20 четверть
-/// размаха назовёт пять градусов при настоящих девяти с половиной.
+/// Half of the longest step rather than a quarter of the cell's span. The two
+/// are equal only while the middle lies in the middle, and with a grid of
+/// uneven support points it does not lie there: on a row with longitudes 0, 1
+/// and 20 a quarter of the span would call five degrees where the real nine
+/// and a half stand.
 ///
-/// Градусами, а не хордой. У верхней ячейки глобального растра оба «угла» —
-/// полюса, и четверть хорды между ними назвала бы 45° при истинных девяноста:
-/// правка молча не сработала бы именно в том случае, ради которого заведена.
+/// In degrees, not the chord. For the top cell of a global raster both
+/// "corners" are the poles, and a quarter of the chord between them would call
+/// 45° where the truth is ninety: the fix would silently fail in exactly the
+/// case it exists for.
 ///
-/// Мерка эта не строго верхняя, и знать её недоборы надо все три.
+/// This measure is not a strict upper bound, and all three of its shortfalls
+/// must be known.
 ///
-/// Градусы у [`arc_deg`] геодезические, а угол нужен геоцентрический —
-/// приполярный шаг по меридиану оттого занижается на две трети процента.
-/// Полоса, обошедшая Землю по долготе мимо экватора, прощупывается всего
-/// двумя долготами: у пояса от −45° до 15° мерка даёт 88°, а дальняя точка
-/// стои́т в девяноста. И главное: мерка верит, что девять проб описывают
-/// ячейку. У решётки внутренность задают её узлы, а спрошены три доли по
-/// каждой оси — выгиб пути между ними в четверть и три четверти проб не
-/// касается и в шаг не попадает. Теряется он с горба примерно в восемь
-/// десятых запаса: у ячейки в два градуса это семьдесят километров. Закрыть
-/// это можно только шагами по узлам решётки, а не по пробам; опорные решётки
-/// съёмок гнутся на километры, и до порога им далеко.
+/// The degrees of [`arc_deg`] are geodetic while the angle must be
+/// geocentric -- a near-polar step along a meridian is understated by
+/// two-thirds of a percent because of it. A strip that went around the Earth
+/// along a longitude away from the equator is probed by only two longitudes:
+/// for the belt from −45° to 15° the measure gives 88°, while the far point
+/// stands at ninety. And the main thing: the measure believes that nine probes
+/// describe the cell. The interior of the grid is set by its nodes, while
+/// three fractions along each axis are asked -- the bowing of the path between
+/// them at a quarter and three quarters touches no probe and falls into no
+/// step. It is lost from the crest by roughly eight tenths of the margin: for
+/// a two-degree cell that is seventy kilometres. It can only be covered by
+/// steps along the grid nodes rather than the probes; the support grids of
+/// acquisitions bend by kilometres, and they are far from the threshold.
 ///
-/// Мерка эта не та, что у [`span_deg`], и совпасть им нельзя: та отвечает,
-/// насколько ячейка широка (чтобы выбрать густоту варп-сетки), и меряет
-/// концами; эта — насколько густо она прощупана, и меряет шагами.
+/// This measure is not the one of [`span_deg`], and the two cannot coincide:
+/// that one answers how wide the cell is (to pick the warp-mesh density) and
+/// measures by the ends; this one answers how densely it is probed, and
+/// measures by the steps.
 fn covering_radius_deg(seen: &[(f64, f64); 9]) -> f64 {
     let (mut step_x, mut step_y) = (0.0f64, 0.0f64);
     for at in 0..3 {
@@ -1702,27 +1819,29 @@ fn covering_radius_deg(seen: &[(f64, f64); 9]) -> f64 {
     0.5 * step_x.hypot(step_y)
 }
 
-/// Может ли ячейка задевать видимый кусок Земли, если её прощупали этими
-/// пробами.
+/// Whether a cell may touch the visible piece of Earth when it has been probed
+/// with these probes.
 ///
-/// [`faces_eye`] отвечает про точку и отвечает точно; про ячейку тем же
-/// вопросом отвечать нельзя — между пробами лежит непроверенное. Здесь
-/// отвёрнутость прощается на `spread` градусов: настолько далеко от ближайшей
-/// пробы и может лежать точка ячейки.
+/// [`faces_eye`] answers about a point and answers exactly; the same question
+/// cannot be asked about a cell -- unchecked ground lies between the probes.
+/// Here the turned-away-ness is forgiven by `spread` degrees: that far from the
+/// nearest probe a cell's point may lie.
 ///
-/// Считается без единого `acos`. Условие «проба ближе горизонта плюс запас»
-/// — это `γ < γ₀ + spread`, а `cos γ₀ = r/|глаз|`, откуда сравнение косинусов
-/// разворачивается в скалярные произведения и корни.
+/// Counted without a single `acos`. The condition "a probe is closer than the
+/// horizon plus the margin" is `γ < γ₀ + spread`, and `cos γ₀ = r/|eye|`,
+/// whence the comparison of cosines unfolds into dot products and roots.
 ///
-/// Радиус горизонта берётся по самой низкой из проб: ниже точка — дальше от
-/// неё видно, и ячейку, один край которой ближе к полюсу, судить по её
-/// экваториальному краю нельзя. Сжатие Земли здесь не мелочь — двадцать один
-/// километр против восьмисот метров пола камеры.
+/// The horizon radius is taken from the lowest of the probes: the lower the
+/// point, the farther is visible from it, and a cell one edge of which is
+/// closer to the pole cannot be judged by its equatorial edge. The flattening
+/// of the Earth is no trifle here -- twenty-one kilometres against the eight
+/// hundred metres of the camera floor.
 ///
-/// Запас растёт вместе с ячейкой, и на грубых ступенях это видно: у мирового
-/// растра с низкой камеры проходит вся ступень целиком — шесть ячеек вместо
-/// одной видимой. Это не грубость оценки, а её устройство, и цена ей тайл: на
-/// таких ступенях ячеек единицы, а потолок аппетита считает сотнями.
+/// The margin grows with the cell, and on coarse rungs it shows: for a world
+/// raster with a low camera the whole rung passes -- six cells instead of the
+/// one visible. This is not the crudeness of the estimate but its design, and
+/// a tile is its price: on such rungs there are only single cells while the
+/// appetite ceiling counts in hundreds.
 fn faces_cap(points: &[World; 9], eye: World, spread_deg: f64) -> bool {
     let dot = |a: &World, b: &World| {
         f64::from(a[0]) * f64::from(b[0])
@@ -1735,14 +1854,15 @@ fn faces_cap(points: &[World; 9], eye: World, spread_deg: f64) -> bool {
     }
     let lowest = lengths.iter().copied().fold(f64::MAX, f64::min);
     let radius = lowest.sqrt();
-    // Глаз бывает ближе к центру Земли, чем проба: над средними широтами
-    // низкая камера уступает экваториальной точке те самые двадцать один
-    // километр. Горизонта тогда нет вовсе — синус его нулевой.
+    // The eye can be closer to the center of the Earth than the probe: over
+    // middle latitudes a low camera yields those same twenty-one kilometres to
+    // an equatorial point. Then there is no horizon at all -- its sine is zero.
     let beyond = (dot(&eye, &eye) - lowest).max(0.0).sqrt();
 
     let (sin_spread, cos_spread) = spread_deg.to_radians().sin_cos();
-    // Запас перевалил за противоположную точку шара: дальше косинус снова
-    // растёт, и сравнением им отвечать уже нельзя — да и нечего, видно всё.
+    // The margin has rolled past the antipodal point of the sphere: beyond it
+    // the cosine grows again, and answering by comparison with it is no longer
+    // possible -- and there is nothing to answer, everything is visible.
     if beyond * cos_spread + radius * sin_spread < 0.0 {
         return true;
     }
@@ -1753,56 +1873,59 @@ fn faces_cap(points: &[World; 9], eye: World, spread_deg: f64) -> bool {
         .any(|(point, length)| dot(point, &eye) > length.sqrt() * reach)
 }
 
-/// Ячейка, у которой нашёлся носитель, — и всё, чем её рисовать.
+/// A cell a carrier was found for -- and everything to draw it with.
 ///
-/// Считается порознь с самой отрисовкой, потому что спрашивают это чаще, чем
-/// рисуют: обращение к хранилищу продлевает тайлам жизнь в бюджете, и оно же
-/// отвечает, изменилось ли нарисованное (см. [`Overlay::built`]).
+/// Counted separately from the drawing itself because this is asked more often
+/// than drawing: the store access prolongs the tiles' life in the budget, and
+/// it also answers whether what is drawn has changed (see [`Overlay::built`]).
 pub struct Piece {
-    /// Ячейка выбранной ступени, как её просили.
+    /// The cell of the chosen rung, as it was asked for.
     cell: tiles::Addr,
-    /// Чем накрыта: своим тайлом либо предком, если своего ещё нет.
+    /// What covers it: its own tile or an ancestor if its own is not there yet.
     carrier: tiles::Addr,
     bind: BindGroupId,
-    /// Её место в пикселях растра — по нему считаются узлы.
+    /// Its place in the raster's pixels -- the nodes are counted by it.
     rect: [f64; 4],
-    /// Её кусок текстуры носителя.
+    /// Its piece of the carrier's texture.
     uv: [f32; 4],
-    /// Свой тайл ячейки едет прямо сейчас: накрыта она предком, и то, что
-    /// видно, вот-вот станет резче. Ровно этим местом на шаре и помечается
-    /// идущая загрузка (см. `gpu::OverlayVertex::ripple`).
+    /// The cell's own tile is on its way right now: it is covered by an
+    /// ancestor, and what is seen is about to get sharper. It is exactly this
+    /// place on the globe that marks the load in progress (see
+    /// `gpu::OverlayVertex::ripple`).
     coming: bool,
 }
 
-/// Ячейка в том виде, в каком её помнит отпечаток: сама ячейка, чем накрыта,
-/// какой bind group у той текстуры и едет ли ей замена.
+/// A cell as the fingerprint remembers it: the cell itself, what covers it,
+/// what bind group that texture has, and whether a replacement is on its way.
 ///
-/// Числами и признаком, а не самим [`Piece`]: отпечаток сравнивают каждый кадр,
-/// и сравнивать в нём надо ровно то, от чего зависят вершины. Признак полёта
-/// входит сюда потому, что он в вершине и запечён; меняется он вместе с
-/// приездом тайла, то есть тогда, когда вершины пересобираются и так. А вот
-/// силы ряби здесь нет и быть не должно — она величина слоя, а не ячейки, и
-/// положенная в вершину, звала бы пересобирать всю сетку на каждое движение
-/// байтов (см. `gpu::CameraUniform::ripple`).
+/// As numbers and a flag rather than the [`Piece`] itself: the fingerprint is
+/// compared every frame, and exactly what the vertices depend on must be
+/// compared in it. The in-flight flag enters here because it is in the vertex
+/// and baked in; it changes along with the tile's arrival, that is when the
+/// vertices are reassembled anyway. But the ripple strength is not here and
+/// must not be -- it is a layer's quantity, not a cell's, and put into the
+/// vertex it would call for reassembling the whole mesh on every movement of
+/// bytes (see `gpu::CameraUniform::ripple`).
 pub type Drawn = (tiles::Addr, tiles::Addr, u64, bool);
 
 impl Piece {
-    /// Её след в отпечатке нарисованного.
+    /// Its trace in the fingerprint of what is drawn.
     pub fn drawn(&self) -> Drawn {
         (self.cell, self.carrier, self.bind.id(), self.coming)
     }
 
-    /// Ячейке едет свой тайл, и накрыта она пока предком.
+    /// The cell's own tile is on its way, and it is covered by an ancestor
+    /// meanwhile.
     pub fn coming(&self) -> bool {
         self.coming
     }
 }
 
-/// Видимые ячейки, у которых нашёлся носитель.
+/// Visible cells a carrier was found for.
 ///
-/// Ячейки приходят те же самые, что уехали в запрос тайлов (см.
-/// [`Overlay::wanted`]): рисовать не то, что просили, значит либо просить
-/// невидимое, либо не показывать добытое.
+/// The cells that come are the same ones that went into the tile request (see
+/// [`Overlay::wanted`]): drawing something other than what was asked for means
+/// either asking for the invisible or not showing what was fetched.
 pub fn pieces(overlay: &Overlay, wanted: &Wanted, store: &mut Store) -> Vec<Piece> {
     let Some(raster) = overlay.raster(wanted.choice.role) else { return Vec::new() };
     let Some(meta) = raster.meta.as_ref() else { return Vec::new() };
@@ -1815,8 +1938,9 @@ pub fn pieces(overlay: &Overlay, wanted: &Wanted, store: &mut Store) -> Vec<Piec
         };
         let (bind, tex) = (stored.bind.clone(), (stored.width, stored.height));
         let rect = pyramid::cell_image_rect(cell.1, cell.2, level, meta.width, meta.height);
-        // Накрытая своим тайлом ячейка не рябит, даже когда её ждут: свой тайл
-        // с ожидания снимается приездом, и спрашивать полёт у неё незачем.
+        // A cell covered by its own tile does not ripple even when it is
+        // awaited: the arrival of its own tile clears the waiting, and there is
+        // no need to ask it about the flight.
         let coming = carrier != cell && raster.fetch.coming(cell);
         found.push(Piece {
             cell,
@@ -1830,13 +1954,14 @@ pub fn pieces(overlay: &Overlay, wanted: &Wanted, store: &mut Store) -> Vec<Piec
     found
 }
 
-/// Патчи наложения: по одному на ячейку с носителем. Узлы и номера пишутся в
-/// общие буферы, отрисовки — диапазонами номеров по носителю.
+/// Patches of the overlay: one per cell with a carrier. Nodes and indices go
+/// into shared buffers, draw calls are index ranges by the carrier.
 ///
-/// Узлы берутся из кэша растра и складываются в него же: место узла на Земле не
-/// зависит ни от камеры, ни от тайла под ним, а стои́т дороже всего остального в
-/// патче вместе взятого (см. [`Nodes`]). В кэше остаются ровно нарисованные
-/// ячейки — иначе он рос бы на всё, что когда-либо попадало в кадр.
+/// The nodes are taken from the raster's cache and put back into it: a node's
+/// place on Earth depends neither on the camera nor on the tile under it, and
+/// it costs more than everything else in the patch put together (see
+/// [`Nodes`]). Exactly the drawn cells stay in the cache -- otherwise it would
+/// grow on everything that ever entered the frame.
 pub fn patches(
     overlay: &mut Overlay,
     wanted: &Wanted,
@@ -1856,31 +1981,34 @@ pub fn patches(
     let Some(meta) = meta.as_ref() else { return };
     for piece in pieces {
         let nodes = mesh.entry(piece.cell).or_insert_with(|| nodes_of(frame, meta, piece.rect));
-        // Первый узел ячейки — всё, чем её отрисовка отличается от соседней той
-        // же густоты: номера у них общие (см. `gpu::OverlayBatch::block`).
+        // The cell's first node is everything that distinguishes its drawing
+        // from a neighbor's of the same density: the indices are shared (see
+        // `gpu::OverlayBatch::block`).
         let base = vertices.len() as u32;
-        // Сдвигом, а не силой: сила — величина слоя и едет в uniform кадра
-        // (см. [`Drawn`]).
+        // By the offset, not the strength: the strength is a layer's quantity
+        // and rides in the frame's uniform (see [`Drawn`]).
         spread(nodes, piece.uv, *opacity, ripple_of(piece.cell, piece.coming), vertices);
         draws.push(Patch { bind: piece.bind.clone(), segments: nodes.segments, base });
     }
 }
 
-/// Сколько разных сдвигов по фазе раздаётся ячейкам. Шестнадцать — столько,
-/// чтобы соседи заметно расходились, и не столько, чтобы рябь рассыпалась в
-/// шум: у ячейки в кадре редко бывает больше десятка соседей.
+/// How many distinct phase offsets are dealt to cells. Sixteen -- enough for
+/// neighbors to diverge noticeably, and not so many that the ripple breaks
+/// into noise: a cell in the frame rarely has more than a dozen neighbors.
 const RIPPLE_OFFSETS: u32 = 16;
 
-/// Чем ячейка отвечает шейдеру о ряби: ноль — не рябит, иначе свой сдвиг по
-/// фазе в (0, 1].
+/// What the cell answers the shader about the ripple: zero -- it does not
+/// ripple, otherwise its own phase offset in (0, 1].
 ///
-/// Сдвиг выводится из адреса, а не раздаётся по порядку обхода: порядок ячеек в
-/// кадре меняется на каждом движении камеры, и волна перескакивала бы с места
-/// на место при неподвижной картинке. Взаимно простые множители — чтобы соседи
-/// по строке и по столбцу не попадали в один сдвиг.
+/// The offset is derived from the address rather than dealt in traversal
+/// order: the order of cells in the frame changes with every camera movement,
+/// and the wave would jump from place to place over a still picture. Mutually
+/// prime multipliers -- so that neighbors in a row and in a column do not land
+/// on the same offset.
 ///
-/// Ноль исключён нарочно: им шейдер и отличает нерябящую ячейку, а ячейка со
-/// сдвигом ровно в начале периода ничем от неё бы не отличалась.
+/// Zero is excluded on purpose: it is how the shader tells a non-rippling
+/// cell, and a cell with an offset exactly at the start of the period would be
+/// indistinguishable from it.
 fn ripple_of(cell: tiles::Addr, coming: bool) -> f32 {
     if !coming {
         return 0.0;
@@ -1890,42 +2018,48 @@ fn ripple_of(cell: tiles::Addr, coming: bool) -> f32 {
     (slot as f32 + 0.5) / RIPPLE_OFFSETS as f32
 }
 
-/// Узлы варп-сетки одной ячейки — всё в патче, что не зависит ни от камеры, ни
-/// от тайла под ней.
+/// The warp-mesh nodes of a single cell -- everything in the patch that depends
+/// neither on the camera nor on the tile under it.
 ///
-/// Половинами точки, а не готовой вершиной: `uv` меняется, когда тайл переезжает
-/// в другую текстуру, прозрачность — когда двигают ползунок слоя, а место узла
-/// на Земле не меняется ни от того, ни от другого. Разница в цене и есть смысл
-/// этого разделения: место узла — это привязка плюс две тригонометрии
-/// (`geodesy::world`), то есть полторы сотни наносекунд, а `uv` — умножение.
+/// As halves of a point rather than a ready vertex: `uv` changes when the tile
+/// moves to another texture, the opacity -- when the layer's slider is moved,
+/// while the node's place on Earth changes with neither. The difference in cost
+/// is the point of this split: a node's place is the binding plus two
+/// trigonometries (`geodesy::world`), that is a hundred and fifty nanoseconds,
+/// while `uv` is a multiplication.
 struct Nodes {
-    /// Сегментов на сторону: ими выводятся и доли внутри ячейки, и номера.
+    /// Segments per side: both the fractions inside the cell and the indices
+    /// are derived from them.
     segments: u32,
-    /// Узлы построчно, `(segments + 1)²` штук, каждый — половинами точки мира.
+    /// The nodes row by row, `(segments + 1)²` of them, each as halves of a
+    /// world point.
     points: Vec<(geodesy::World, geodesy::World)>,
 }
 
-/// Узлы варп-сетки ячейки: место каждого — точной проекцией привязки.
+/// The warp-mesh nodes of a cell: each one's place is the exact projection of
+/// the binding.
 ///
-/// Густота выводится из того, сколько дуги ячейка занимает, а не назначена
-/// числом: у гранулы это доли градуса, у глобального растра — все 360°, и одно
-/// и то же деление обслужить их не может (см. [`MAX_PATCH_SEGMENTS`]). Чего не
-/// добрало деление, добирает высота — правило и его цена описаны у
-/// `mesh::lift_m`. Подъём безопасен для соседей: контуры и сетка рисуются позже
-/// наложений и глубину не пишут (см. `gpu::render`).
+/// The density is derived from how much arc the cell occupies rather than
+/// assigned as a number: for a granule that is fractions of a degree, for a
+/// global raster -- all 360°, and one and the same division cannot serve both
+/// (see [`MAX_PATCH_SEGMENTS`]). What the division does not reach is made up
+/// by the height -- the rule and its cost are described at `mesh::lift_m`. The
+/// lift is safe for neighbors: the outlines and the grid are drawn after the
+/// overlays and write no depth (see `gpu::render`).
 fn nodes_of(frame: &Frame, meta: &Meta, cell: [f64; 4]) -> Nodes {
     let span = span_deg(frame, meta, cell);
     let segments = segments_for(span);
-    // Провал меряется по диагонали квада, а не по его ребру: квад режется на
-    // два треугольника, и глубже всего под поверхность уходит середина
-    // гипотенузы — до неё в √2 раза дальше, чем до середины стороны, а провал
-    // растёт как квадрат расстояния. Поднятые на ребро, треугольники верхней
-    // ступени глобального растра всё равно ныряют под эллипсоид, и снимок
-    // виден клочками у самых узлов.
+    // The sag is measured by the quad's diagonal rather than its edge: the quad
+    // is cut into two triangles, and the middle of the hypotenuse dives deepest
+    // under the surface -- it is √2 times farther than the middle of a side,
+    // while the sag grows as the square of the distance. Lifted along the
+    // edges, the triangles of the top rung of a global raster would still dive
+    // under the ellipsoid, and the image would be seen in patches right at the
+    // nodes.
     let height_m = mesh::lift_m(span / f64::from(segments) * std::f64::consts::SQRT_2);
 
-    // Узел считается один раз: у соседних квадов они общие, а проекция — самая
-    // дорогая часть узла.
+    // A node is computed once: neighboring quads share them, and the
+    // projection is the most expensive part of a node.
     let side = segments + 1;
     let mut points = Vec::with_capacity((side * side) as usize);
     let at = |tx: f64, ty: f64| {
@@ -1935,11 +2069,12 @@ fn nodes_of(frame: &Frame, meta: &Meta, cell: [f64; 4]) -> Nodes {
     };
     let share = |step: u32| f64::from(step) / f64::from(segments);
 
-    // У осевой рамки ряд сетки — параллель, а столбец — меридиан: широта не
-    // зависит от доли по ширине, долгота — от доли по высоте. Тогда обе
-    // тригонометрии считаются по разу на ряд и на столбец, а узел выходит
-    // шестью умножениями (см. [`geodesy::Parallel`]). У ячейки в 35 узлов на
-    // сторону это семьдесят разложений вместо тысячи с четвертью.
+    // For an axial frame a grid row is a parallel and a column is a meridian:
+    // the latitude does not depend on the fraction across the width, the
+    // longitude -- on the fraction along the height. Then both trigonometries
+    // are computed once per row and once per column, and a node comes out as
+    // six multiplications (see [`geodesy::Parallel`]). For a cell of 35 nodes
+    // per side that is seventy expansions instead of a thousand and a quarter.
     if frame.axial() {
         let lons: Vec<(f64, f64)> =
             (0..=segments).map(|col| at(share(col), 0.0).1.to_radians().sin_cos()).collect();
@@ -1963,18 +2098,18 @@ fn nodes_of(frame: &Frame, meta: &Meta, cell: [f64; 4]) -> Nodes {
     Nodes { segments, points }
 }
 
-/// Готовые узлы — в вершины со своим куском текстуры носителя.
+/// Ready nodes -- into vertices with their own piece of the carrier's texture.
 ///
-/// Прозрачность едет вершиной, а не uniform'ом: все патчи наложений лежат в
-/// одном буфере и рисуются одним пайплайном, отличаясь только диапазоном
-/// номеров и bind group носителя, — своего uniform'а у слоя тут нет и не за что
-/// его завести.
+/// The opacity rides in the vertex rather than in a uniform: all overlay
+/// patches lie in one buffer and are drawn by one pipeline, differing only in
+/// the index range and the carrier's bind group -- the layer has no uniform of
+/// its own here and there is nothing to start one for.
 ///
-/// Узел уезжает в буфер по разу: треугольники ссылаются на него номерами, а
-/// номера у всех ячеек одной густоты общие и лежат отдельно
-/// (`gpu::OverlayBatch::block`). Узлов у ячейки `(s+1)²`, а вершин списком
-/// треугольников было бы `6s²` — вчетверо с лишним у гранулы (`s = 8`) и
-/// впятеро с лишним у всего, что крупнее.
+/// A node goes into the buffer once: the triangles refer to it by indices, and
+/// the indices are shared by all cells of the same density and lie separately
+/// (`gpu::OverlayBatch::block`). A cell has `(s+1)²` nodes, while a triangle
+/// list of vertices would be `6s²` -- more than four times over for a granule
+/// (`s = 8`) and more than five times over for anything larger.
 fn spread(
     nodes: &Nodes,
     uv: [f32; 4],
@@ -1983,10 +2118,11 @@ fn spread(
     vertices: &mut Vec<OverlayVertex>,
 ) {
     let (segments, side) = (nodes.segments, nodes.segments + 1);
-    debug_assert_eq!(nodes.points.len(), (side * side) as usize, "узлов не по густоте");
+    debug_assert_eq!(nodes.points.len(), (side * side) as usize, "node count does not match the density");
     let across = segments as f32;
-    // Доли по столбцам считаются один раз на патч, а не на узел: их (s+1), а
-    // узлов (s+1)², и деление — самое дорогое, что осталось в этом проходе.
+    // The column fractions are computed once per patch rather than per node:
+    // there are (s+1) of them and (s+1)² nodes, and the division is the most
+    // expensive thing left in this pass.
     let us: Vec<f32> = (0..side).map(|col| uv[0] + (uv[2] - uv[0]) * (col as f32 / across)).collect();
     vertices.reserve(nodes.points.len());
     for (row, line) in nodes.points.chunks(side as usize).enumerate() {
@@ -1997,17 +2133,17 @@ fn spread(
     }
 }
 
-/// На сколько долей бить сторону ячейки такого размаха — так, чтобы провал
-/// квада уместился под общий вынос.
+/// Into how many parts to split the side of a cell of such a span -- so that
+/// the quad's sag fits under the common lift.
 fn segments_for(span_deg: f64) -> u32 {
     ((span_deg / mesh::max_quad_side_deg()).ceil() as u32)
         .clamp(PATCH_SEGMENTS, MAX_PATCH_SEGMENTS)
 }
 
-/// Тот же размах, что у [`span_deg`], но по уже посчитанным пробам.
+/// The same span as [`span_deg`], but from already computed probes.
 ///
-/// Порядок проб тот же, что у [`Overlay::probes`]: доля по X — младшая, то есть
-/// ряд `r` занимает места `3r..3r+3`.
+/// The probe order is the same as in [`Overlay::probes`]: the X fraction is
+/// the minor one, that is row `r` occupies slots `3r..3r+3`.
 fn span_of(seen: &[(f64, f64); 9]) -> f64 {
     let mut span: f64 = 0.0;
     for row in 0..3 {
@@ -2019,17 +2155,19 @@ fn span_of(seen: &[(f64, f64); 9]) -> f64 {
     span
 }
 
-/// Сколько дуги занимает ячейка — по самому длинному её ряду.
+/// How much arc the cell occupies -- by its longest row.
 ///
-/// По рядам, а не по диагонали: бьётся ячейка вдоль них, и делить её приходится
-/// по тому из них, который длиннее.
+/// By the rows rather than the diagonal: the cell is split along them, and it
+/// has to be divided by whichever of them is longer.
 ///
-/// Меряются не только края, но и середина, и это не запас на всякий случай.
-/// Привязка бывает какой угодно, а у глобального растра края верхней ступени
-/// вырождаются в точку на полюсе: длина у него вся в средней строке, а по краям
-/// он выходит вдвое у́же, чем есть. Поднятая по такой мерке ячейка ныряет под
-/// тело Земли на километры, и снимок во всю Землю снова виден клочками у самых
-/// узлов сетки — ровно то, ради чего густота и считается.
+/// Not only the edges are measured but the middle as well, and this is not a
+/// margin for safety's sake. A binding can be anything, and for a global raster
+/// the edges of the top rung degenerate into a point at the pole: all its
+/// length is in the middle row, while along the edges it comes out half as
+/// narrow as it is. A cell lifted by such a measure dives under the body of
+/// the Earth for kilometres, and an image covering the whole Earth is again
+/// seen in patches right at the grid nodes -- exactly what the density is
+/// computed for.
 fn span_deg(frame: &Frame, meta: &Meta, cell: [f64; 4]) -> f64 {
     let at = |x: f64, y: f64| frame.geodetic(x / f64::from(meta.width), y / f64::from(meta.height));
     let xs = [cell[0], (cell[0] + cell[2]) * 0.5, cell[2]];
@@ -2043,2450 +2181,4 @@ fn span_deg(frame: &Frame, meta: &Meta, cell: [f64; 4]) -> f64 {
         span = span.max(arc_deg(at(x, ys[0]), at(x, ys[2])));
     }
     span
-}
-
-/// Наложение для тестов: рамка T40WFC (109.8 км на всю ширину растра) и
-/// названные растры; ключ — как назовут. Одно на тесты этого файла и на тесты
-/// обработчиков модуля.
-#[cfg(test)]
-pub(crate) fn stub(key: &str, rasters: Vec<Raster>) -> Overlay {
-    Overlay {
-        key: key.into(),
-        label: "снимок".into(),
-        frame: Frame::utm(projection::System::utm(40, false), 600_000.0, 7_690_200.0, 709_800.0, 7_800_000.0),
-        relaid: 0,
-        binding: Binding::Named,
-        binding_trouble: None,
-        rasters,
-        sources: Vec::new(),
-        variables: Vec::new(),
-        opacity: 1.0,
-        hidden: false,
-        error: String::new(),
-        progress: Progress::default(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Девять проб ячейки: строки — широты, столбцы — долготы, порядок тот же,
-    /// что у `on_screen` (доля по X — младшая).
-    fn probes(lats: [f64; 3], lons: [f64; 3]) -> ([(f64, f64); 9], [World; 9]) {
-        let mut seen = [(0.0, 0.0); 9];
-        let mut world = [[0.0f32; 3]; 9];
-        for at in 0..9 {
-            let point = (lats[at / 3], lons[at % 3]);
-            seen[at] = point;
-            world[at] = geodesy::position(Geodetic {
-                lat_deg: point.0,
-                lon_deg: point.1,
-                height_m: mesh::SURFACE_LIFT_M,
-            });
-        }
-        (seen, world)
-    }
-
-    fn eye_over(lat: f64, lon: f64, height_m: f64) -> World {
-        geodesy::position(Geodetic { lat_deg: lat, lon_deg: lon, height_m })
-    }
-
-    /// Радиус покрытия меряется градусами, а не хордой между углами.
-    ///
-    /// У верхней ячейки глобального растра углы — оба полюса, и хорда между
-    /// ними назвала бы половину диагонали в 45°. Настоящий же радиус — 90°:
-    /// столько от девяти проб (а различных среди них четыре) до точки
-    /// (0°, ±90°). Мерка, назвавшая 45, отбросила бы ровно ту ячейку, ради
-    /// которой запас и заведён, — и отбросила бы молча.
-    #[test]
-    fn the_covering_radius_is_measured_in_degrees_not_chords() {
-        let (seen, _) = probes([90.0, 0.0, -90.0], [-180.0, 0.0, 180.0]);
-        let reach = covering_radius_deg(&seen);
-        assert!(
-            (reach - 100.62).abs() < 0.01,
-            "радиус покрытия мирового растра: {}",
-            reach
-        );
-        assert!(reach > 90.0, "запаса не хватает до самой дальней точки мира");
-    }
-
-    /// Мировой растр видно отовсюду, в том числе оттуда, где ни одна проба не
-    /// обращена к глазу.
-    ///
-    /// Над (0°, ±90°) все четыре различные пробы верхней ячейки стоя́т ровно в
-    /// девяноста градусах — дальше горизонта с любой высоты, включая потолок
-    /// камеры. Без запаса слой не показывался бы там никогда.
-    #[test]
-    fn the_whole_world_cell_is_seen_from_everywhere() {
-        let (seen, world) = probes([90.0, 0.0, -90.0], [-180.0, 0.0, 180.0]);
-        let reach = covering_radius_deg(&seen);
-        for height_m in [800.0, 10_000.0, 1_000_000.0, 14_000_000.0, 80_000_000.0] {
-            let eye = eye_over(0.0, 90.0, height_m);
-            assert!(
-                !world.iter().any(|point| faces_eye(*point, eye)),
-                "проба обращена к глазу — проверять было бы нечего"
-            );
-            assert!(
-                faces_cap(&world, eye, reach),
-                "мировой растр невидим с высоты {} м",
-                height_m
-            );
-        }
-    }
-
-    /// Крупная ячейка видна, когда глаз стои́т над её серединой между пробами.
-    ///
-    /// Это и есть весь дефект в одну строку: у ячейки в двадцать градусов от
-    /// середины подчетверти до ближайшей пробы семь градусов, а с высоты в
-    /// километр видно меньше градуса. Девять проб отвечают «отвёрнуты все», и
-    /// слой пропадает с экрана целиком.
-    #[test]
-    fn a_cell_is_seen_from_between_its_probes() {
-        let (seen, world) = probes([-10.0, 0.0, 10.0], [-10.0, 0.0, 10.0]);
-        let eye = eye_over(5.0, 5.0, 1_000.0);
-        assert!(
-            !world.iter().any(|point| faces_eye(*point, eye)),
-            "проба обращена к глазу — проверять было бы нечего"
-        );
-        assert!(faces_cap(&world, eye, covering_radius_deg(&seen)), "ячейка потеряна");
-    }
-
-    /// Отвернувшееся не притягивается: ячейка на другой стороне Земли остаётся
-    /// невидимой. Запас меряется самой ячейкой, поэтому дотянуться дальше
-    /// собственного края он не может.
-    #[test]
-    fn the_far_side_stays_out_of_reach() {
-        let (seen, world) = probes([-10.0, 0.0, 10.0], [-10.0, 0.0, 10.0]);
-        let reach = covering_radius_deg(&seen);
-        for height_m in [800.0, 300_000.0, 14_000_000.0] {
-            let eye = eye_over(0.0, 180.0, height_m);
-            assert!(
-                !faces_cap(&world, eye, reach),
-                "ячейка с обратной стороны Земли объявлена видимой с {} м",
-                height_m
-            );
-        }
-    }
-
-    /// Радиус горизонта берётся по самой низкой пробе, а не по самой высокой.
-    ///
-    /// Разница у пола камеры пятикратная: экваториальная проба видит на 0,86°,
-    /// приполярная — на 4,77°, и вся она из сжатия Земли, а не из высоты.
-    /// Судить ячейку по самой высокой её пробе значит отнимать у неё то, что
-    /// видно с низкой, — то есть терять ячейку молча, ровно тем способом,
-    /// который запас и чинит.
-    #[test]
-    fn the_horizon_is_measured_from_the_lowest_probe() {
-        let (seen, world) = probes([45.0, 45.1, 45.2], [0.0, 0.1, 0.2]);
-        let eye = eye_over(45.9, 0.1, 800.0);
-        assert!(
-            !world.iter().any(|point| faces_eye(*point, eye)),
-            "проба обращена к глазу — проверять было бы нечего"
-        );
-        assert!(faces_cap(&world, eye, covering_radius_deg(&seen)), "ячейка потеряна");
-    }
-
-    /// Запас меряется самым длинным шагом сетки проб, а не размахом ячейки.
-    ///
-    /// Ряд с долготами 0, 1 и 20 прощупан вкривь: между второй и третьей
-    /// пробами девятнадцать градусов, а размах — двадцать. Четверть размаха
-    /// назвала бы пять градусов, и середина длинного шага осталась бы
-    /// непроверенной — при том что ровно там и стои́т глаз.
-    #[test]
-    fn the_reserve_follows_the_longest_step_not_the_span() {
-        let (seen, world) = probes([0.0, 1.0, 20.0], [0.0, 1.0, 20.0]);
-        let reach = covering_radius_deg(&seen);
-        assert!(reach > 9.0, "запас назван размахом, а не шагом: {}", reach);
-
-        let eye = eye_over(10.5, 10.5, 800.0);
-        assert!(
-            !world.iter().any(|point| faces_eye(*point, eye)),
-            "проба обращена к глазу — проверять было бы нечего"
-        );
-        assert!(faces_cap(&world, eye, reach), "середина длинного шага потеряна");
-    }
-
-    /// Ячейка видна и оттуда, где глаз ближе к центру Земли, чем она сама.
-    ///
-    /// Сжатие Земли — двадцать один километр, и над широтой всего на несколько
-    /// градусов ближе к полюсу низкая камера оказывается ниже
-    /// экваториального края ячейки. Горизонта для такой пробы не существует, и
-    /// корень под его синусом уходит в минус: неприбранный, он даёт не «видно»
-    /// и не «не видно», а NaN — то есть тот же молчаливый отказ, ради которого
-    /// запас и заведён.
-    #[test]
-    fn a_cell_is_seen_from_below_its_own_edge() {
-        let (seen, world) = probes([0.0, 10.0, 20.0], [-10.0, 0.0, 10.0]);
-        let eye = eye_over(25.0, 0.0, 800.0);
-        assert!(
-            !world.iter().any(|point| faces_eye(*point, eye)),
-            "проба обращена к глазу — проверять было бы нечего"
-        );
-        assert!(faces_cap(&world, eye, covering_radius_deg(&seen)), "ячейка потеряна");
-    }
-
-    /// Видимый ребёнок не бывает у невидимого родителя.
-    ///
-    /// На этом и стои́т лестница ступеней: грубая ступень обязана накрывать всё,
-    /// что попросит подробная, иначе она пропускается молча, а её ячейки
-    /// некому подменить при рисовании. Проверяется тем же, чем считается, —
-    /// пробами и запасом, — но на двух уровнях сразу и по всей сфере.
-    #[test]
-    fn a_seen_child_never_has_an_unseen_parent() {
-        let (parent_seen, parent_world) = probes([-10.0, 0.0, 10.0], [-10.0, 0.0, 10.0]);
-        let parent_reach = covering_radius_deg(&parent_seen);
-        let children = [
-            ([-10.0, -5.0, 0.0], [-10.0, -5.0, 0.0]),
-            ([-10.0, -5.0, 0.0], [0.0, 5.0, 10.0]),
-            ([0.0, 5.0, 10.0], [-10.0, -5.0, 0.0]),
-            ([0.0, 5.0, 10.0], [0.0, 5.0, 10.0]),
-        ];
-        let mut seen_children = 0;
-        for (lats, lons) in children {
-            let (child_seen, child_world) = probes(lats, lons);
-            let child_reach = covering_radius_deg(&child_seen);
-            for lat in (-90..=90).step_by(5) {
-                for lon in (-180..=180).step_by(5) {
-                    for height_m in [800.0, 100_000.0, 3_000_000.0] {
-                        let eye = eye_over(f64::from(lat), f64::from(lon), height_m);
-                        if !faces_cap(&child_world, eye, child_reach) {
-                            continue;
-                        }
-                        seen_children += 1;
-                        assert!(
-                            faces_cap(&parent_world, eye, parent_reach),
-                            "ребёнок виден с ({}, {}, {} м), а родитель — нет",
-                            lat,
-                            lon,
-                            height_m
-                        );
-                    }
-                }
-            }
-        }
-        assert!(seen_children > 100, "видимых детей всего {} — проверять нечего", seen_children);
-    }
-
-    fn meta(width: u32, height: u32) -> Meta {
-        Meta {
-            fingerprint: "fp".into(),
-            width,
-            height,
-            rows: vec![
-                tiles::Row { serve: tiles::Serve::Pointwise, bytes: 0, fits: true };
-                pyramid::level_count(width, height) as usize
-            ],
-            variable: None,
-            variables: Vec::new(),
-        }
-    }
-
-    /// То же описание с пределом детали — таблицей крупного JPEG: проход со
-    /// своего уровня на каждом, уровни подробнее `finest` не влезают.
-    fn limited(mut meta: Meta, finest: u32) -> Meta {
-        for (level, row) in meta.rows.iter_mut().enumerate() {
-            row.serve = tiles::Serve::Pass { from: level as u32 };
-            row.fits = level as u32 >= finest;
-        }
-        meta
-    }
-
-    /// Подпись предела, как её складывает сама пирамида: строкой целиком её
-    /// сверяет один тест у `Meta::capped`, здесь — что до слоя доезжает та же.
-    fn cap_line() -> String {
-        limited(meta(4001, 3001), 1).capped().expect("предел есть")
-    }
-
-    /// Пустое хранилище: в тестах тайлам взяться неоткуда — текстуры выдаёт
-    /// хост, — и проверяется поэтому первая ступень, с которой всё начинается.
-    /// Спуск по ступеням проверен там, где он и написан (`tiles::rung`).
-    fn store() -> Store {
-        Store::new(1 << 30)
-    }
-
-    fn overlay(rasters: Vec<Raster>) -> Overlay {
-        stub("k", rasters)
-    }
-
-    fn raster(role: Role, meta_of: Option<Meta>) -> Raster {
-        let mut raster =
-            Raster::new(role, veldsdk::OwnedResource::from_raw_id(u64::from(role as u32) + 1));
-        raster.meta = meta_of;
-        raster
-    }
-
-    /// Запасной встаёт на место не описавшегося тем же растром: роль и место
-    /// прежние, знание о файле — с чистого листа; кончились запасные — ответ
-    /// пуст, и растр остаётся при последнем файле.
-    #[test]
-    fn a_spare_takes_the_place_of_the_failed_file() {
-        let mut raster = raster(Role::Detailed, Some(meta(2000, 2000)));
-        raster.trouble = Some("подробный растр не открылся: пусто".into());
-        raster.ordinal = 1;
-        raster.spares = vec![
-            (2, veldsdk::OwnedResource::from_raw_id(11), Some(veldsdk::OwnedResource::from_raw_id(12))),
-            (3, veldsdk::OwnedResource::from_raw_id(13), None),
-        ];
-
-        let (resource, coordinates) = raster.next_spare().expect("запасной есть");
-        assert_eq!((resource.id, coordinates.map(|c| c.id)), (11, Some(12)));
-        assert_eq!(raster.resource.as_ref().id, 11);
-        assert_eq!(raster.ordinal, 2, "номер переходит вместе с файлом — по нему называют лежащий");
-        assert!(raster.meta.is_none() && raster.trouble.is_none(), "о новом файле ещё ничего не известно");
-        assert_eq!(raster.role, Role::Detailed);
-        assert_eq!(raster.spares.len(), 1);
-
-        assert_eq!(raster.next_spare().map(|(r, c)| (r.id, c.is_none())), Some((13, true)));
-        assert!(raster.next_spare().is_none(), "запасных больше нет");
-        assert_eq!(raster.resource.as_ref().id, 13, "растр остаётся при последнем");
-    }
-
-    /// Взгляд на снимок в упор: камера наведена на середину рамки, так что
-    /// видно её целиком. Метраж экранного пикселя задаётся отдельно от камеры —
-    /// проверяется выбор уровня, а не арифметика высоты.
-    fn look_at(overlay: &Overlay, mpp: f64) -> Look {
-        let (lat, lon) = overlay.frame.geodetic(0.5, 0.5);
-        let mut camera = crate::module::camera::Camera::default();
-        camera.focus(lat, lon, 1.0);
-        // Наводка едет, а проверяется приехавшее: шаг длиннее перелёта ставит
-        // камеру ровно в цель (см. `Camera::advance`).
-        camera.advance(10.0);
-        Look { view_proj: camera.view_projection(1.0), eye: camera.eye(), mpp }
-    }
-
-    /// Грубый отсев не отвергает того, что видит точный тест.
-    ///
-    /// Это всё требование к шарам, и проверяется оно там, где может сломаться:
-    /// у лимба. Пока снимок в середине кадра, все пробы обращены к глазу,
-    /// запас не работает вовсе и проверять нечего — а вот уехавший за край
-    /// Земли слой судят как раз запасом (`faces_cap`), и шар обязан дотянуться
-    /// туда же.
-    ///
-    /// Обратное неверно и не проверяется: шар обязан быть щедрее, иначе он не
-    /// был бы осторожным.
-    #[test]
-    fn the_coarse_refusal_never_overrules_the_exact_answer() {
-        let whole = Overlay {
-            frame: Frame::quad([(85.0, -180.0), (85.0, 180.0), (-85.0, 180.0), (-85.0, -180.0)]),
-            ..overlay(vec![raster(Role::Detailed, Some(meta(43200, 21600)))])
-        };
-        let cases = [(whole, meta(43200, 21600)), (overlay(vec![raster(
-            Role::Detailed, Some(meta(10980, 10980)))]), meta(10980, 10980))];
-        let mut seen = 0;
-        for (overlay, meta) in &cases {
-            let bounds = overlay.bounds(meta);
-            assert_eq!(bounds.len(), meta.levels() as usize, "уровней в таблице столько же");
-            // Камеру водят вокруг Земли, а не наводят на снимок: за лимбом и
-            // живёт единственная ветвь, где запас что-то решает.
-            for lat in [-70.0, -20.0, 0.0, 35.0, 80.0] {
-                for lon in [-150.0, -60.0, 0.0, 70.0, 160.0] {
-                    for radius_deg in [1.0, 15.0, 60.0] {
-                        let mut camera = crate::module::camera::Camera::default();
-                        camera.focus(lat, lon, radius_deg);
-                        camera.advance(10.0);
-                        let look = Look {
-                            view_proj: camera.view_projection(1.5),
-                            eye: camera.eye(),
-                            mpp: 10.0,
-                        };
-                        let frame = cull::Frame::new(&look.view_proj, look.eye);
-                        // Нулевой уровень пропускается: ячеек у него тысячи, а
-                        // ломается не он — запас на нём и построен.
-                        for level in 1..meta.levels() {
-                            let grid_w = pyramid::grid(pyramid::level_size(meta.width, level));
-                            let grid_h = pyramid::grid(pyramid::level_size(meta.height, level));
-                            for y in 0..grid_h {
-                                for x in 0..grid_w {
-                                    if !overlay.on_screen(meta, level, x, y, &look) {
-                                        continue;
-                                    }
-                                    seen += 1;
-                                    let ball = &bounds[level as usize][(y * grid_w + x) as usize];
-                                    assert!(
-                                        frame.admits(ball),
-                                        "ячейка {}/{},{} видна точным тестом, а шаром отвергнута \
-                                         при взгляде {},{} на {}°",
-                                        level, x, y, lat, lon, radius_deg
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        assert!(seen > 500, "видимых ячеек в выборке слишком мало: {}", seen);
-    }
-
-    /// Шар прощает ячейке ровно столько же, сколько прощает точный тест.
-    ///
-    /// Точный тест признаёт ячейку видимой на радиус покрытия дальше своих проб
-    /// (`faces_cap`), и шар обязан дотягиваться туда же. Мерка у них одна
-    /// (`covering_radius_deg`), и тест держит именно это: две мерки одного и
-    /// того же разошлись бы молча — ячейками, пропавшими у самого лимба, где
-    /// запас и работает.
-    #[test]
-    fn the_ball_forgives_the_cell_as_much_as_the_exact_test_does() {
-        let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
-        let meta = meta(10980, 10980);
-        for level in 0..meta.levels() {
-            let grid_w = pyramid::grid(pyramid::level_size(meta.width, level));
-            let grid_h = pyramid::grid(pyramid::level_size(meta.height, level));
-            for (x, y) in [(0, 0), (grid_w / 2, grid_h / 2), (grid_w - 1, grid_h - 1)] {
-                let ball = overlay.ball(&meta, level, x, y);
-                let (points, seen) = overlay.probes(&meta, level, x, y);
-                let tight = cull::Ball::over(&points);
-                let forgiven = f64::from(ball.radius - tight.radius);
-                let owed = covering_radius_deg(&seen).to_radians() * mesh::drawn_radius();
-                assert!(
-                    forgiven >= owed * 0.999,
-                    "шар прощает {} при {} у точного теста: {}/{},{}",
-                    forgiven, owed, level, x, y
-                );
-            }
-        }
-    }
-
-    /// Шар накрывает не задуманное, а нарисованное.
-    ///
-    /// Ячейка рисуется не на общем выносе, а на своём: грубо поделённая
-    /// поднимается над эллипсоидом, чтобы не нырять под него серединами
-    /// треугольников (`mesh::lift_m`). У верхней ступени растра во всю Землю
-    /// это километры, и шар, построенный по пробам на общем выносе, прошёл бы
-    /// под нарисованной ячейкой.
-    #[test]
-    fn the_ball_covers_what_is_drawn_and_not_what_was_meant() {
-        let whole = Overlay {
-            frame: Frame::quad([(85.0, -180.0), (85.0, 180.0), (-85.0, 180.0), (-85.0, -180.0)]),
-            ..overlay(vec![raster(Role::Detailed, Some(meta(43200, 21600)))])
-        };
-        let meta = meta(43200, 21600);
-        let top = meta.levels() - 1;
-        let cell = pyramid::cell_image_rect(0, 0, top, meta.width, meta.height);
-        let span = span_deg(&whole.frame, &meta, cell);
-        let lifted = mesh::lift_m(span / f64::from(segments_for(span)) * std::f64::consts::SQRT_2);
-        assert!(lifted > mesh::SURFACE_LIFT_M * 10.0, "ступень легла на общий вынос: {}", lifted);
-
-        let ball = whole.ball(&meta, top, 0, 0);
-        let (points, seen) = whole.probes(&meta, top, 0, 0);
-        let tight = cull::Ball::over(&points);
-        // Подъём выделяется из запаса, а не складывается с ним: рядом с
-        // покрытием ячейки в пол-Земли он теряется в допуске, и проверка
-        // прошла бы, даже не будь его вовсе.
-        let reach = covering_radius_deg(&seen).to_radians() * mesh::drawn_radius();
-        let raised = f64::from(ball.radius - tight.radius) - reach;
-        let owed = f64::from(geodesy::metres(lifted - mesh::SURFACE_LIFT_M));
-        assert!(
-            raised >= owed * 0.99,
-            "шар не дотянулся до нарисованного: поднят на {}, а рисуется на {}",
-            raised, owed
-        );
-    }
-
-    /// Выбор растров: далеко хватает превью одного; ближе его родного
-    /// разрешения подробный добавляется ПОВЕРХ превью — база рисуется всегда,
-    /// чтобы снимок был виден, пока подробные тайлы едут.
-    #[test]
-    fn choices_keep_preview_under_detail() {
-        let overlay = overlay(vec![
-            raster(Role::Preview, Some(meta(343, 343))),    // ~320 м/px
-            raster(Role::Detailed, Some(meta(10980, 10980))), // 10 м/px
-        ]);
-        // Далеко: экранный пиксель — километр; превью одно.
-        let far = overlay.wanted(&look_at(&overlay, 1000.0), u64::MAX, &store(), &Toll::default());
-        assert_eq!(far.len(), 1);
-        assert_eq!(far[0].choice.role, Role::Preview);
-        // Экран мельче превью: база остаётся, подробный ложится поверх.
-        let near = overlay.wanted(&look_at(&overlay, 40.0), u64::MAX, &store(), &Toll::default());
-        assert_eq!(near.len(), 2);
-        assert_eq!(near[0].choice.role, Role::Preview);
-        assert_eq!(near[1].choice.role, Role::Detailed);
-    }
-
-    /// Подробный, который не подробнее превью, на шар не кладётся вовсе.
-    ///
-    /// Роль назначает провайдер по раскладке продукта, и у раскладки, которой
-    /// он не знает, подробным оказывается что придётся: у гранулы SLSTR это
-    /// килoметровый тепловой канал 1500 пикселей при цветном квиклуке в 2422.
-    /// Рисуется подробный поверх базы — значит приближение, дойдя до него,
-    /// накрыло бы крупную картинку мелкой, и снимок от приближения стал бы
-    /// хуже.
-    #[test]
-    fn detail_no_finer_than_the_preview_is_not_laid_at_all() {
-        let overlay = overlay(vec![
-            raster(Role::Preview, Some(meta(2422, 1940))),
-            raster(Role::Detailed, Some(meta(1500, 1202))),
-        ]);
-
-        // Экран мельче родного разрешения превью — то самое приближение, на
-        // котором подробный и добавлялся бы.
-        let near = overlay.wanted(&look_at(&overlay, 1.0), u64::MAX, &store(), &Toll::default());
-
-        assert_eq!(near.len(), 1, "подробного в ответе нет");
-        assert_eq!(near[0].choice.role, Role::Preview);
-    }
-
-    /// Равный по ширине тоже не кладётся: накрыв базу собой, он не прибавит
-    /// ни пикселя, а стоить будет целой пирамиды.
-    #[test]
-    fn detail_as_wide_as_the_preview_is_not_laid_either() {
-        let overlay = overlay(vec![
-            raster(Role::Preview, Some(meta(2048, 2048))),
-            raster(Role::Detailed, Some(meta(2048, 2048))),
-        ]);
-
-        let near = overlay.wanted(&look_at(&overlay, 1.0), u64::MAX, &store(), &Toll::default());
-
-        assert_eq!(near.len(), 1);
-        assert_eq!(near[0].choice.role, Role::Preview);
-    }
-
-    /// Отпечаток нарисованного замечает и смену привязки, и смену носителей.
-    /// Ни то ни другое не видно по выбору растра: отпечаток растра, роль и
-    /// уровень при обоих остаются прежними, а вершины — другие.
-    #[test]
-    fn built_notices_a_relay_and_a_new_set_of_cells() {
-        let mut overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
-        let at = |overlay: &Overlay, drawn: Vec<Drawn>| {
-            let cells: Vec<tiles::Addr> = drawn.iter().map(|(cell, ..)| *cell).collect();
-            overlay.built(
-                &Wanted {
-                    choice: Choice {
-                        role: Role::Detailed,
-                        fingerprint: "fp".into(),
-                        level: 2,
-                    },
-                    want: tiles::Want { level: 2, target: 2, cells, steps: 1, climbed: 0 },
-                },
-                &drawn,
-            )
-        };
-
-        let cell = |x: u32, bind: u64| ((2, x, 0), (2, x, 0), bind, false);
-
-        // Камера сдвинулась: тот же растр, тот же уровень, другие ячейки.
-        assert_ne!(
-            at(&overlay, vec![cell(0, 7)]),
-            at(&overlay, vec![cell(1, 7)]),
-            "панорама по уже добытому — это другие вершины"
-        );
-
-        // Ячейка та же, а накрыта другим тайлом: у грубого предка свой кусок
-        // текстуры, и `uv` у вершин выходит другим.
-        assert_ne!(
-            at(&overlay, vec![((2, 0, 0), (2, 0, 0), 7, false)]),
-            at(&overlay, vec![((2, 0, 0), (1, 0, 0), 7, false)]),
-            "смена носителя — это другие вершины"
-        );
-
-        // И тот же тайл, переехавший в другую текстуру: адрес прежний, bind
-        // group новая, кусок текстуры другой.
-        assert_ne!(
-            at(&overlay, vec![cell(0, 7)]),
-            at(&overlay, vec![cell(0, 8)]),
-            "переехавший тайл — это другие вершины"
-        );
-
-        // Ячейке поехал свой тайл: накрытие прежнее, а рябь в вершине уже
-        // другая — не заметь этого отпечаток, она зажглась бы только со
-        // следующим приехавшим тайлом.
-        assert_ne!(
-            at(&overlay, vec![((2, 0, 0), (1, 0, 0), 7, false)]),
-            at(&overlay, vec![((2, 0, 0), (1, 0, 0), 7, true)]),
-            "начавшийся полёт — это другие вершины"
-        );
-
-        // А вот всё то же самое — это те же вершины, и пересобирать нечего.
-        // Ради этого отпечаток и меряется носителями: поколение хранилища
-        // двигал бы всякий чужой тайл.
-        assert_eq!(at(&overlay, vec![cell(0, 7)]), at(&overlay, vec![cell(0, 7)]));
-
-        // Слой переложили: те же ячейки, другая привязка.
-        let before = at(&overlay, vec![cell(0, 7)]);
-        overlay.relay(
-            Frame::quad([(60.0, 30.0), (60.0, 31.0), (59.0, 31.0), (59.0, 30.0)]),
-            Binding::Catalogue,
-        );
-        assert_ne!(before, at(&overlay, vec![cell(0, 7)]), "переложенный слой рисуется заново");
-    }
-
-    /// Перекладка идёт одним действием: рамка, ранг и счётчик двигаются
-    /// вместе. Разъедься они — пересборка геометрии перекладку не заметила бы.
-    #[test]
-    fn relay_moves_the_frame_the_rank_and_the_counter_together() {
-        let mut overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
-        assert_eq!(overlay.relaid, 0);
-
-        overlay.relay(
-            Frame::quad([(60.0, 30.0), (60.0, 31.0), (59.0, 31.0), (59.0, 30.0)]),
-            Binding::Catalogue,
-        );
-
-        assert!(matches!(overlay.frame, Frame::Quad(_)));
-        assert_eq!(overlay.binding, Binding::Catalogue);
-        assert_eq!(overlay.relaid, 1);
-
-        // Перекладок у слоя бывает две: растров два, описываются они порознь,
-        // и ранг растёт по цепочке. Счётчик, останавливающийся на первой,
-        // пропустил бы вторую — то есть ровно ту, что сдвигает уже
-        // нарисованное.
-        overlay.relay(
-            Frame::quad([(61.0, 30.0), (61.0, 31.0), (60.0, 31.0), (60.0, 30.0)]),
-            Binding::Named,
-        );
-        assert_eq!(overlay.relaid, 2, "вторая перекладка тоже видна");
-    }
-
-    /// Жалоба на непрочитанную привязку — свойство слоя, а не растра, и итог у
-    /// неё один при любом порядке описаний.
-    ///
-    /// Растров у наложения два, описываются они независимо, и какой опишется
-    /// первым, решает время разбора двух файлов — то есть ничего осмысленного.
-    /// Правило, зависящее от этого порядка, показывало бы одному и тому же
-    /// снимку то жалобу, то пустоту через раз; а жалоба, пережившая взятую
-    /// привязку, объявляла бы место неизвестным у снимка, лежащего по
-    /// прочитанному.
-    ///
-    /// Одинаковую причину два файла одного продукта дают сплошь и рядом, и
-    /// сказанная дважды она читается как две разные беды.
-    #[test]
-    fn жалоба_на_привязку_не_зависит_от_порядка_описаний() {
-        let quad = || Frame::quad([(60.0, 30.0), (60.0, 31.0), (59.0, 31.0), (59.0, 30.0)]);
-
-        // Сперва жалобы, потом удача: причины складываются, повтор не множится,
-        // а взятая привязка снимает их все.
-        let mut first = overlay(Vec::new());
-        first.binding = Binding::Catalogue;
-        first.complain("узлы сетки не годятся".to_string());
-        first.complain("узлы сетки не годятся".to_string());
-        assert_eq!(first.binding_trouble.as_deref(), Some("узлы сетки не годятся"));
-        first.complain("файл координат: сетка гуще растра".to_string());
-        assert_eq!(
-            first.binding_trouble.as_deref(),
-            Some("узлы сетки не годятся; файл координат: сетка гуще растра"),
-            "вторая причина не должна отменять первую"
-        );
-        first.relay(quad(), Binding::Projected);
-        assert_eq!(first.binding_trouble, None, "взятая привязка обязана снять жалобу");
-
-        // Тот же слой в обратном порядке: удача пришла первой, и жалоба
-        // соседа к ней уже не добавляется.
-        let mut second = overlay(Vec::new());
-        second.binding = Binding::Catalogue;
-        second.relay(quad(), Binding::Projected);
-        second.complain("узлы сетки не годятся".to_string());
-        assert_eq!(second.binding_trouble, None, "жалоба пережила прочитанную привязку");
-    }
-
-    /// Кэш узлов держит ровно нарисованные ячейки и не переживает перекладку
-    /// слоя.
-    ///
-    /// Обе беды тихие. Разросшийся кэш съедает память под ячейки, которых давно
-    /// не видно: ячейка нулевой ступени глобального растра — это тридцать
-    /// килобайт узлов, а ступеней шесть. Переживший перекладку — кладёт снимок по прежней рамке: адреса
-    /// ячеек у новой те же самые, отпечаток перекладку заметит и пересоберёт
-    /// патчи, а узлы им достанутся старые, и снимок останется стоять не на
-    /// своём месте.
-    #[test]
-    fn the_node_cache_keeps_what_is_drawn_and_nothing_else() {
-        let frame = Frame::quad([(60.0, 30.0), (60.0, 31.0), (59.0, 31.0), (59.0, 30.0)]);
-        let sizes = meta(1024, 1024);
-        let mut raster = raster(Role::Detailed, Some(meta(1024, 1024)));
-        let put = |raster: &mut Raster, cell: tiles::Addr, rect: [f64; 4]| {
-            raster.mesh.insert(cell, nodes_of(&frame, &sizes, rect));
-        };
-
-        put(&mut raster, (0, 0, 0), [0.0, 0.0, 512.0, 512.0]);
-        put(&mut raster, (0, 1, 0), [512.0, 0.0, 1024.0, 512.0]);
-
-        // Нарисована одна — вторая выпадает.
-        raster.keep_mesh(0, &[(0, 0, 0)]);
-        assert_eq!(raster.mesh.len(), 1, "лишняя ячейка осталась в кэше");
-        assert!(raster.mesh.contains_key(&(0, 0, 0)), "нарисованная ячейка пересчитается зря");
-
-        // Слой переложили — не годится ни одна.
-        raster.keep_mesh(1, &[(0, 0, 0)]);
-        assert!(raster.mesh.is_empty(), "узлы прежней рамки пережили перекладку");
-
-        // А следующая пересборка при той же перекладке чистить уже нечего:
-        // забудь `keep_mesh` записать перекладку — и кэш терялся бы каждый раз,
-        // то есть не работал бы вовсе, а заметить это можно было бы только по
-        // счётчику пересборок.
-        put(&mut raster, (0, 0, 0), [0.0, 0.0, 512.0, 512.0]);
-        raster.keep_mesh(1, &[(0, 0, 0)]);
-        assert_eq!(raster.mesh.len(), 1, "кэш очистился при той же перекладке");
-
-        // Новое описание растра тоже отменяет посчитанное: размеры входят в
-        // место узла наравне с рамкой.
-        raster.describe_as(meta(2048, 2048));
-        assert!(raster.mesh.is_empty(), "узлы прежних размеров пережили описание");
-    }
-
-    /// Прозрачность запечена в вершину, поэтому входит в отпечаток сама:
-    /// ползунок не двигает ни ячеек, ни уровня, ни привязки, и без неё снимок
-    /// не перерисовался бы вовсе.
-    #[test]
-    fn built_notices_a_change_of_opacity() {
-        let mut overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
-        let wanted = Wanted {
-            choice: Choice { role: Role::Detailed, fingerprint: "fp".into(), level: 2 },
-            want: tiles::Want { level: 2, target: 2, cells: vec![(2, 0, 0)], steps: 1, climbed: 0 },
-        };
-
-        let drawn = [((2, 0, 0), (2, 0, 0), 7, false)];
-        let opaque = overlay.built(&wanted, &drawn);
-        overlay.opacity = 0.5;
-
-        assert_ne!(opaque, overlay.built(&wanted, &drawn));
-    }
-
-    /// Отвергнутый подробный не занимает бюджета видеопамяти. Занимай он его,
-    /// потолок ячеек делился бы надвое, цель оставшемуся загрублялась бы на
-    /// уровень — и мутность вернулась бы через учёт, стоило открыть несколько
-    /// снимков разом.
-    #[test]
-    fn eclipsed_detail_takes_no_budget() {
-        let eclipsed = overlay(vec![
-            raster(Role::Preview, Some(meta(2422, 1940))),
-            raster(Role::Detailed, Some(meta(1500, 1202))),
-        ]);
-        assert_eq!(eclipsed.budgeted().count(), 1, "подробный бюджета не делит");
-
-        let useful = overlay(vec![
-            raster(Role::Preview, Some(meta(343, 343))),
-            raster(Role::Detailed, Some(meta(10980, 10980))),
-        ]);
-        assert_eq!(useful.budgeted().count(), 2, "а подробный по делу — делит");
-    }
-
-    /// Мерка — ширина, а не высота и не площадь. Растр, у которого больше и
-    /// то и другое, но у́же база, всё равно отвергается: земля на пиксель
-    /// считается по ширине, ею же выбирается уровень, и мерить разрешение
-    /// чем-то другим значило бы завести вторую мерку рядом с рабочей.
-    #[test]
-    fn detail_is_judged_by_width_not_by_area() {
-        let overlay = overlay(vec![
-            raster(Role::Preview, Some(meta(2422, 1940))),
-            // Площадь вдвое больше превью, высота — втрое, а ширина меньше.
-            raster(Role::Detailed, Some(meta(2000, 3000))),
-        ]);
-
-        let near = overlay.wanted(&look_at(&overlay, 1.0), u64::MAX, &store(), &Toll::default());
-
-        assert_eq!(near.len(), 1, "по ширине он грубее — значит не кладётся");
-        assert_eq!(near[0].choice.role, Role::Preview);
-    }
-
-    /// Подробнее своего предела детали источник не отдаст, сколько бы пикселей
-    /// в нём ни было записано: у JPEG 2000 глубокие уровни не влезают в бюджет
-    /// декодера, и растр вдвое шире превью, но с пределом на первом уровне,
-    /// даёт ровно ту же землю на пиксель.
-    #[test]
-    fn detail_is_judged_by_reachable_width_not_by_the_written_one() {
-        let coarse = limited(meta(4000, 4000), 1);
-        let overlay = overlay(vec![
-            raster(Role::Preview, Some(meta(2000, 2000))),
-            raster(Role::Detailed, Some(coarse)),
-        ]);
-
-        let near = overlay.wanted(&look_at(&overlay, 1.0), u64::MAX, &store(), &Toll::default());
-
-        assert_eq!(near.len(), 1, "4000 с пределом на первом уровне — это те же 2000");
-        assert_eq!(near[0].choice.role, Role::Preview);
-    }
-
-    /// Достижимую ширину считает `Meta::reachable`, а не сдвиг вправо. Разница
-    /// между ними — один пиксель на нечётной стороне, и решает она судьбу
-    /// растра целиком: 4001 с пределом на первом уровне даёт 2001 — на пиксель
-    /// подробнее превью, то есть кладётся. Сдвиг дал бы 2000 и отверг бы его
-    /// молча.
-    ///
-    /// Сама по себе разница мелка, но живёт она на шве: тот же `reachable`
-    /// отвечает логу и подписи слоя, и разойдись он с выбором — человеку
-    /// сказали бы одно, а решили за него другое.
-    #[test]
-    fn the_reachable_width_rounds_up_like_the_pyramid_does() {
-        let overlay = overlay(vec![
-            raster(Role::Preview, Some(meta(2000, 2000))),
-            raster(Role::Detailed, Some(limited(meta(4001, 4001), 1))),
-        ]);
-
-        assert!(
-            !overlay.detail_eclipsed(),
-            "4001 на первом уровне — это 2001, и он подробнее превью в 2000"
-        );
-    }
-
-    /// Подрезанный растр — неквадратный и нечётный: подпись называет обе его
-    /// стороны, и квадратный стенд не отличил бы ширину от высоты.
-    fn capped(role: Role, width: u32, height: u32, finest: u32) -> Raster {
-        raster(role, Some(limited(meta(width, height), finest)))
-    }
-
-    /// Предел детали доезжает до подписи слоя. Сам по себе он молчалив: растр
-    /// лёг, рисуется и выглядит исправным, — а приближающийся ждёт резкости,
-    /// которая никогда не придёт.
-    ///
-    /// Строка сверяется целиком: числа в ней стоя́т в своих ролях, и
-    /// перевёрнутая фраза содержит ровно те же два числа.
-    #[test]
-    fn a_capped_raster_says_so_in_the_layer_line() {
-        let native = overlay(vec![raster(Role::Detailed, Some(meta(4001, 3001)))]);
-        assert_eq!(native.said(true), "", "предела нет, а слой на что-то жалуется");
-
-        let capped = overlay(vec![capped(Role::Detailed, 4001, 3001, 1)]);
-        assert_eq!(capped.said(true), cap_line());
-    }
-
-    /// Пока слой не осел, предел молчит — а жалобы говорятся всегда: они про
-    /// случившееся и верны с той секунды, как случились. Обе — и растровая, и
-    /// привязочная.
-    #[test]
-    fn an_unsettled_layer_keeps_the_cap_quiet() {
-        let mut rasters = vec![capped(Role::Detailed, 4001, 3001, 1)];
-        rasters[0].trouble = Some("неполно: сорвался проход".into());
-        let mut overlay = overlay(rasters);
-        assert_eq!(overlay.said(false), "неполно: сорвался проход", "жалоба замолчала с пределом");
-
-        overlay.binding_trouble = Some("узлы сетки не годятся".into());
-        assert_eq!(overlay.said(false), "неполно: сорвался проход; узлы сетки не годятся");
-        assert!(!overlay.said(false).contains("подробнее"), "предел объявлен над недобранным");
-    }
-
-    /// Слой, кадра не спрашивающий, о пределе молчит — и молчит именно из-за
-    /// того, что он не в полёте: работы за ним и правда нет, так что одна
-    /// незанятость дала бы обратный ответ.
-    ///
-    /// Померено на живой грануле Sentinel-2: подпись встала на экран через
-    /// секунду после описания, когда подробного растра было прочитано 675 517
-    /// байт из 34 229 949 — один процент. Пересчёт желаемого к тому мигу ещё
-    /// не прошёл, слой в набор не попал, и `working` честно отвечал «нет».
-    #[test]
-    fn a_layer_out_of_the_frame_reports_no_cap() {
-        let overlay = overlay(vec![capped(Role::Detailed, 4001, 3001, 1)]);
-        let idle: Passes<&str> = Passes::default();
-
-        let out = overlay.report(None, &idle);
-        assert!(!out.working, "стенд не о том: слой считает, что работа идёт");
-        assert_eq!(out.trouble, "", "предел объявлен слоем, который кадра не спрашивает");
-        assert_eq!(out.detailed_trouble, "", "предел объявлен слоем, который кадра не спрашивает");
-
-        // Лестница в одну ступень и она же последняя — это и есть «добрано»:
-        // за ней не пойдёт следующая (`Want::climbing`).
-        let mine = Wanted {
-            choice: Choice { role: Role::Detailed, fingerprint: "fp".into(), level: 0 },
-            want: tiles::Want { level: 0, target: 0, cells: Vec::new(), steps: 1, climbed: 0 },
-        };
-        let settled = overlay.report(Some(&mine), &idle);
-        assert!(!settled.working, "стенд не о том: за осевшим слоем осталась работа");
-        // Деталь решает подробный — предел сказан о нём, остальному нечего.
-        assert_eq!(settled.detailed_trouble, cap_line());
-        assert_eq!(settled.trouble, "");
-
-        // А в полёте, но с непройденной лестницей, предел снова молчит: за этой
-        // ступенью пойдёт следующая, и пойдёт сама. Одного полёта поэтому мало
-        // ровно так же, как мало одной незанятости.
-        let climbing = Wanted {
-            choice: Choice { role: Role::Detailed, fingerprint: "fp".into(), level: 1 },
-            want: tiles::Want { level: 1, target: 0, cells: Vec::new(), steps: 2, climbed: 0 },
-        };
-        let midway = overlay.report(Some(&climbing), &idle);
-        assert!(midway.working, "стенд не о том: лестница считается пройденной");
-        assert_eq!(midway.trouble, "", "предел объявлен на полпути к цели");
-        assert_eq!(midway.detailed_trouble, "", "предел объявлен на полпути к цели");
-    }
-
-    /// Кадр может рисовать превью, пока подробный только описался: работы за
-    /// подробным в этот миг ещё нет — заказать он ничего не успел, — и «резче
-    /// не будет» про него сказано про то, чего на экране нет вовсе.
-    ///
-    /// Померено на живой грануле Sentinel-2: в логе `Preview уровень 0, ячеек
-    /// 1` — тайлы просило только превью, — а подпись о пределе подробного
-    /// встала на экран той же секундой, при десяти процентах прочитанного.
-    #[test]
-    fn a_frame_drawing_the_preview_says_nothing_of_the_detail_cap() {
-        let overlay = overlay(vec![
-            raster(Role::Preview, Some(meta(343, 343))),
-            capped(Role::Detailed, 4001, 3001, 1),
-        ]);
-        let idle: Passes<&str> = Passes::default();
-        let settled = |role| Wanted {
-            choice: Choice { role, fingerprint: "fp".into(), level: 0 },
-            want: tiles::Want { level: 0, target: 0, cells: Vec::new(), steps: 1, climbed: 0 },
-        };
-
-        assert!(!overlay.detail_eclipsed(), "стенд не о том: подробный отвергнут");
-        let on_preview = overlay.report(Some(&settled(Role::Preview)), &idle);
-        assert!(!on_preview.working, "стенд не о том: за слоем осталась работа");
-        assert_eq!(on_preview.trouble, "", "предел подробного назван поверх превью");
-        assert_eq!(on_preview.detailed_trouble, "", "предел подробного назван поверх превью");
-
-        let on_detail = overlay.report(Some(&settled(Role::Detailed)), &idle);
-        assert_eq!(on_detail.detailed_trouble, cap_line());
-        assert_eq!(on_detail.trouble, "", "предел подробного повторён вне слов о нём");
-    }
-
-    /// Предел называет тот растр, который деталь и решает. Превью обязано быть
-    /// грубее подробного — иначе подробный отвергнут, — и его собственный
-    /// предел о слое не говорит ничего: приблизившийся получит подробный.
-    ///
-    /// Случай не выдуманный: у Sentinel-2 оба растра JP2, а предел ставит
-    /// только он.
-    #[test]
-    fn the_cap_of_a_preview_says_nothing_while_the_detail_is_healthy() {
-        let overlay = overlay(vec![
-            capped(Role::Preview, 4001, 3001, 1),
-            raster(Role::Detailed, Some(meta(10980, 10980))),
-        ]);
-
-        assert!(!overlay.detail_eclipsed(), "стенд не о том: подробный отвергнут");
-        assert_eq!(overlay.said(true), "", "слой пожаловался на предел превью");
-    }
-
-    /// А когда подробный отвергнут, деталь решает превью — и назван его предел:
-    /// вот теперь приближение упрётся именно в него.
-    #[test]
-    fn a_rejected_detail_hands_the_cap_over_to_the_preview() {
-        let mut rasters =
-            vec![capped(Role::Preview, 4001, 3001, 1), raster(Role::Detailed, Some(meta(1500, 1200)))];
-        rasters[1].trouble = Some("не подробнее превью: подробный растр на шар не кладётся".into());
-        let overlay = overlay(rasters);
-
-        assert!(overlay.detail_eclipsed(), "стенд не о том: подробный не отвергнут");
-        assert_eq!(
-            overlay.said(true),
-            format!("не подробнее превью: подробный растр на шар не кладётся; {}", cap_line())
-        );
-        // Разложенное по тому, о ком сказано: отказ — о подробном, предел —
-        // о превью, которое деталь и решает.
-        let (about_detailed, rest) = overlay.said_split(true);
-        assert_eq!(about_detailed, "не подробнее превью: подробный растр на шар не кладётся");
-        assert_eq!(rest, cap_line());
-    }
-
-    /// Величина в отчёте — у лежащего подробным, а не у превью: имя файла
-    /// приславший ставит перед ней, и величина квиклука под именем подробного
-    /// файла читалась бы как его.
-    #[test]
-    fn the_report_names_the_detailed_rasters_variable_not_the_previews() {
-        let with_variable = |path: &str, meta: Meta| Meta {
-            variable: Some(tiles::Variable { path: path.into(), said: String::new(), units: "K".into() }),
-            ..meta
-        };
-        let idle: Passes<&str> = Passes::default();
-        let both = overlay(vec![
-            raster(Role::Preview, Some(with_variable("/quicklook", meta(1000, 1000)))),
-            raster(Role::Detailed, Some(with_variable("/F1_BT_fn", meta(4001, 3001)))),
-        ]);
-        let said = both.report(None, &idle).detailed_variable.expect("величина подробного");
-        assert_eq!((said.path.as_str(), said.units.as_str()), ("/F1_BT_fn", "K"));
-
-        let preview_only = overlay(vec![raster(Role::Preview, Some(with_variable("/quicklook", meta(1000, 1000))))]);
-        assert_eq!(preview_only.report(None, &idle).detailed_variable, None, "величина превью названа подробной");
-        let undescribed = overlay(vec![raster(Role::Detailed, None)]);
-        assert_eq!(undescribed.report(None, &idle).detailed_variable, None);
-    }
-
-    /// Другая величина у лежащего растра — описывать заново его одного: та же
-    /// величина и величина запасного не в счёт.
-    #[test]
-    fn a_raster_is_redescribed_only_when_its_own_variable_changes() {
-        let mut overlay = overlay(vec![raster(Role::Preview, Some(meta(1000, 1000))), raster(Role::Detailed, Some(meta(4001, 3001)))]);
-        let (preview, detailed) = (Role::Preview as u32 as u64 + 1, Role::Detailed as u32 as u64 + 1);
-        assert_eq!(overlay.revariabled(&[(preview, String::new()), (detailed, String::new())]), Vec::<Role>::new());
-        assert_eq!(overlay.revariabled(&[(preview, String::new()), (detailed, "/PRODUCT/qa_value".into())]), [Role::Detailed]);
-        // Названная запасному (другой ресурс) лежащего не трогает.
-        assert_eq!(overlay.revariabled(&[(preview, String::new()), (detailed, String::new()), (99, "/x".into())]), Vec::<Role>::new());
-        // Описанный с названной и присланный с пустой — тоже другой.
-        overlay.raster_mut(Role::Detailed).expect("подробный").variable = "/PRODUCT/qa_value".into();
-        assert_eq!(overlay.revariabled(&[(preview, String::new()), (detailed, String::new())]), [Role::Detailed]);
-    }
-
-    /// Отказ описания: названной величине — жалоба словами тайлера, запасной
-    /// остаётся при файле; без названной — запасной встаёт на место, а без
-    /// запасных — жалоба, названная ролью.
-    #[test]
-    fn a_refused_named_variable_keeps_the_file_and_its_spares() {
-        let with_spare = |role: Role| {
-            let mut raster = raster(role, None);
-            raster.spares.push((3, veldsdk::OwnedResource::from_raw_id(7), None));
-            raster
-        };
-        let mut named = with_spare(Role::Detailed);
-        named.variable = "/x".into();
-        assert!(named.refused("NetCDF: '/x' пуста в выборке".into()).is_none(), "запасной встал на место отвергнутого выбора");
-        assert_eq!(named.trouble.as_deref(), Some("NetCDF: '/x' пуста в выборке"));
-        assert_eq!(named.spares.len(), 1, "запасной ушёл");
-
-        let mut plain = with_spare(Role::Detailed);
-        let next = plain.refused("сломан".into()).expect("запасной встаёт на место");
-        assert_eq!((next.0.id, plain.ordinal), (7, 3));
-        assert_eq!(plain.trouble, None, "жалоба у растра, начатого с чистого");
-
-        let mut alone = raster(Role::Preview, None);
-        assert!(alone.refused("сломан".into()).is_none());
-        assert_eq!(alone.trouble.as_deref(), Some("превью не открылось: сломан"));
-    }
-
-    /// Слой хоронится, только когда не описался никто и никто не ждал
-    /// названной величины: отвергнутый выбор — не отказ файла.
-    #[test]
-    fn a_layer_with_a_refused_named_variable_is_not_doomed() {
-        let mut named = raster(Role::Detailed, None);
-        named.variable = "/x".into();
-        assert!(!overlay(vec![named]).doomed(), "отказ названной похоронил слой");
-        assert!(overlay(vec![raster(Role::Detailed, None)]).doomed(), "слой без описаний и без выбора жив");
-        assert!(!overlay(vec![raster(Role::Preview, Some(meta(10, 10))), raster(Role::Detailed, None)]).doomed());
-    }
-
-    /// Список величин переживает отказ описания: отчёт называет его, пока
-    /// растр без описания, — иначе после отказа названной другую не выбрать.
-    #[test]
-    fn the_variable_list_outlives_a_refused_description() {
-        let named = |path: &str| tiles::Variable { path: path.into(), said: String::new(), units: String::new() };
-        let mut described = meta(4001, 3001);
-        described.variables = vec![named("/a"), named("/b")];
-        let mut detailed = raster(Role::Detailed, None);
-        detailed.describe_as(described);
-        detailed.meta = None;
-        detailed.trouble = Some("NetCDF: '/b' пуста в выборке".into());
-        let overlay = overlay(vec![raster(Role::Preview, Some(meta(1000, 1000))), detailed]);
-        let idle: Passes<&str> = Passes::default();
-        let report = overlay.report(None, &idle);
-        assert_eq!(report.detailed_variables.iter().map(|v| v.path.as_str()).collect::<Vec<_>>(), ["/a", "/b"]);
-        assert_eq!(report.detailed_variable, None, "без описания показанной нет");
-    }
-
-    /// Предел детали ложится к подробному растру, когда деталь решает он, и
-    /// к остальному — когда превью; отказ превью и отказ привязки — всегда к
-    /// остальному, под именем подробного файла они читались бы как его.
-    #[test]
-    fn the_split_puts_the_cap_with_whoever_decides_the_detail() {
-        let mut overlay =
-            overlay(vec![raster(Role::Preview, Some(meta(1000, 1000))), capped(Role::Detailed, 4001, 3001, 1)]);
-        overlay.rasters[0].trouble = Some("квиклук не читается".into());
-        overlay.binding_trouble = Some("узлы сетки не годятся".into());
-        let (about_detailed, rest) = overlay.said_split(true);
-        assert_eq!(about_detailed, cap_line(), "подробный решает деталь — предел о нём");
-        assert_eq!(rest, "квиклук не читается; узлы сетки не годятся");
-        assert_eq!(overlay.said(true), format!("квиклук не читается; {}; узлы сетки не годятся", cap_line()));
-    }
-
-    /// Отвергнутый растр не вправе замолчать предел слоя, даже сравнявшись с
-    /// превью: отвергают его по `detail <= base`, то есть равенство — уже
-    /// отказ. Взятый наравне с кладущимися, он оказался бы самым подробным из
-    /// найденных, своего предела не имеет — и слой промолчал бы о чужом.
-    #[test]
-    fn a_rejected_detail_of_equal_width_does_not_mute_the_cap() {
-        let mut rasters =
-            vec![capped(Role::Preview, 4001, 3001, 1), raster(Role::Detailed, Some(meta(2001, 1501)))];
-        rasters[1].trouble = Some("не подробнее превью: подробный растр на шар не кладётся".into());
-        let overlay = overlay(rasters);
-
-        assert!(overlay.detail_eclipsed(), "стенд не о том: равенство обязано быть отказом");
-        assert!(
-            overlay.said(true).contains(&cap_line()),
-            "предел слоя замолчал отвергнутым растром: {}",
-            overlay.said(true)
-        );
-    }
-
-    /// Жалоба на привязку по-прежнему доезжает до человека и стои́т последней:
-    /// для смотрящего это один вопрос, и потеряться она не вправе.
-    #[test]
-    fn the_binding_complaint_still_comes_last() {
-        let mut overlay = overlay(vec![capped(Role::Detailed, 4001, 3001, 1)]);
-        overlay.binding_trouble = Some("узлы сетки не годятся".into());
-
-        assert_eq!(overlay.said(true), format!("{}; узлы сетки не годятся", cap_line()));
-    }
-
-    /// А без превью подробный кладётся, каким бы он ни был: сравнивать не с
-    /// чем, и другого растра у слоя нет.
-    #[test]
-    fn detail_without_a_preview_is_laid_whatever_it_is() {
-        let overlay = overlay(vec![raster(Role::Detailed, Some(meta(1500, 1202)))]);
-
-        let near = overlay.wanted(&look_at(&overlay, 1.0), u64::MAX, &store(), &Toll::default());
-
-        assert_eq!(near.len(), 1);
-        assert_eq!(near[0].choice.role, Role::Detailed);
-    }
-
-    /// Уровень под экранный пиксель: 40 м/px против 10 м/px родных дают
-    /// второй, вплотную — нулевой.
-    #[test]
-    fn sharpest_level_follows_the_screen_pixel() {
-        let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
-        let detailed = meta(10980, 10980);
-        let level = |mpp| overlay.sharpest(&detailed, &look_at(&overlay, mpp));
-        assert_eq!(level(40.0), 2);
-        assert_eq!(level(5.0), 0);
-    }
-
-    /// Потолок аппетита загрубляет цель — но меряется он видимым, а не уровнем
-    /// целиком: снимок виден весь, и 22×22 ячейки нулевого уровня в потолок из
-    /// ста не влезают, 11×11 первого — тоже, 6×6 второго — да. (Само правило
-    /// живёт в `tiles::want`; здесь проверяется, что наложение приносит туда
-    /// именно видимое.)
-    #[test]
-    fn tile_cap_coarsens_target() {
-        let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
-        let look = look_at(&overlay, 5.0);
-        assert_eq!(overlay.visible(&meta(10980, 10980), &[], 2, &look, &Toll::default()).len(), 36, "видно все ячейки");
-        // Цель видна через длину лестницы: от вершины (пятый уровень) до неё
-        // включительно — четыре ступени, то есть цель вторая.
-        assert_eq!(overlay.wanted(&look, 100, &store(), &Toll::default())[0].want.steps, 4);
-    }
-
-    /// Пустое хранилище — и просят вершину пирамиды, а не целевой уровень:
-    /// снимок появляется целиком грубым, пока подробные тайлы едут (см.
-    /// `tiles::rung`).
-    #[test]
-    fn empty_store_asks_for_the_top_of_the_pyramid() {
-        let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
-        let wanted = overlay.wanted(&look_at(&overlay, 5.0), u64::MAX, &store(), &Toll::default());
-        assert_eq!(wanted[0].choice.level, meta(10980, 10980).levels() - 1);
-        assert_eq!(wanted[0].want.cells.len(), 1, "вершина — один тайл");
-    }
-
-    /// Из кадра выпавшее не просят: камера, отведённая на другую сторону
-    /// Земли, не хочет от этого снимка ни одной ячейки.
-    #[test]
-    fn hidden_side_wants_nothing() {
-        let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
-        let (lat, lon) = overlay.frame.geodetic(0.5, 0.5);
-        let mut camera = crate::module::camera::Camera::default();
-        camera.focus(-lat, lon + 180.0, 1.0);
-        camera.advance(10.0);
-        let look = Look { view_proj: camera.view_projection(1.0), eye: camera.eye(), mpp: 5.0 };
-        assert!(overlay.wanted(&look, u64::MAX, &store(), &Toll::default())[0].want.cells.is_empty());
-    }
-
-    /// Без описанных растров выбирать не из чего.
-    #[test]
-    fn no_meta_no_choices() {
-        let overlay = overlay(vec![raster(Role::Preview, None)]);
-        assert!(overlay.wanted(&look_at(&overlay, 100.0), u64::MAX, &store(), &Toll::default()).is_empty());
-    }
-
-    fn tie(fx: f64, fy: f64, lat: f64, lon: f64) -> Tie {
-        Tie { fx, fy, lat, lon }
-    }
-
-    /// Сетка кладёт растр так, как сказано в нём самом, — и это не то же самое,
-    /// что обход контура из каталога.
-    ///
-    /// Числа настоящие: гранула Sentinel-1 нисходящего витка. В файле первый
-    /// пиксель — северо-восточный угол (радар смотрит вправо, то есть на запад,
-    /// а строки идут с севера); контур того же продукта каталог отдаёт начиная
-    /// с юго-восточного. Прочтя контур обходом растра, снимок кладут повёрнутым
-    /// на четверть оборота — эта разница здесь и записана.
-    #[test]
-    fn grid_binds_the_raster_the_way_the_file_says() {
-        let (ne, nw) = ((73.395, 2.707), (74.524, -10.409));
-        let (sw, se) = ((70.979, -12.618), (70.005, -1.639));
-        let grid = Grid::new(&[
-            tie(0.0, 0.0, ne.0, ne.1),
-            tie(1.0, 0.0, nw.0, nw.1),
-            tie(0.0, 1.0, se.0, se.1),
-            tie(1.0, 1.0, sw.0, sw.1),
-        ])
-        .expect("решётка 2×2");
-        let frame = Frame::Grid(grid);
-        assert_eq!(frame.geodetic(0.0, 0.0), ne, "первый пиксель — где сказал файл");
-        assert_eq!(frame.geodetic(1.0, 1.0), sw);
-
-        // Тот же продукт контуром каталога, прочитанным обходом растра: его
-        // первая вершина — юго-восточный угол, и снимок оказывается повёрнут.
-        let quad = Frame::quad([se, ne, nw, sw]);
-        assert_eq!(quad.geodetic(0.0, 0.0), se);
-        assert_ne!(quad.geodetic(0.0, 0.0), frame.geodetic(0.0, 0.0));
-    }
-
-    /// Между узлами показ идёт по решётке, а не по её углам: середина верхнего
-    /// ребра — там, где стоит её узел. Этим сетка и отличается от квада —
-    /// кривизну снимка в геометрии съёмки четырьмя углами не передать.
-    #[test]
-    fn grid_follows_its_nodes_between_the_corners() {
-        let grid = Grid::new(&[
-            tie(0.0, 0.0, 60.0, 0.0),
-            tie(0.5, 0.0, 61.0, 10.0),
-            tie(1.0, 0.0, 60.0, 20.0),
-            // Нижний ряд у́же верхнего: мерку берут самую широкую, и без
-            // этого победил бы он — плоский, где сумма звеньев равна хорде, и
-            // различать их стало бы не на чем.
-            tie(0.0, 1.0, 50.0, 5.0),
-            tie(0.5, 1.0, 50.0, 10.0),
-            tie(1.0, 1.0, 50.0, 15.0),
-        ])
-        .expect("решётка 3×2");
-        let frame = Frame::Grid(grid);
-        // Узел выпирает на градус к северу — квад по тем же углам дал бы 60.
-        assert_eq!(frame.geodetic(0.5, 0.0), (61.0, 10.0));
-        // Между узлами — билинейно: четверть пути вниз от выпирающего узла.
-        let (lat, lon) = frame.geodetic(0.5, 0.25);
-        assert!((lat - 58.25).abs() < 1e-12, "{}", lat);
-        assert!((lon - 10.0).abs() < 1e-12, "{}", lon);
-        // Метр на пиксель — по самому широкому ряду целиком, и ряд этот идёт по
-        // узлам, а не по хорде между его концами: выпирающий узел делает его
-        // длиннее, и снимок на этой ширине лежит именно такой.
-        let mpp = frame.ground_m_per_px(100).expect("рамка измерима");
-        let along = ground_span((60.0, 0.0), (61.0, 10.0)) + ground_span((61.0, 10.0), (60.0, 20.0));
-        assert!((mpp - along / 100.0).abs() < 1e-9, "{}", mpp);
-        assert!(along > ground_span((60.0, 0.0), (60.0, 20.0)), "по узлам длиннее хорды");
-    }
-
-    /// Полярный растр не теряет уровней пирамиды.
-    ///
-    /// Глобальная градусная сетка приходит из GeoTIFF четырьмя углами, и лежат
-    /// они ровно на полюсах: оба ряда узлов вырождены в точку, и мерка по
-    /// любому из них — не «очень мелко», а сотые доли пикометра. Занижённая
-    /// так, она уводит выбор уровня на полсотни ступеней, тот упирается в
-    /// вершину пирамиды, и снимок во всю Землю показывается размером в один
-    /// тайл — навсегда и без единого отказа.
-    #[test]
-    fn a_polar_grid_does_not_lose_its_levels() {
-        let grid = Grid::new(&[
-            tie(0.0, 0.0, 90.0, -180.0),
-            tie(1.0, 0.0, 90.0, 180.0),
-            tie(0.0, 1.0, -90.0, -180.0),
-            tie(1.0, 1.0, -90.0, 180.0),
-        ])
-        .expect("решётка 2×2 во всю Землю");
-        let frame = Frame::Grid(grid);
-        let mpp = frame.ground_m_per_px(43200).expect("рамка измерима");
-        // Экватор — 40 075 км на 43 200 пикселей.
-        assert!((mpp - 927.66).abs() < 1.0, "мерка мимо экватора: {}", mpp);
-
-        // И уровень выбирается тот, что нужен, а не вершина: экранному пикселю
-        // в семь с половиной километров отвечает третья ступень.
-        let overlay = Overlay { frame, ..overlay(vec![raster(Role::Detailed, None)]) };
-        let meta = meta(43200, 21600);
-        let look = Look { view_proj: camera::Mat4::IDENTITY, eye: [0.0; 3], mpp: 7500.0 };
-        assert_eq!(overlay.sharpest(&meta, &look), 3, "уровень мимо");
-    }
-
-    /// Мерку берут по самому широкому ряду, а не по первому попавшемуся.
-    ///
-    /// У габарита от полюса до полюса вырождены оба края разом, и спасает
-    /// только середина; у полярной сетки — верхний. Верхний ряд как мерка
-    /// занижает ровно в косинус своей широты: на восьмидесятой параллели
-    /// впятеро, то есть два с половиной уровня мимо.
-    #[test]
-    fn the_measure_takes_the_widest_row_not_the_first() {
-        let grid = Grid::new(&[
-            tie(0.0, 0.0, 80.0, -180.0),
-            tie(1.0, 0.0, 80.0, 180.0),
-            tie(0.0, 1.0, 0.0, -180.0),
-            tie(1.0, 1.0, 0.0, 180.0),
-        ])
-        .expect("решётка от восьмидесятой до экватора");
-        let frame = Frame::Grid(grid);
-        let mpp = frame.ground_m_per_px(1000).expect("рамка измерима");
-        let top = ground_span((80.0, -180.0), (80.0, 0.0)) + ground_span((80.0, 0.0), (80.0, 180.0));
-        assert!(mpp * 1000.0 > top * 5.0, "взят верхний ряд: {} против {}", mpp * 1000.0, top);
-    }
-
-    /// Решётка, у которой вырожден один край, решёткой быть не перестаёт.
-    ///
-    /// Верхний ряд полярной сетки сходится в точку — это свойство раскладки, а
-    /// не признак того, что привязки нет. Линию от решётки отличает вырождение
-    /// всех рядов или всех столбцов, а не первого попавшегося: судивший по
-    /// одному отверг бы годную привязку и оставил снимок лежать по контуру
-    /// каталога.
-    #[test]
-    fn a_grid_with_one_collapsed_edge_is_still_a_grid() {
-        let grid = Grid::new(&[
-            // Верхний ряд сошёлся в полюс: оба узла — одна и та же точка.
-            tie(0.0, 0.0, 90.0, 0.0),
-            tie(1.0, 0.0, 90.0, 0.0),
-            tie(0.0, 1.0, 0.0, -90.0),
-            tie(1.0, 1.0, 0.0, 90.0),
-        ]);
-        assert!(grid.is_some(), "решётка с вырожденным рядом принята за линию");
-
-        // И зеркально: сошедшийся столбец — тоже раскладка, а не отсутствие
-        // привязки. Так ложится веер, у которого левый край упирается в точку.
-        let fan = Grid::new(&[
-            tie(0.0, 0.0, 0.0, 0.0),
-            tie(1.0, 0.0, 60.0, 90.0),
-            tie(0.0, 1.0, 0.0, 0.0),
-            tie(1.0, 1.0, -60.0, 90.0),
-        ]);
-        assert!(fan.is_some(), "решётка с вырожденным столбцом принята за линию");
-    }
-
-    /// Квад меряется тем же правилом, что и решётка, — самым широким рядом.
-    ///
-    /// Своей ветви у него нет, и это не экономия: вопрос у обеих рамок один —
-    /// сколько земли приходится на ширину растра, — а вырождение верхнего края
-    /// одинаково бьёт и по четырём углам, и по узлам. Разведённые по своим
-    /// веткам, эти двое разошлись бы молча.
-    #[test]
-    fn a_quad_is_measured_by_its_widest_row_too() {
-        // Контур в северных широтах: верхнее ребро короче нижнего ровно в
-        // отношении косинусов, и мерка обязана взять нижнее.
-        let frame = Frame::quad([(80.0, 0.0), (80.0, 40.0), (50.0, 40.0), (50.0, 0.0)]);
-        let mpp = frame.ground_m_per_px(1000).expect("рамка измерима");
-        let top = ground_span((80.0, 0.0), (80.0, 40.0));
-        let bottom = ground_span((50.0, 0.0), (50.0, 40.0));
-        assert!(bottom > top * 3.0, "выборка вырождена: {} против {}", bottom, top);
-        assert!(
-            (mpp * 1000.0 - bottom).abs() < bottom * 0.01,
-            "мерка взяла не самый широкий ряд: {} против {}",
-            mpp * 1000.0,
-            bottom
-        );
-    }
-
-    /// Широкий ряд между пробами решётка не теряет.
-    ///
-    /// Пробы берут доли 0, 0,5 и 1, а ряды решётки стоят где им угодно. Принятая
-    /// `Grid::new` решётка обязана остаться измеримой: ворота там считают по
-    /// узлам, и разойдись эти двое — слой лёг бы с жалобой «контур сошёлся в
-    /// точку», хотя привязка у него есть и она решёточная.
-    #[test]
-    fn a_wide_row_between_the_probes_is_not_lost() {
-        // Три столбца, а не два: ряд из двух узлов на −170 и 170 разворот ведёт
-        // коротким путём через антимеридиан, и широким он быть перестаёт.
-        // Средний узел говорит, что идти надо длинным.
-        let mut ties = Vec::new();
-        for (row, (lat, half)) in
-            [(80.0, 1.0), (60.0, 170.0), (40.0, 1.0), (20.0, 1.0), (0.0, 1.0)].iter().enumerate()
-        {
-            let fy = f64::from(row as u32) / 4.0;
-            ties.push(tie(0.0, fy, *lat, -half));
-            ties.push(tie(0.5, fy, *lat, 0.0));
-            ties.push(tie(1.0, fy, *lat, *half));
-        }
-        let grid = Grid::new(&ties).expect("решётка 3×5");
-        let frame = Frame::Grid(grid);
-        let mpp = frame.ground_m_per_px(1000).expect("рамка измерима");
-        // Широкий ряд лежит на четверти высоты — мимо всех трёх проб.
-        let wide = ground_span((60.0, -170.0), (60.0, 0.0)) + ground_span((60.0, 0.0), (60.0, 170.0));
-        assert!(
-            mpp * 1000.0 > wide * 0.99,
-            "ряд между пробами потерян: {} против {}",
-            mpp * 1000.0,
-            wide
-        );
-    }
-
-    /// Точки, не образующие решётки, — не привязка: гадать по ним нечего, и
-    /// наложение остаётся на прежней.
-    #[test]
-    fn grid_needs_a_full_lattice() {
-        assert!(Grid::new(&[tie(0.0, 0.0, 1.0, 1.0)]).is_none(), "одна точка");
-        assert!(
-            Grid::new(&[tie(0.0, 0.0, 1.0, 1.0), tie(1.0, 0.0, 1.0, 2.0), tie(0.0, 1.0, 0.0, 1.0)])
-                .is_none(),
-            "угла не хватает"
-        );
-    }
-
-    /// Глобальный растр лежит решёткой в два узла на строку, и края его
-    /// записаны как −180 → 180. Свёрнутые к ближней ветви, они дают нулевую
-    /// ширину — ту самую, на которую потом делят, выбирая уровень.
-    #[test]
-    fn a_whole_earth_grid_keeps_its_full_turn() {
-        let world = Grid::new(&[
-            tie(0.0, 0.0, 80.0, -180.0),
-            tie(1.0, 0.0, 80.0, 180.0),
-            tie(0.0, 1.0, -60.0, -180.0),
-            tie(1.0, 1.0, -60.0, 180.0),
-        ])
-        .expect("глобальная решётка — привязка");
-        let frame = Frame::Grid(world);
-        let mpp = frame.ground_m_per_px(14_400).expect("рамка измерима");
-        // Ширина Земли по 80-й параллели — около семи тысяч километров, и на
-        // четырнадцать тысяч отсчётов это сотни метров, а не ноль.
-        assert!(mpp > 100.0, "{} м на отсчёт", mpp);
-        // Середина строки приходится на нулевой меридиан, а не на шов.
-        let (lat, lon) = frame.geodetic(0.5, 0.0);
-        assert!((lat - 80.0).abs() < 1e-9, "{}", lat);
-        assert!(lon.abs() < 1e-9, "середина глобальной строки на {}°", lon);
-    }
-
-    /// Решётка по долям растра — ещё не привязка: у трека надирного прибора
-    /// поперёк протяжённости нет вовсе, и на Земле такая «решётка» ложится
-    /// линией. Квады по ней нулевой площади, а её ширина делит выбор уровня.
-    #[test]
-    fn a_lattice_flattened_on_the_ground_is_not_a_binding() {
-        // Доли раскладываются честной сеткой 2×2, а на Земле все четыре узла
-        // стоя́т на одном меридиане: снятого поперёк трека нет.
-        let track = Grid::new(&[
-            tie(0.0, 0.0, 60.0, 10.0),
-            tie(1.0, 0.0, 60.0, 10.0),
-            tie(0.0, 1.0, 50.0, 10.0),
-            tie(1.0, 1.0, 50.0, 10.0),
-        ]);
-        assert!(track.is_none(), "линия принята за решётку");
-
-        // И то же вдоль: без хода по строкам решётки тоже нет.
-        assert!(
-            Grid::new(&[
-                tie(0.0, 0.0, 60.0, 10.0),
-                tie(1.0, 0.0, 60.0, 20.0),
-                tie(0.0, 1.0, 60.0, 10.0),
-                tie(1.0, 1.0, 60.0, 20.0),
-            ])
-            .is_none(),
-            "лента без высоты принята за решётку"
-        );
-    }
-
-    /// Рамка по краям и то же преобразование аффинным — одно и то же: углы
-    /// обязаны сойтись до последнего разряда. Иначе обобщение сдвинуло бы все
-    /// гранулы Sentinel-2, привязанные раскладкой MGRS, и заметить это было бы
-    /// нечем — рамка осталась бы правдоподобной.
-    ///
-    /// Тем же утверждением держится знак по Y: `y1` — северный край, а доля
-    /// растра идёт вниз.
-    #[test]
-    fn the_edges_and_the_affine_name_one_frame() {
-        let zone: projection::Projection = projection::System::utm(40, false).into();
-        let (x0, y0, x1, y1) = (600_000.0, 7_690_200.0, 709_800.0, 7_800_000.0);
-        let frame = Frame::utm(zone, x0, y0, x1, y1);
-
-        for (fx, fy, x, y) in [
-            (0.0, 0.0, x0, y1),
-            (1.0, 0.0, x1, y1),
-            (0.0, 1.0, x0, y0),
-            (1.0, 1.0, x1, y0),
-            (0.5, 0.5, (x0 + x1) / 2.0, (y0 + y1) / 2.0),
-        ] {
-            assert_eq!(frame.geodetic(fx, fy), zone.to_geodetic(x, y), "{} {}", fx, fy);
-        }
-    }
-
-    /// Привязка, названная в пикселях, доезжает до рамки долями — и края
-    /// сходятся с тем, что даёт то же преобразование, посчитанное в пикселях
-    /// напрямую.
-    ///
-    /// Растр неквадратный намеренно: перепутанные ширина с высотой сошлись бы
-    /// на квадратном и разъехались бы на всяком другом, а поворот в привязке
-    /// не даёт им спрятаться за нулём.
-    #[test]
-    fn a_placement_in_pixels_becomes_a_frame_in_fractions() {
-        let zone: projection::Projection = projection::System::utm(38, false).into();
-        let (width, height) = (7956u32, 7740u32);
-        // Шаг 30 м с небольшим перекосом: внедиагональные члены не нулевые.
-        let affine = [30.0, 2.0, 499_536.0, -1.0, -30.0, 7_693_329.0];
-        let frame = Frame::placed(zone, affine, width, height);
-
-        let at = |i: f64, j: f64| {
-            zone.to_geodetic(
-                affine[0] * i + affine[1] * j + affine[2],
-                affine[3] * i + affine[4] * j + affine[5],
-            )
-        };
-        let (w, h) = (f64::from(width), f64::from(height));
-        for (fx, fy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.25, 0.75)] {
-            assert_eq!(frame.geodetic(fx, fy), at(fx * w, fy * h), "доля {} {}", fx, fy);
-        }
-    }
-
-    /// Поворот привязки доезжает до места на Земле, а не теряется по дороге:
-    /// у растра, снятого не по осям зоны, внедиагональные члены и есть вся
-    /// привязка. Выброшенные, они положили бы снимок ровно, но не туда.
-    #[test]
-    fn a_rotated_binding_turns_the_raster() {
-        let zone: projection::Projection = projection::System::utm(38, false).into();
-        // Восток растра идёт на север зоны: сто километров вбок — это сто
-        // километров вверх.
-        let turned =
-            Frame::Projected { system: zone, affine: [0.0, 0.0, 500_000.0, 100_000.0, 0.0, 7_000_000.0] };
-        let (lat_left, _) = turned.geodetic(0.0, 0.0);
-        let (lat_right, lon_right) = turned.geodetic(1.0, 0.0);
-
-        assert!(lat_right - lat_left > 0.8, "правый край севернее на {}°", lat_right - lat_left);
-        let (_, lon_left) = turned.geodetic(0.0, 0.0);
-        assert!((lon_right - lon_left).abs() < 0.05, "и почти на том же меридиане");
-    }
-
-    /// Метры на пиксель у повёрнутой привязки считаются по длине вектора, а не
-    /// по его члену на восток: растр, лежащий под сорок пять градусов, иначе
-    /// отчитался бы о косинусной доле своей ширины и уехал бы на ступень
-    /// пирамиды мимо.
-    #[test]
-    fn a_rotated_binding_reports_its_whole_width() {
-        let zone: projection::Projection = projection::System::utm(38, false).into();
-        let side = 100_000.0;
-        let straight =
-            Frame::Projected { system: zone, affine: [side, 0.0, 500_000.0, 0.0, -side, 7_000_000.0] };
-        // Тот же квадрат, повёрнутый на сорок пять градусов.
-        let leg = side * std::f64::consts::FRAC_1_SQRT_2;
-        let diagonal =
-            Frame::Projected { system: zone, affine: [leg, leg, 500_000.0, leg, -leg, 7_000_000.0] };
-
-        let (straight, diagonal) = (
-            straight.ground_m_per_px(1000).expect("прямой"),
-            diagonal.ground_m_per_px(1000).expect("повёрнутый"),
-        );
-        assert!((diagonal - straight).abs() < 1e-9, "{} против {}", diagonal, straight);
-        assert!((diagonal - side / 1000.0).abs() < 1e-9, "{}", diagonal);
-
-        // Квадрат под сорок пять градусов — случай удобный, но слепой: у него
-        // все четыре члена равны по модулю, и любая их пара даёт ту же
-        // гипотенузу. Спрошено про ширину, поэтому взяться она обязана из
-        // столбца `fx`, а перекошенная рамка это и показывает.
-        let skewed = Frame::Projected {
-            system: zone,
-            affine: [300_000.0, 40_000.0, 500_000.0, 30_000.0, -200_000.0, 7_000_000.0],
-        };
-        let want = 300_000.0f64.hypot(30_000.0) / 1000.0;
-        let got = skewed.ground_m_per_px(1000).expect("перекошенный");
-        assert!((got - want).abs() < 1e-9, "{} вместо {}", got, want);
-    }
-
-    /// Привязка из растра доезжает до рамки, а непереводимая система — до
-    /// внятного отказа: её код обязан остаться в причине, иначе «привязки нет»
-    /// не отличить от «эту систему мы не умеем», и разбирать жалобу будет
-    /// нечем.
-    #[test]
-    fn a_placement_becomes_a_frame_or_a_reason() {
-        // Числа настоящей сцены Landsat-5: зона 38 северная, шаг 30 м.
-        let said = |epsg, x_per_i: f64| Placement {
-            epsg,
-            x_per_i,
-            x_per_j: 0.0,
-            x0: 499_536.0,
-            y_per_i: 0.0,
-            y_per_j: -30.0,
-            y0: 7_693_329.0,
-            width: 7956,
-            height: 7740,
-        };
-
-        let frame = Frame::from_placement(&said(32638, 30.0)).expect("зона 38");
-        let zone: projection::Projection = projection::System::utm(38, false).into();
-        let affine = [30.0, 0.0, 499_536.0, 0.0, -30.0, 7_693_329.0];
-        for (fx, fy) in [(0.0, 0.0), (1.0, 1.0), (0.3, 0.7)] {
-            assert_eq!(
-                frame.geodetic(fx, fy),
-                Frame::placed(zone, affine, 7956, 7740).geodetic(fx, fy)
-            );
-        }
-
-        let why = |placement: Placement| match Frame::from_placement(&placement) {
-            Err(reason) => reason,
-            Ok(_) => panic!("EPSG:{} привязкой быть не должен", placement.epsg),
-        };
-        let refused = why(said(3031, 30.0));
-        assert!(refused.contains("3031"), "код обязан остаться в причине: {}", refused);
-
-        // Числам из сообщения здесь не верят: обещание производителя — не
-        // проверка, а соврать полем можно и не желая того.
-        let nonsense = why(said(32638, f64::NAN));
-        assert!(nonsense.contains("32638"), "{}", nonsense);
-
-        // Преобразование без протяжённости: рамка вышла бы правдоподобной, а
-        // уровень пирамиды по ней не выбрать никогда.
-        let dead = why(said(32638, 0.0));
-        assert!(dead.contains("32638"), "{}", dead);
-    }
-
-    /// Растр крайней зоны у стыка не рвётся: обратная проекция отдаёт долготу
-    /// непрерывной ветвью вокруг осевого меридиана, а не в (−180, 180]. Свёрнутая
-    /// в этот отрезок, она развела бы соседние узлы варп-сетки на весь круг, и
-    /// снимок растянуло бы через всю Землю.
-    #[test]
-    fn a_frame_at_the_seam_stays_in_one_branch() {
-        let zone: projection::Projection = projection::System::utm(60, false).into();
-        // Осевой меридиан зоны 60 — 177°, и её восточный край лежит за стыком:
-        // рамка от осевого меридиана до предельного для UTM отступа его
-        // пересекает.
-        let frame = Frame::utm(zone, 500_000.0, 5_000_000.0, 830_000.0, 5_100_000.0);
-        let (_, left) = frame.geodetic(0.0, 0.5);
-        let (_, right) = frame.geodetic(1.0, 0.5);
-
-        assert!((left - 177.0).abs() < 0.01, "левый край на осевом меридиане: {}", left);
-        assert!(right > 180.0, "правый край за стыком: {}", right);
-        // Разорванная ветвь дала бы правый край около −179°, то есть ход
-        // назад почти на полный круг.
-        assert!(right - left < 10.0, "ветвь одна: {} … {}", left, right);
-    }
-
-    /// Рамка без протяжённости не отвечает на «сколько земли на пиксель»: ноль
-    /// делит выбор уровня на себя, и слой навсегда остаётся вершиной пирамиды.
-    /// Ширина при этом берётся по модулю — какой край рамки проекции левее,
-    /// контракт не оговаривает.
-    #[test]
-    fn a_frame_without_extent_answers_nothing() {
-        let point = Frame::Quad([(10.0, 20.0); 4]);
-        assert!(point.ground_m_per_px(100).is_none());
-        assert!(!point.measurable());
-
-        let zone: projection::Projection = projection::System::utm(33, false).into();
-        let backwards = Frame::utm(zone, 700_000.0, 0.0, 600_000.0, 100_000.0);
-        let forwards = Frame::utm(zone, 600_000.0, 0.0, 700_000.0, 100_000.0);
-        assert_eq!(backwards.ground_m_per_px(100), forwards.ground_m_per_px(100));
-        assert!(backwards.ground_m_per_px(100).is_some_and(|mpp| mpp > 0.0));
-
-        // Бесконечная ширина протяжённостью тоже не является, и одним сравнением
-        // с нулём её не поймать: бесконечность больше нуля. Не-число сравнение
-        // отсекает само — `NaN > 0` ложно, — а бесконечность проходит насквозь и
-        // даёт метры на пиксель, которых не бывает.
-        let boundless = |x: f64| Frame::Projected {
-            system: zone,
-            affine: [x, 0.0, 0.0, 0.0, -100_000.0, 100_000.0],
-        };
-        assert!(boundless(f64::INFINITY).ground_m_per_px(100).is_none(), "бесконечность");
-        assert!(!boundless(f64::INFINITY).measurable());
-        assert!(boundless(f64::NAN).ground_m_per_px(100).is_none(), "не-число");
-    }
-
-    /// Решётка в четыре узла говорит не больше, чем аффинная привязка: между
-    /// углами интерполируется то же линейное. Гуще четырёх — уже больше, и
-    /// только тогда она старше проекции файла.
-    #[test]
-    fn four_nodes_describe_nothing_a_line_could_not() {
-        let corners = Grid::new(&[
-            tie(0.0, 0.0, 10.0, 20.0),
-            tie(1.0, 0.0, 10.0, 21.0),
-            tie(0.0, 1.0, 9.0, 20.0),
-            tie(1.0, 1.0, 9.0, 21.0),
-        ])
-        .expect("четыре угла");
-        assert!(!corners.is_dense());
-
-        let mut nodes = Vec::new();
-        for row in 0..3 {
-            for col in 0..3 {
-                let (fx, fy) = (f64::from(col) * 0.5, f64::from(row) * 0.5);
-                nodes.push(tie(fx, fy, 10.0 - fy, 20.0 + fx));
-            }
-        }
-        assert!(Grid::new(&nodes).expect("решётка 3×3").is_dense());
-    }
-
-    /// Долготы сетки разворачиваются в одну ветвь — тем же правилом, что у
-    /// квада: иначе снимок через антимеридиан растянуло бы через всю Землю.
-    #[test]
-    fn grid_crosses_the_antimeridian_the_short_way() {
-        let grid = Grid::new(&[
-            tie(0.0, 0.0, 10.0, 179.0),
-            tie(1.0, 0.0, 10.0, -179.0),
-            tie(0.0, 1.0, 8.0, 179.0),
-            tie(1.0, 1.0, 8.0, -179.0),
-        ])
-        .expect("решётка 2×2");
-        let (lat, lon) = Frame::Grid(grid).geodetic(0.5, 0.0);
-        assert!((lat - 10.0).abs() < 1e-12);
-        assert!((lon - 180.0).abs() < 1e-9, "{}", lon);
-    }
-
-    /// Строка придвигается к предыдущей по большинству столбцов, а не по
-    /// первому.
-    ///
-    /// Первый столбец здесь стои́т у шва и от строки к строке перескакивает
-    /// круг, остальные двадцать не двигаются вовсе. Придвинутая по нему строка
-    /// уехала бы на 360° целиком.
-    #[test]
-    fn a_row_is_aligned_by_the_many_not_by_the_first() {
-        let ties: Vec<Tie> = (0..21)
-            .flat_map(|col| {
-                let fx = f64::from(col) / 20.0;
-                let (top, bottom) = if col == 0 { (179.0, -179.0) } else { (0.0, 0.5) };
-                [tie(fx, 0.0, 10.0, top), tie(fx, 1.0, 8.0, bottom)]
-            })
-            .collect();
-        let grid = Grid::new(&ties).expect("решётка 21×2");
-        let (_, lon) = grid.geodetic(0.5, 1.0);
-        assert!((lon - 0.5).abs() < 1e-9, "нижняя строка уехала на {}", lon);
-    }
-
-    /// Строку, которой правда надо на оборот, двигают — и на оборот, а не на
-    /// что попало.
-    ///
-    /// Четыре столбца из пяти перешли шов и требуют круга, пятый стои́т у нуля
-    /// и не требует ничего. Идти надо за четырьмя, а не за отставшим и не за
-    /// наименьшим голосом.
-    #[test]
-    fn a_row_that_needs_a_turn_gets_exactly_one() {
-        let top = [179.0, 179.2, 179.4, 179.6, 0.0];
-        let bottom = [-179.0, -178.8, -178.6, -178.4, 0.5];
-        let ties: Vec<Tie> = (0..5)
-            .flat_map(|col| {
-                let fx = f64::from(col) / 4.0;
-                [tie(fx, 0.0, 10.0, top[col as usize]), tie(fx, 1.0, 8.0, bottom[col as usize])]
-            })
-            .collect();
-        let grid = Grid::new(&ties).expect("решётка 5×2");
-        let (_, lon) = grid.geodetic(0.0, 1.0);
-        assert!((lon - 181.0).abs() < 1e-9, "нижняя строка встала на {}", lon);
-    }
-
-    /// Голос большинства считается по всем столбцам, а не по подряд идущим:
-    /// несогласные бывают вперемешку с согласными.
-    ///
-    /// Решётка здесь нарочно зубчатая — крайние столбцы у шва, средний у
-    /// нуля, — и голоса выходят вперемешку: круга требуют первый и последний.
-    #[test]
-    fn the_vote_is_counted_over_all_columns_at_once() {
-        let ties: Vec<Tie> = (0..3)
-            .flat_map(|col| {
-                let fx = f64::from(col) / 2.0;
-                let (top, bottom) =
-                    if col % 2 == 0 { (179.0, -179.0) } else { (0.0, 0.5) };
-                [tie(fx, 0.0, 10.0, top), tie(fx, 1.0, 8.0, bottom)]
-            })
-            .collect();
-        let grid = Grid::new(&ties).expect("решётка 3×2");
-        let (_, lon) = grid.geodetic(0.0, 1.0);
-        assert!((lon - 181.0).abs() < 1e-9, "нижняя строка встала на {}", lon);
-    }
-
-    /// Голоса поровну — сдвиг остаётся кратным обороту, а не становится его
-    /// половиной. Столбцов тут два, и они не согласны.
-    #[test]
-    fn an_even_vote_still_shifts_by_whole_turns() {
-        let grid = Grid::new(&[
-            tie(0.0, 0.0, 10.0, 179.0),
-            tie(1.0, 0.0, 10.0, 0.0),
-            tie(0.0, 1.0, 8.0, -179.0),
-            tie(1.0, 1.0, 8.0, 0.5),
-        ])
-        .expect("решётка 2×2");
-        let (_, lon) = grid.geodetic(1.0, 1.0);
-        assert!((lon - 0.5).abs() < 1e-9, "сдвиг оказался не кратен обороту: {}", lon);
-
-        // Тот же спор, но голоса −1 и 0: наименьший по модулю здесь не первый
-        // по возрастанию, и взять надо всё-таки его.
-        let grid = Grid::new(&[
-            tie(0.0, 0.0, 10.0, -179.0),
-            tie(1.0, 0.0, 10.0, 0.0),
-            tie(0.0, 1.0, 8.0, 179.0),
-            tie(1.0, 1.0, 8.0, 0.5),
-        ])
-        .expect("решётка 2×2");
-        let (_, lon) = grid.geodetic(1.0, 1.0);
-        assert!((lon - 0.5).abs() < 1e-9, "строка уехала на {}", lon);
-    }
-
-    /// Плотная строка через шов остаётся своей ширины, а не круга.
-    ///
-    /// Узлы стоят через 0,4° от 179-го меридиана, и весь ряд занимает восемь
-    /// градусов. Круг узнаётся с допуском, а не ровно — значит на такой строке
-    /// его ворота ловили бы всякий шаг через шов и рвали бы ряд на 359°.
-    #[test]
-    fn a_dense_row_across_the_seam_keeps_its_own_width() {
-        let ties: Vec<Tie> = (0..21)
-            .flat_map(|col| {
-                let fx = f64::from(col) / 20.0;
-                let lon = ((179.0 + 0.4 * f64::from(col) + 180.0) % 360.0) - 180.0;
-                [tie(fx, 0.0, 10.0, lon), tie(fx, 1.0, 8.0, lon)]
-            })
-            .collect();
-        let grid = Grid::new(&ties).expect("решётка 21×2");
-        let (_, west) = grid.geodetic(0.0, 0.0);
-        let (_, east) = grid.geodetic(1.0, 0.0);
-        assert!((east - west - 8.0).abs() < 1e-9, "запад {} восток {}", west, east);
-    }
-
-    /// Разворот не знает, где у файла ноль долготы: повёрнутая решётка даёт ту
-    /// же ширину и те же расстояния. Иначе привязка зависела бы от соглашения
-    /// записи, а не от места.
-    #[test]
-    fn unwinding_does_not_care_where_the_zero_meridian_is() {
-        let built = |turn: f64| {
-            let ties: Vec<Tie> = (0..21)
-                .flat_map(|col| {
-                    let fx = f64::from(col) / 20.0;
-                    let lon = ((179.0 + 0.4 * f64::from(col) + turn + 180.0) % 360.0) - 180.0;
-                    [tie(fx, 0.0, 10.0, lon), tie(fx, 1.0, 8.0, lon)]
-                })
-                .collect();
-            Grid::new(&ties).expect("решётка 21×2")
-        };
-        let straight = built(0.0).widest_row_m;
-        for turn in [60.0, 120.0, 180.0, 300.0] {
-            let turned = built(turn).widest_row_m;
-            assert!(
-                (turned - straight).abs() < 1.0,
-                "поворот на {}°: ширина {} против {}",
-                turn, turned, straight
-            );
-        }
-    }
-
-    /// Решётка на всю Землю разворачивается вдоль себя, а не к первому узлу:
-    /// иначе противоположный край сложился бы к нему же и глобальный растр стал
-    /// бы меридианом. Заодно ширина такого растра — длина ребра вокруг Земли, а
-    /// не нулевая хорда между его концами.
-    #[test]
-    fn a_grid_around_the_whole_earth_does_not_fold() {
-        let columns = 5;
-        let mut ties = Vec::new();
-        for row in 0..2 {
-            for col in 0..columns {
-                let fx = f64::from(col) / f64::from(columns - 1);
-                ties.push(tie(fx, f64::from(row), 70.0 - 140.0 * f64::from(row), -180.0 + 360.0 * fx));
-            }
-        }
-        let grid = Grid::new(&ties).expect("решётка 5×2");
-        let span = grid.widest_row_m;
-        let (_, west) = grid.geodetic(0.0, 0.0);
-        let (_, east) = grid.geodetic(1.0, 0.0);
-        assert!((east - west - 360.0).abs() < 1e-9, "запад {} восток {}", west, east);
-        // Ребро обходит Землю по 70-й параллели — это тысячи километров, а не
-        // ноль, которым обернулась бы хорда между его совпавшими концами.
-        // Точного числа тут нет: звенья решётки идут дугами больших кругов и
-        // срезают параллель тем сильнее, чем реже узлы.
-        assert!(span > 10.0e6, "ширина {} м", span);
-    }
-
-    /// Внутренность косого квада идёт по правилу, а не по градусам.
-    ///
-    /// Проверка отдельная от рёбер: доли `0` и `1` уходят в сами рёбра, и
-    /// вертикальный ход — единственное, что видно только изнутри. Число взято
-    /// снаружи: середина гранулы Sentinel-1 EW, посчитанная по правилу, стои́т
-    /// на одиннадцать километров севернее середины «в градусах».
-    #[test]
-    fn the_inside_of_a_slanted_quad_follows_the_rule_too() {
-        let (nw, ne) = ((74.523872, -10.408985), (73.395172, 2.707061));
-        let (se, sw) = ((70.005, -1.639), (70.979, -12.618));
-        let middle = Frame::quad([nw, ne, se, sw]).geodetic(0.5, 0.5);
-
-        let flat = (
-            (nw.0 + ne.0 + se.0 + sw.0) / 4.0,
-            (nw.1 + ne.1 + se.1 + sw.1) / 4.0,
-        );
-        let apart = geodesy::separation(middle, flat).to_radians() * geodesy::SEMI_MAJOR_M;
-        assert!((10_000.0..12_000.0).contains(&apart), "разошлись на {apart:.0} м");
-        assert!(middle.0 > flat.0, "правило ведёт середину к полюсу");
-
-        // Отдельно — сам вертикальный ход. У гранулы он короток и от прямой в
-        // градусах отличим едва; берём высокий косой квад, где верх и низ
-        // разнесены и по широте, и по долготе: там дуга уходит от градусов на
-        // три сотни километров, и подмена вертикали видна сразу.
-        let tall = Frame::quad([(65.0, -20.0), (65.0, 20.0), (25.0, 40.0), (25.0, 0.0)]);
-        let (top, bottom) = (tall.geodetic(0.5, 0.0), tall.geodetic(0.5, 1.0));
-        let straight = ((top.0 + bottom.0) / 2.0, (top.1 + bottom.1) / 2.0);
-        let along = geodesy::separation(tall.geodetic(0.5, 0.5), straight).to_radians()
-            * geodesy::SEMI_MAJOR_M;
-        assert!((290_000.0..305_000.0).contains(&along), "вертикаль ушла на {along:.0} м");
-    }
-
-    /// Квад разворачивает долготы через антимеридиан в одну ветвь: середина
-    /// между 179 и −179 — это 180, а не ноль. Широта середины при этом ровно
-    /// та же, что у краёв: у этой коробки верхнее ребро названо параллелью —
-    /// обе его широты равны, — и ведут его параллелью, как и обводку.
-    #[test]
-    fn quad_crosses_antimeridian_the_short_way() {
-        let frame = Frame::quad([(10.0, 179.0), (10.0, -179.0), (8.0, -179.0), (8.0, 179.0)]);
-        assert_eq!(frame.geodetic(0.5, 0.0), (10.0, 180.0));
-    }
-
-    /// Квад ведёт ребро тем же правилом, что и обводка того же футпринта.
-    ///
-    /// Проверяется это против самого правила, а не против `outlines::ring`:
-    /// кольцо уплотняется вчетверо реже варп-сетки, и его звенья выгибаются к
-    /// полюсу сами — на клетке в градус остаётся два с половиной десятка
-    /// метров. Правку это не отменяет (было сто пять), но «совпали» сказать
-    /// нельзя, а спрошенное правило совпадает точно.
-    #[test]
-    fn a_quad_leads_its_edges_the_way_the_outline_does() {
-        // Клетка в градус — так записан рельеф Copernicus и всё, что лежит по
-        // географической сетке.
-        let corners = [(60.0, 10.0), (60.0, 11.0), (59.0, 11.0), (59.0, 10.0)];
-        let frame = Frame::quad(corners);
-        for fx in [0.0, 0.25, 0.5, 0.75, 1.0] {
-            assert_eq!(frame.geodetic(fx, 0.0), geodesy::edge_point(corners[0], corners[1], fx));
-            assert_eq!(frame.geodetic(fx, 1.0), geodesy::edge_point(corners[3], corners[2], fx));
-        }
-
-        // У осевой коробки это и значит «по параллели»: середина верхнего ребра
-        // остаётся на своей широте. Дуга увела бы её к полюсу на сотню метров —
-        // столько же, сколько разделяет сегодня растр и его обводку.
-        let north = frame.geodetic(0.5, 0.0);
-        assert_eq!(north, (60.0, 10.5));
-        // И внутренность идёт тем же правилом, а не по градусам: у осевой
-        // коробки вертикаль — меридиан, то есть долгота середины та же.
-        assert_eq!(frame.geodetic(0.5, 0.5), (59.5, 10.5));
-        let arc = geodesy::between(corners[0], corners[1], 0.5);
-        let apart = geodesy::separation(north, arc).to_radians() * geodesy::SEMI_MAJOR_M;
-        assert!((100.0..110.0).contains(&apart), "дуга увела бы на {apart:.0} м");
-    }
-
-    /// Углы рамки UTM попадают в свои доли растра: (0,0) — северо-западный
-    /// угол, (1,1) — юго-восточный, и наоборот через прямую проекцию.
-    #[test]
-    fn utm_frame_corners_roundtrip() {
-        let overlay = overlay(vec![]);
-        let (lat_nw, lon_nw) = overlay.frame.geodetic(0.0, 0.0);
-        let zone: projection::Projection = projection::System::utm(40, false).into();
-        let (e, n) = zone.from_geodetic(lat_nw, lon_nw);
-        assert!((e - 600_000.0).abs() < 1e-6 && (n - 7_800_000.0).abs() < 1e-6);
-        let (lat_se, _) = overlay.frame.geodetic(1.0, 1.0);
-        assert!(lat_se < lat_nw);
-    }
-
-    /// Густота варп-сетки идёт за размахом ячейки, а не назначена числом.
-    /// Проверяются оба конца: гранула упирается в нижний предел деления, ячейка
-    /// во всю Землю — в верхний.
-    #[test]
-    fn warp_density_follows_the_arc() {
-        assert_eq!(segments_for(0.9), PATCH_SEGMENTS, "гранулу делить мельче незачем");
-        assert_eq!(segments_for(1.0), PATCH_SEGMENTS);
-        assert_eq!(segments_for(360.0), MAX_PATCH_SEGMENTS, "потолок густоты");
-        assert!(segments_for(20.0) > segments_for(5.0), "густота не идёт за размахом");
-    }
-
-    /// Пока деление доходит, ячейка садится на общий вынос и сходится там с
-    /// контурами и сеткой. Расходится только та, что упёрлась в потолок
-    /// густоты, — и расходится ровно на остаток своего провала.
-    #[test]
-    fn a_divided_cell_lands_on_the_common_lift() {
-        for span in [0.9f64, 5.0, 10.0, 20.0] {
-            let height = height_of(span);
-            assert_eq!(
-                height, mesh::SURFACE_LIFT_M,
-                "ячейка в {}° поднялась над общим выносом: {} м", span, height
-            );
-        }
-        let whole = height_of(360.0);
-        assert!(whole > 5_000.0, "верхняя ступень легла под поверхность: {} м", whole);
-        assert!(
-            whole / geodesy::SEMI_MAJOR_M < 0.004,
-            "снимок повис оболочкой вокруг Земли: {} м", whole
-        );
-    }
-
-    /// Высота считается по тому, что проваливается глубже всего, — по середине
-    /// гипотенузы, а не стороны. Считай её по ребру, и снимок верхней ступени
-    /// ушёл бы под поверхность: до середины диагонали в √2 раза дальше, а
-    /// провал растёт как квадрат расстояния.
-    #[test]
-    fn the_height_clears_the_deepest_point_of_the_quad() {
-        for span in [0.9f64, 20.0, 90.0, 360.0] {
-            let quad = span / f64::from(segments_for(span));
-            let deepest = mesh::sag_m(quad * std::f64::consts::SQRT_2);
-            assert!(
-                height_of(span) > deepest,
-                "при {}° узел на {} м, а середина диагонали проваливается на {} м",
-                span, height_of(span), deepest
-            );
-            // По ребру провал вдвое меньше — ровно на столько и не хватило бы.
-            let by_edge = mesh::sag_m(quad);
-            assert!(
-                span < 10.0 || deepest > by_edge * 1.5,
-                "разница по ребру и по диагонали при {}°: {} против {}",
-                span, deepest, by_edge
-            );
-        }
-    }
-
-    /// Высота узлов ячейки такого размаха — тем же счётом, что и в [`nodes_of`].
-    fn height_of(span: f64) -> f64 {
-        mesh::lift_m(span / f64::from(segments_for(span)) * std::f64::consts::SQRT_2)
-    }
-
-    /// Глобальный растр меряется по средней строке. Края его вырождаются в
-    /// точку на полюсе, и мерка по краям объявила бы его вдвое у́же, чем он
-    /// есть, — а поднятая по такой мерке верхняя ступень ныряет под тело Земли,
-    /// и снимок во всю Землю снова виден клочками у самых узлов.
-    #[test]
-    fn a_whole_earth_cell_is_measured_across_its_middle() {
-        let world = Grid::new(&[
-            tie(0.0, 0.0, 90.0, -180.0),
-            tie(1.0, 0.0, 90.0, 180.0),
-            tie(0.0, 1.0, -90.0, -180.0),
-            tie(1.0, 1.0, -90.0, 180.0),
-        ])
-        .expect("глобальная решётка — привязка");
-        let frame = Frame::Grid(world);
-        let meta = meta(4096, 2048);
-        let span = span_deg(&frame, &meta, [0.0, 0.0, 4096.0, 2048.0]);
-        assert!((span - 360.0).abs() < 2.0, "ячейка во всю Землю померена как {}°", span);
-    }
-
-    /// А ячейка высокая и узкая меряется по столбцу. Ряды и столбцы
-    /// спрашиваются оба не для симметрии: делится ячейка на равное число долей
-    /// в обе стороны, и длина у неё та, которая больше.
-    #[test]
-    fn a_tall_cell_is_measured_down_its_column() {
-        let tall = Grid::new(&[
-            tie(0.0, 0.0, 90.0, 0.0),
-            tie(1.0, 0.0, 90.0, 5.0),
-            tie(0.0, 1.0, -90.0, 0.0),
-            tie(1.0, 1.0, -90.0, 5.0),
-        ])
-        .expect("решётка — привязка");
-        let frame = Frame::Grid(tall);
-        let meta = meta(256, 4096);
-        let span = span_deg(&frame, &meta, [0.0, 0.0, 256.0, 4096.0]);
-        assert!((span - 180.0).abs() < 2.0, "высокая ячейка померена как {}°", span);
-    }
-
-    /// Узлы патча стоят на той высоте, которую назначает общее правило, а не на
-    /// постоянной: узкая ячейка садится на общий вынос, широкая обязана
-    /// подняться над ним. Подмени `nodes_of` правило константой, и снимок верхней
-    /// ступени ушёл бы под поверхность.
-    ///
-    /// Меряется по узлу на экваторе — там радиус эллипсоида равен единице, и
-    /// высота узла над ним читается прямо из длины вектора.
-    #[test]
-    fn patch_nodes_stand_at_the_height_the_rule_names() {
-        // Верхнее ребро квада лежит на экваторе, поэтому первый узел решётки —
-        // ровно на нём (порядок вершин квада: левый верхний, правый верхний,
-        // правый нижний, левый нижний).
-        let narrow = first_node_height_m(&Frame::quad([(0.0, 0.0), (0.0, 2.0), (-2.0, 2.0), (-2.0, 0.0)]));
-        let wide = first_node_height_m(&Frame::quad([(0.0, 0.0), (0.0, 60.0), (-60.0, 60.0), (-60.0, 0.0)]));
-
-        assert!(
-            (narrow - mesh::SURFACE_LIFT_M).abs() < 2.0,
-            "узкая ячейка встала на {} м вместо общего выноса", narrow
-        );
-        assert!(
-            wide > mesh::SURFACE_LIFT_M * 4.0,
-            "широкая ячейка не поднялась над общим выносом: {} м", wide
-        );
-    }
-
-    /// У осевой рамки узлы считаются по ряду и по столбцу, а не по каждому в
-    /// отдельности, — и выходят **те же самые**.
-    ///
-    /// Сравнение точное, до последнего разряда: короткий путь — это то же
-    /// разложение широты с долготой, вынесенное из внутреннего цикла, а не
-    /// другая формула. Разойдись они хоть в последнем разряде, растр в градусах
-    /// лёг бы иначе, чем всякий другой, и заметить это было бы нечем — на экране
-    /// оба выглядят одинаково.
-    #[test]
-    fn an_axial_frame_takes_the_short_way_to_the_same_nodes() {
-        // Глобальный растр CLMS: край записан как −180,0125 → 179,9875.
-        let global = Frame::Grid(
-            Grid::new(&[
-                tie(0.0, 0.0, 70.0125, -180.0125),
-                tie(1.0, 0.0, 70.0125, 179.9875),
-                tie(0.0, 1.0, -70.0125, -180.0125),
-                tie(1.0, 1.0, -70.0125, 179.9875),
-            ])
-            .expect("глобальная решётка — привязка"),
-        );
-        assert!(global.axial(), "растр в градусах лежит по параллелям");
-
-        let meta = meta(14400, 5601);
-        let cell = [0.0, 0.0, 512.0, 512.0];
-        let fast = nodes_of(&global, &meta, cell);
-
-        // Длинный путь — сама привязка, спрошенная по узлу: короткому пути он и
-        // есть определение.
-        let span = span_deg(&global, &meta, cell);
-        let segments = segments_for(span);
-        let height_m = mesh::lift_m(span / f64::from(segments) * std::f64::consts::SQRT_2);
-        let side = (segments + 1) as usize;
-        assert_eq!(fast.points.len(), side * side);
-        for row in 0..=segments {
-            for col in 0..=segments {
-                let (tx, ty) = (f64::from(col) / f64::from(segments), f64::from(row) / f64::from(segments));
-                let fx = (cell[0] + (cell[2] - cell[0]) * tx) / f64::from(meta.width);
-                let fy = (cell[1] + (cell[3] - cell[1]) * ty) / f64::from(meta.height);
-                let (lat_deg, lon_deg) = global.geodetic(fx, fy);
-                let each = geodesy::parts(geodesy::world(Geodetic { lat_deg, lon_deg, height_m }));
-                assert_eq!(
-                    fast.points[row as usize * side + col as usize], each,
-                    "узел {}:{} разошёлся с привязкой", row, col
-                );
-            }
-        }
-    }
-
-    /// Привязка EPSG:3857 доходит до рамки и считается веб-Меркатором.
-    ///
-    /// Шов этот проверяется отдельно от самой проекции затем, что порвать его
-    /// можно, не тронув её: рамка берёт систему по коду, и вернись она к одному
-    /// поперечному семейству — растр снова ляжет по контуру каталога, а все
-    /// проверки самой проекции останутся зелёными.
-    ///
-    /// Узнаётся веб-Меркатор по числу, которого поперечное семейство не выдаст
-    /// ни при какой зоне: нуль метров у него — нуль градусов, а у всякой зоны
-    /// там ложный сдвиг.
-    #[test]
-    fn привязка_3857_доходит_до_веб_меркатора() {
-        let said = Placement {
-            epsg: 3857,
-            x0: 0.0,
-            y0: 0.0,
-            x_per_i: 10.0,
-            y_per_j: -10.0,
-            x_per_j: 0.0,
-            y_per_i: 0.0,
-            width: 100,
-            height: 100,
-        };
-        let frame = Frame::from_placement(&said).expect("3857 — известная система");
-
-        let (lat, lon) = frame.geodetic(0.0, 0.0);
-        assert!(lat.abs() < 1e-9 && lon.abs() < 1e-9, "левый верхний угол в нуле: {lat} {lon}");
-
-        // И ряды такой рамки идут по параллелям — на этом стои́т быстрый ход
-        // варп-сетки, а поперечная ветка его не даёт.
-        assert!(frame.axial(), "растр в веб-Меркаторе по осям лежит по параллелям");
-    }
-
-    /// А повёрнутый — не лежит: у него доля по ширине входит и в северную
-    /// координату, и быстрый ход взял бы долготу верхнего ряда за долготу всех.
-    #[test]
-    fn повёрнутый_веб_меркатор_осями_не_лежит() {
-        let skewed = Frame::Projected {
-            system: projection::Projection::WebMercator,
-            affine: [10.0, 1.0, 0.0, 1.0, -10.0, 0.0],
-        };
-        assert!(!skewed.axial());
-    }
-
-    /// Осевой считается только та рамка, у которой ряды и правда параллели.
-    ///
-    /// Правило это решает, каким путём считать узлы, и ошибка в нём тихая:
-    /// названная осевой скошенная рамка положит снимок мимо привязки, а
-    /// названная скошенной осевая просто посчитается вдолгую.
-    #[test]
-    fn only_a_frame_of_parallels_and_meridians_is_axial() {
-        // Квад по параллелям и меридианам — и он же, повёрнутый.
-        assert!(Frame::quad([(1.0, 0.0), (1.0, 2.0), (-1.0, 2.0), (-1.0, 0.0)]).axial());
-        assert!(!Frame::quad([(0.0, 0.0), (1.0, 1.0), (0.0, 2.0), (-1.0, 1.0)]).axial());
-
-        // Решётка съёмки гнётся поперёк трека: общей широты у ряда нет.
-        let bowed = Grid::new(&[
-            tie(0.0, 0.0, 40.0, 39.0),
-            tie(0.5, 0.0, 35.0, 40.0),
-            tie(1.0, 0.0, 40.0, 41.0),
-            tie(0.0, 1.0, 41.0, 39.0),
-            tie(0.5, 1.0, 46.0, 40.0),
-            tie(1.0, 1.0, 41.0, 41.0),
-        ])
-        .expect("решётка — привязка");
-        assert!(!Frame::Grid(bowed).axial());
-
-        // Растр в проекции: обратная проекция мешает оси между собой.
-        let utm = Frame::utm(projection::System::utm(37, false), 400_000.0, 5_150_000.0, 500_000.0, 5_250_000.0);
-        assert!(!utm.axial());
-    }
-
-    /// Узел уезжает в буфер по разу, а треугольники ссылаются на него номерами.
-    ///
-    /// Считается это буфером, который пересобирается на всякую смену состава, то
-    /// есть в движении почти покадрово: узлов у ячейки `(s+1)²`, а списком
-    /// треугольников вышло бы `6s²` вершин размером с `OverlayVertex` —
-    /// впятеро с лишним на каждую пересборку.
-    ///
-    /// Номера сквозные: второй патч ложится в те же буферы и ссылается на свои
-    /// узлы, а не на чужие. Забытое смещение здесь и всплывёт — на экране оно
-    /// выглядит вторым снимком, натянутым на первый.
-    #[test]
-    fn a_patch_names_its_nodes_once() {
-        let frame = Frame::quad([(0.0, 0.0), (0.0, 60.0), (-60.0, 60.0), (-60.0, 0.0)]);
-        let (meta, cell) = (meta(1024, 1024), [0.0, 0.0, 1024.0, 1024.0]);
-        let segments = segments_for(span_deg(&frame, &meta, cell));
-        let nodes = ((segments + 1) * (segments + 1)) as usize;
-
-        let mesh = nodes_of(&frame, &meta, cell);
-        let mut vertices = Vec::new();
-        spread(&mesh, [0.0; 4], 1.0, 0.0, &mut vertices);
-        assert_eq!(vertices.len(), nodes, "узлов {} при {} сегментах", vertices.len(), segments);
-        assert_eq!(mesh.segments, segments, "густота уехала бы вместе с номерами");
-
-        // Второй патч ложится следом, и начало его — то самое, что уедет в
-        // отрисовку смещением (`gpu::Patch::base`).
-        let base = vertices.len() as u32;
-        spread(&mesh, [0.0; 4], 1.0, 0.0, &mut vertices);
-        assert_eq!((base as usize, vertices.len()), (nodes, nodes * 2));
-    }
-
-    /// Высота первого узла патча над эллипсоидом, метры.
-    fn first_node_height_m(frame: &Frame) -> f64 {
-        let meta = meta(1024, 1024);
-        let mesh = nodes_of(frame, &meta, [0.0, 0.0, 1024.0, 1024.0]);
-        let length = glam::Vec3::from(mesh.points[0].0).length();
-        (f64::from(length) - 1.0) * geodesy::SEMI_MAJOR_M
-    }
-
-    /// Снимок ложится туда, куда его кладёт привязка, — с точностью до долей
-    /// миллиметра, а не до пикселя.
-    ///
-    /// Мерка сквозная: точка растра переводится привязкой в место на Земле, а
-    /// рядом берётся то, куда её на самом деле положит видеокарта, — линейная
-    /// доля внутри того треугольника варп-сетки, в который она попала. Между
-    /// узлами привязку не считает никто, и вся ошибка наложения живёт именно
-    /// там: сами узлы точны по построению.
-    ///
-    /// Считается по тому, что уезжает в буфер, то есть **вместе с разложением
-    /// точки на половины f32**: цена хранения входит в ответ, а не остаётся за
-    /// скобками. Хода видеокарты здесь нет и быть не может — разность считает
-    /// она сама, и предел её записан у [`geodesy::parts`]: он идёт от
-    /// расстояния до глаза, а не от радиуса Земли.
-    ///
-    /// Меряется отход **вдоль поверхности**, потому что вопрос здесь один:
-    /// каким местом Земли накрыт пиксель. Отход по нормали — это провал хорды,
-    /// величина назначенная и проверенная отдельно
-    /// ([`the_height_clears_the_deepest_point_of_the_quad`]); он одинаков у
-    /// всех, кто делит себя тем же правилом, и потому слои не разводит.
-    #[test]
-    fn a_raster_lands_where_its_binding_puts_it() {
-        // Зона 37N, север Ростовской области. Пикселем по земле — от двух
-        // сантиметров до тридцати метров, и та же гранула ступенью, на которой
-        // ячейка занимает уже сорок километров.
-        //
-        // Последним — снимок, лежащий по линии полёта, а не по северу:
-        // повёрнутая привязка это обычный `ModelTransformation`, и держится она
-        // на том, какая доля растра умножается на какую сторону
-        // ([`Frame::placed`]). У квадратного снимка без поворота перепутанные
-        // стороны неразличимы, и проверять их надо тем, у кого они разные.
-        let (sin, cos) = 30.0f64.to_radians().sin_cos();
-        let slanted = [0.02 * cos, 0.02 * sin, 400_000.0, 0.02 * sin, -0.02 * cos, 5_150_000.0];
-
-        let mut drift = Vec::new();
-        for (per_px, width, height, level, ground_m, name) in [
-            ([0.02, 0.0, 400_000.0, 0.0, -0.02, 5_150_000.0], 10_000u32, 10_000u32, 0u32, 0.02,
-                "ортофото 2 см"),
-            ([10.0, 0.0, 400_000.0, 0.0, -10.0, 5_150_000.0], 10_980, 10_980, 0, 10.0,
-                "гранула Sentinel-2"),
-            ([30.0, 0.0, 400_000.0, 0.0, -30.0, 5_150_000.0], 8_000, 8_000, 0, 30.0,
-                "сцена Landsat"),
-            ([10.0, 0.0, 400_000.0, 0.0, -10.0, 5_150_000.0], 10_980, 10_980, 3, 10.0,
-                "она же четвёртой ступенью"),
-            (slanted, 8_000, 5_000, 0, 0.02, "ортофото под углом, 8000×5000"),
-        ] {
-            let frame =
-                Frame::placed(projection::System::utm(37, false).into(), per_px, width, height);
-            let meta = meta(width, height);
-            let cell = pyramid::cell_image_rect(0, 0, level, width, height);
-
-            let at = worst_drift_m(&frame, &meta, cell);
-            // Пиксель той ступени, которой ячейка нарисована: снимок грубеет
-            // вдвое за ступень, и мерить отход пикселем источника значило бы
-            // требовать от верхней ступени того, чего с неё не видно.
-            drift.push((name, level, at, at / (ground_m * pyramid::level_px(level))));
-        }
-
-        // Правило, а не порог: отход обязан оставаться много мельче пикселя,
-        // которым ячейка нарисована. Тысячная доля — с пятикратным запасом к
-        // худшему из четырёх (1,8·10⁻⁴ у верхней ступени); растёт он как
-        // квадрат звена, то есть вчетверо за ступень, и запас этот кончится
-        // раньше, чем отход станет виден.
-        let coarsest = drift.iter().fold(0.0f64, |worst, &(.., share)| worst.max(share));
-        assert!(coarsest < 1.0e-3, "отход долями пикселя ступени: {:?}", drift);
-
-        // И то же самое числом, ради которого мерка заведена: сантиметр держат
-        // все, а снимок, нарисованный своим разрешением, — два миллиметра.
-        let worst = drift.iter().fold(0.0f64, |worst, &(_, _, at, _)| worst.max(at));
-        assert!(worst < 0.02, "отход вдоль поверхности, метры: {:?}", drift);
-        let native = drift
-            .iter()
-            .filter(|&&(_, level, ..)| level == 0)
-            .fold(0.0f64, |worst, &(_, _, at, _)| worst.max(at));
-        assert!(native < 0.002, "снимок своим разрешением уехал на {} м", native);
-    }
-
-    /// Самый большой отход нарисованного от привязки внутри ячейки — метры
-    /// вдоль поверхности.
-    ///
-    /// Узлы читаются из того же буфера, в который их пишет [`spread`], и той же
-    /// раскладкой — построчно. Диагональ квада взята та же, какой её проводит
-    /// блок номеров (`gpu::OverlayBatch::block`): проведённая иначе, она уводит
-    /// нарисованное от привязки, и здесь это всплывёт.
-    fn worst_drift_m(frame: &Frame, meta: &Meta, cell: [f64; 4]) -> f64 {
-        let mut vertices = Vec::new();
-        spread(&nodes_of(frame, meta, cell), [0.0, 0.0, 1.0, 1.0], 1.0, 0.0, &mut vertices);
-
-        let span = span_deg(frame, meta, cell);
-        let segments = segments_for(span);
-        let height_m = mesh::lift_m(span / f64::from(segments) * std::f64::consts::SQRT_2);
-
-        // Доли берутся не по узлам: в узле сетка точна по построению, и мерить
-        // там нечего. Шаг втрое мельче звена, поэтому пробы попадают и внутрь
-        // обоих треугольников квада, и на их общую диагональ.
-        let probes = segments * 3;
-        let mut worst: f64 = 0.0;
-        for step_y in 0..=probes {
-            let ty = f64::from(step_y) / f64::from(probes);
-            for step_x in 0..=probes {
-                let tx = f64::from(step_x) / f64::from(probes);
-
-                let fx = (cell[0] + (cell[2] - cell[0]) * tx) / f64::from(meta.width);
-                let fy = (cell[1] + (cell[3] - cell[1]) * ty) / f64::from(meta.height);
-                let (lat_deg, lon_deg) = frame.geodetic(fx, fy);
-                let truth = geodesy::world(Geodetic { lat_deg, lon_deg, height_m });
-
-                // Отход раскладывается на нормаль и поверхность: спрашивают
-                // здесь только вторую половину.
-                let apart = drawn_at(&vertices, segments, tx, ty) - truth;
-                let normal = geodesy::unit(lat_deg, lon_deg);
-                let along = apart - normal * apart.dot(normal);
-                worst = worst.max(along.length() * geodesy::SEMI_MAJOR_M);
-            }
-        }
-        worst
-    }
-
-    /// Две мерки размаха ячейки отвечают одно и то же.
-    ///
-    /// [`span_deg`] спрашивает привязку заново, [`span_of`] берёт уже
-    /// посчитанные пробы — и решают они одно: насколько густо делить варп-сетку
-    /// и на какую высоту её поднять. Считаются же они порознь: подъём шара
-    /// отсева берётся первой меркой ([`Overlay::ball`]), подъём нарисованного —
-    /// второй ([`nodes_of`]). Разойдись они, и шар накрывал бы не то, что
-    /// нарисовано: ячейка пропала бы у самого лимба, и пропала бы молча —
-    /// невидимая ячейка тайлов не просит, а доля хода над пустым местом
-    /// доходит до единицы.
-    ///
-    /// Сходятся они в точности, а не с допуском: доли ячейки — целые числа
-    /// пикселей, середина у обоих берётся половиной, и разойтись тут нечему.
-    #[test]
-    fn both_measures_of_a_cell_span_agree() {
-        let world = Grid::new(&[
-            tie(0.0, 0.0, 90.0, -180.0),
-            tie(1.0, 0.0, 90.0, 180.0),
-            tie(0.0, 1.0, -90.0, -180.0),
-            tie(1.0, 1.0, -90.0, 180.0),
-        ])
-        .expect("глобальная решётка — привязка");
-
-        // Решётка, выгнутая поперёк трека: средний столбец у неё длиннее обоих
-        // краёв. Без такой рамки средняя проба не проверена вовсе — а
-        // спрашивается она не для симметрии (см. [`span_deg`]).
-        let bowed = Grid::new(&[
-            tie(0.0, 0.0, 40.0, 39.0),
-            tie(0.5, 0.0, 35.0, 40.0),
-            tie(1.0, 0.0, 40.0, 41.0),
-            tie(0.0, 1.0, 41.0, 39.0),
-            tie(0.5, 1.0, 46.0, 40.0),
-            tie(1.0, 1.0, 41.0, 41.0),
-        ])
-        .expect("выгнутая решётка — привязка");
-
-        let mut layer = overlay(Vec::new());
-        for (frame, width, height, about) in [
-            (
-                Frame::utm(
-                    projection::System::utm(40, false),
-                    600_000.0,
-                    7_690_200.0,
-                    709_800.0,
-                    7_800_000.0,
-                ),
-                10_980u32,
-                10_980u32,
-                "рамка зоны",
-            ),
-            (
-                Frame::quad([(45.0, 39.0), (45.0, 40.0), (44.0, 40.2), (44.0, 39.0)]),
-                4_096,
-                2_048,
-                "квад футпринта",
-            ),
-            (Frame::Grid(world), 4_096, 2_048, "решётка во всю Землю"),
-            (Frame::Grid(bowed), 2_048, 4_096, "решётка, выгнутая поперёк трека"),
-        ] {
-            layer.frame = frame;
-            let meta = meta(width, height);
-            // Ячейки берутся по всем ступеням: у вершины пирамиды ячейка одна и
-            // занимает весь растр, у нулевой — их сетка, и края её обрезаны
-            // самим растром.
-            for level in 0..meta.levels() {
-                let side = pyramid::grid(pyramid::level_size(width, level));
-                let down = pyramid::grid(pyramid::level_size(height, level));
-                for (x, y) in [(0, 0), (side - 1, down - 1), (side / 2, down / 2)] {
-                    let (_, seen) = layer.probes(&meta, level, x, y);
-                    let cell = pyramid::cell_image_rect(x, y, level, width, height);
-                    assert_eq!(
-                        span_of(&seen),
-                        span_deg(&layer.frame, &meta, cell),
-                        "{}: ступень {}, ячейка {},{}",
-                        about,
-                        level,
-                        x,
-                        y
-                    );
-                }
-            }
-        }
-    }
-
-    /// Куда видеокарта положит долю `(tx, ty)` ячейки: линейно внутри того
-    /// треугольника, в который эта доля попала.
-    ///
-    /// Половины складываются обратно — иначе мерка вышла бы грубее измеряемого:
-    /// одной старшей половиной точка поверхности хранится с шагом в восемьдесят
-    /// сантиметров.
-    fn drawn_at(vertices: &[OverlayVertex], segments: u32, tx: f64, ty: f64) -> glam::DVec3 {
-        let last = f64::from(segments) - 1.0;
-        let col = (tx * f64::from(segments)).floor().clamp(0.0, last);
-        let row = (ty * f64::from(segments)).floor().clamp(0.0, last);
-        let (u, v) = (tx * f64::from(segments) - col, ty * f64::from(segments) - row);
-
-        // Узлы квада — те же четыре, на которые ссылается его шестёрка номеров
-        // `[a, b, c, b, d, c]`.
-        let side = (segments + 1) as usize;
-        let at = |down: usize, across: usize| {
-            let vertex = vertices[(row as usize + down) * side + col as usize + across];
-            glam::Vec3::from(vertex.position).as_dvec3()
-                + glam::Vec3::from(vertex.position_low).as_dvec3()
-        };
-        let (a, b, c, d) = (at(0, 0), at(0, 1), at(1, 0), at(1, 1));
-
-        match u + v <= 1.0 {
-            true => a * (1.0 - u - v) + b * u + c * v,
-            false => b * (1.0 - v) + d * (u + v - 1.0) + c * (1.0 - u),
-        }
-    }
-
-    /// Ход слоя собирается по тому же растру, которым он рисуется, и по общему
-    /// правилу пирамиды: числа в подписи и длина полосы под ними считаются
-    /// одним, и разойтись им негде.
-    #[test]
-    fn ход_слоя_считается_общим_правилом_пирамиды() {
-        let mut raster = raster(Role::Detailed, Some(meta(1024, 1024)));
-        // Проход, читающий источник насквозь: у общего помощника здесь
-        // произвольный доступ, а он байты наружу не пускает (см. ниже).
-        for row in &mut raster.meta.as_mut().expect("описание задано").rows {
-            row.serve = tiles::Serve::Pass { from: 0 };
-        }
-        raster.pass = (3 << 20, 12 << 20);
-        let want = tiles::Want {
-            level: 2,
-            target: 0,
-            cells: Vec::new(),
-            steps: 4,
-            climbed: 1,
-        };
-
-        let said = progress_of(&raster, &want);
-        assert_eq!((said.step, said.steps), (1, 4), "ступень взята у лестницы");
-        assert_eq!(said.pass, (3 << 20, 12 << 20), "байты прохода уехали наружу");
-        // Заказа нет — ступень закрыта, и путь равен пройденным ступеням.
-        assert_eq!(said.within, 1.0);
-        assert!((said.share - 0.5).abs() < 1e-6, "две ступени из четырёх");
-    }
-
-    /// У источника с произвольным доступом счётчик прочитанного — водяной знак
-    /// головы чтения, и наружу он не идёт вовсе: подпись «11 из 12 МБ» на
-    /// первом же окне была бы прямой неправдой.
-    #[test]
-    fn у_точного_источника_байты_наружу_не_идут() {
-        let mut raster = raster(Role::Detailed, Some(meta(1024, 1024)));
-        raster.pass = (11 << 20, 12 << 20);
-        let want =
-            tiles::Want { level: 0, target: 0, cells: Vec::new(), steps: 1, climbed: 0 };
-
-        assert_eq!(progress_of(&raster, &want).pass, (0, 0));
-    }
-
-    /// Сдвиг ряби выводится из адреса ячейки, а не из порядка обхода: порядок
-    /// меняется на каждом движении камеры, и волна перескакивала бы с места на
-    /// место при неподвижной картинке. Ноль занят «не рябит» и ячейке не
-    /// достаётся никогда.
-    #[test]
-    fn сдвиг_ряби_привязан_к_ячейке_а_не_к_порядку() {
-        assert_eq!(ripple_of((2, 3, 4), false), 0.0, "спокойная ячейка не рябит");
-
-        let at = ripple_of((2, 3, 4), true);
-        assert!(at > 0.0 && at <= 1.0, "сдвиг вне периода: {at}");
-        assert_eq!(at, ripple_of((2, 3, 4), true), "тот же адрес — тот же сдвиг");
-        assert_ne!(at, ripple_of((2, 4, 4), true), "сосед по строке попал в тот же сдвиг");
-        assert_ne!(at, ripple_of((2, 3, 5), true), "сосед по столбцу попал в тот же сдвиг");
-    }
 }

@@ -1,10 +1,11 @@
-//! Переиспользуемые куски UI. Один файл — один компонент; экраны целиком
-//! лежат в `view/`, а не здесь.
+//! Reusable UI pieces. One file per component; whole screens live in `view/`,
+//! not here.
 //!
-//! `row` — не рендер, а модель: в каком состоянии запись и что о ней известно.
-//! Лежит рядом с `table`, потому что тот матчится на `RowStatus` исчерпывающе —
-//! это одна вещь, разъезжаться им нельзя. `arrange` между ними: он решает, что
-//! и в каком порядке показывать, и не знает ни одного виджета.
+//! `row` is not rendering but a model: what state a record is in and what is
+//! known about it. It sits next to `table` because that one matches on
+//! `RowStatus` exhaustively — it is a single thing and they must not diverge.
+//! `arrange` sits between them: it decides what to show and in what order, and
+//! knows no widget at all.
 
 pub mod arrange;
 pub mod controls;

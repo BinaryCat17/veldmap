@@ -1,49 +1,55 @@
-// Земля и сетка. Обе геометрии проходят через одну вершинную функцию: вершина
-// у них одна и та же — точка поверхности со своей нормалью; различаются они
-// только тем, чем красятся.
+// Earth and graticule. Both geometries go through one vertex function: their
+// vertex is one and the same — a surface point with its own normal; they differ
+// only in how they are colored.
 //
-// Нормаль приходит атрибутом, а не выводится из позиции: позиция равна нормали
-// только у шара, а поверхность здесь — эллипсоид WGS84 (см. geodesy.rs).
+// The normal arrives as an attribute rather than derived from position: position
+// equals the normal only on a sphere, while the surface here is the WGS84
+// ellipsoid (see geodesy.rs).
 //
-// Цвета согласованы с палитрой приложения (data-browser/theme.rs): LIT, ACCENT
-// и OUTLINE — её PAGE, ACCENT и INK_MUTED, делённые на 255; SHADE и GRID —
-// собственные полутона шара, в UI-палитре их нет. Числа именно sRGB, и это не
-// небрежность: место под шар — обычная UNORM-текстура, и показывает её
-// разметка тем же путём, что всякую другую картинку — линеаризует прочитанное
-// сама (см. shaders.wgsl в ui-service). Записанное сюда линейным приехало бы на
-// экран линейным же, то есть заметно темнее макета.
+// The colors match the application palette (data-browser/theme.rs): LIT, ACCENT
+// and OUTLINE are its PAGE, ACCENT and INK_MUTED divided by 255; SHADE and GRID
+// are the sphere's own midtones and have no UI-palette counterparts. The numbers
+// are deliberately sRGB, and this is not sloppiness: the place for the sphere is
+// an ordinary UNORM texture, and the markup shows it the same way as any other
+// image — linearizing what it reads itself (see shaders.wgsl in ui-service).
+// Written here as linear, it would arrive on screen still linear, that is,
+// noticeably darker than the mock-up.
 
 struct Camera {
-    /// Без переноса: глаз стои́т в начале координат, а вычитают его ниже, из
-    /// самой вершины. Перенос — число порядка единицы, и приехав сюда в f32, он
-    /// съедал бы восемь десятых метра у любой, сколь угодно точной вершины.
+    /// No translation: the eye stands at the origin, and it is subtracted below,
+    /// from the vertex itself. The translation is a number of order one, and
+    /// arriving here in f32 it would eat eight tenths of a meter from any vertex,
+    /// however precise.
     view_proj: mat4x4<f32>,
-    /// Глаз половинами — старшая и младшая (см. geodesy::parts в globe).
+    /// The eye in halves — high and low (see geodesy::parts in globe).
     eye: vec3<f32>,
     _pad: f32,
     eye_low: vec3<f32>,
     _pad2: f32,
-    /// Размер кадра в пикселях — им лента выделенного контура меряет свою
-    /// ширину (см. vs_ribbon). Штриховке он не нужен: она считает по
-    /// координате фрагмента, а та уже в пикселях.
+    /// Frame size in pixels — the selected-outline ribbon measures its width
+    /// with it (see vs_ribbon). The hatching does not need it: it computes from
+    /// the fragment coordinate, which is already in pixels.
     viewport: vec2<f32>,
-    /// Где стои́т волна ряби (доля периода) и насколько она заметна. Обе
-    /// величины одинаковы для всего кадра: рябит ступень слоя, а не отдельная
-    /// ячейка, и ячейка приносит только признак — рябить ей или нет.
+    /// Where the ripple wave stands (fraction of the period) and how visible it
+    /// is. Both quantities are the same for the whole frame: what ripples is the
+    /// layer's loading step, not an individual cell, and the cell only brings the
+    /// flag — whether to ripple or not.
     phase: f32,
     ripple: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 
-// Вершина, отсчитанная от глаза. Обе точки приходят половинами, и вычитаются
-// они по половинам порознь: разность старших у близких чисел одного порядка в
-// f32 **точна**, поэтому она сокращается без потерь, а младшие доносят
-// подробность. Оттого шаг координаты идёт от расстояния до глаза, а не от
-// радиуса Земли: на километре это доли микрона вместо восьмидесяти сантиметров.
+// Vertex measured from the eye. Both points arrive in halves, and the halves are
+// subtracted separately: the difference of the high parts of nearby numbers of
+// one magnitude in f32 is **exact**, so it cancels without loss, while the low
+// halves carry the detail. Hence the coordinate step goes by the distance to the
+// eye rather than by the Earth's radius: at a kilometer it is fractions of a
+// micron instead of eighty centimeters.
 //
-// Порядок скобок здесь несущий: сложи сперва старшую с младшей — и подробность
-// сгорит в первом же сложении, ещё до вычитания.
+// The order of the parentheses here is load-bearing: add the high to the low
+// first — and the detail burns up in the very first addition, before the
+// subtraction.
 fn relative(high: vec3<f32>, low: vec3<f32>) -> vec3<f32> {
     return (high - camera.eye) + (low - camera.eye_low);
 }
@@ -68,43 +74,44 @@ fn vs_main(
     return out;
 }
 
-// Насколько поверхность повёрнута к нам: 1 — точка прямо под камерой, 0 — край
-// силуэта. Обоим фрагментным шейдерам нужна одна и та же величина, и означает
-// она у них одно и то же — близость к краю.
+// How much the surface faces us: 1 — the point straight under the camera, 0 —
+// the silhouette edge. Both fragment shaders need one and the same quantity, and
+// it means one and the same thing for them — closeness to the edge.
 fn facing(in: VsOut) -> f32 {
-    // Глаз стои́т в нуле, а мир отсчитан от него — значит взгляд это и есть
-    // сама вершина, взятая назад.
+    // The eye stands at zero and the world is measured from it — so the view
+    // direction is the vertex itself, taken backwards.
     let view = normalize(-in.world);
     return clamp(dot(normalize(in.normal), view), 0.0, 1.0);
 }
 
-// Направление на солнце. Не привязано к камере: тень, ползающая за взглядом,
-// читается как дефект материала, а не как освещение.
+// Direction to the sun. Not tied to the camera: a shadow crawling after the
+// view reads as a material defect, not as lighting.
 const LIGHT = vec3<f32>(0.42, 0.60, 0.68);
 
-const LIT    = vec3<f32>(0.984, 0.973, 0.945); // #FBF8F1 — бумага
-const SHADE  = vec3<f32>(0.827, 0.788, 0.682); // #D3C9AE — она же в тени
-const ACCENT = vec3<f32>(0.290, 0.478, 0.247); // #4A7A3F — акцент
+const LIT    = vec3<f32>(0.984, 0.973, 0.945); // #FBF8F1 — paper
+const SHADE  = vec3<f32>(0.827, 0.788, 0.682); // #D3C9AE — the same in shadow
+const ACCENT = vec3<f32>(0.290, 0.478, 0.247); // #4A7A3F — accent
 
 @fragment
 fn fs_body(in: VsOut) -> @location(0) vec4<f32> {
-    // Половина света — направленная, половина ровная: чистый ламберт уводит
-    // ночную сторону в чёрный, а Земля должна читаться целиком.
+    // Half the light is directional, half is flat: pure lambertian turns the
+    // night side black, while the Earth must read as a whole.
     let lambert = clamp(dot(normalize(in.normal), normalize(LIGHT)), 0.0, 1.0);
     let body = mix(SHADE, LIT, 0.45 + 0.55 * lambert);
 
-    // Ободок: у края нормаль почти перпендикулярна взгляду. Он же и очерчивает
-    // силуэт — отдельной линии по контуру для этого не нужно.
+    // Rim: near the edge the normal is almost perpendicular to the view. It also
+    // outlines the silhouette — no separate contour line is needed for that.
     let rim = pow(1.0 - facing(in), 3.0);
     return vec4<f32>(mix(body, ACCENT, rim * 0.9), 1.0);
 }
 
-const GRID    = vec3<f32>(0.659, 0.725, 0.608); // #A8B99B — сетка
-const OUTLINE = vec3<f32>(0.361, 0.337, 0.282); // #5C5648 — приглушённые чернила
+const GRID    = vec3<f32>(0.659, 0.725, 0.608); // #A8B99B — graticule
+const OUTLINE = vec3<f32>(0.361, 0.337, 0.282); // #5C5648 — muted ink
 
-// Линии, лежащие на поверхности, гаснут у края силуэта: там они сходятся под
-// острым углом к взгляду и сгущаются в сплошную заливку. Величина одна на всех
-// — иначе контур и сетка растворялись бы на разной глубине и расходились.
+// Lines lying on the surface fade out at the silhouette edge: there they
+// converge at an acute angle to the view and pack into a solid fill. The
+// quantity is one for all — otherwise the outline and the graticule would
+// dissolve at different depths and come apart.
 fn line_alpha(in: VsOut) -> f32 {
     return smoothstep(0.0, 0.35, facing(in));
 }
@@ -114,34 +121,35 @@ fn fs_grid(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(GRID, line_alpha(in));
 }
 
-// Контуры снимков: темнее сетки, чтобы читаться поверх неё.
+// Image outlines: darker than the graticule so they read on top of it.
 @fragment
 fn fs_outline(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(OUTLINE, line_alpha(in));
 }
 
-// Остальные, когда выбран один: тот же контур вполсилы. Лента выбранного и так
-// заметна, но приглушённые соседи не спорят с ней за взгляд.
+// The others, when one is selected: the same outline at half strength. The
+// selected ribbon is conspicuous anyway, but muted neighbors do not compete
+// with it for the eye.
 @fragment
 fn fs_outline_dim(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(OUTLINE, line_alpha(in) * 0.35);
 }
 
-// --- Лента выделенного контура ---
-// Линия в пайплайне всегда в пиксель шириной, а выделенный снимок должен быть
-// виден среди полусотни соседних. Поэтому он обводится не линией, а полосой из
-// треугольников: вершина контура приезжает сюда дважды — левым краем полосы и
-// правым, — и разводит их в стороны этот шейдер.
+// --- Selected outline ribbon ---
+// A line in the pipeline is always one pixel wide, while the selected image must
+// be visible among fifty neighbors. So it is outlined not by a line but by a
+// strip of triangles: the outline vertex arrives here twice — as the left edge
+// of the strip and the right — and this shader spreads them apart.
 //
-// Разводит на экране, а не в мире: мировая ширина зависела бы от приближения —
-// на отлёте полоса расплылась бы в пятно, вблизи истончилась бы в ту же линию.
-// Экранная же остаётся собой на любом масштабе.
+// It spreads them on the screen, not in the world: a world-space width would
+// depend on zoom — far away the strip would blur into a spot, up close it would
+// thin into that same line. A screen-space one stays itself at any scale.
 
-/// Ширина ленты в пикселях кадра.
+/// Ribbon width in frame pixels.
 const RIBBON_PX: f32 = 5.0;
-/// Насколько сильно позволено растянуть стык на изломе. Ус стыка тем длиннее,
-/// чем острее угол, и на развороте почти назад он уходит в бесконечность;
-/// потолок обрезает его, оставляя стык слегка срезанным.
+/// How far the joint is allowed to stretch at a bend. The joint's miter is the
+/// longer the sharper the angle, and on a near-reversal it goes to infinity;
+/// the ceiling trims it, leaving the joint slightly beveled.
 const MITER_LIMIT: f32 = 3.0;
 
 fn to_screen(clip: vec4<f32>) -> vec2<f32> {
@@ -151,8 +159,8 @@ fn to_screen(clip: vec4<f32>) -> vec2<f32> {
 fn along(tail: vec2<f32>, head: vec2<f32>) -> vec2<f32> {
     let delta = head - tail;
     let len = length(delta);
-    // Совпавшие точки направления не задают: соседи вершины сходятся, когда
-    // контур пришёл с повторённой вершиной.
+    // Coincident points give no direction: a vertex's neighbors converge when
+    // the outline arrives with a repeated vertex.
     if len < 1e-5 {
         return vec2<f32>(1.0, 0.0);
     }
@@ -173,15 +181,16 @@ fn vs_ribbon(
     out.world = at_eye;
     out.normal = normal;
 
-    // Соседи приходят смещениями от этой вершины, а не своими местами: их
-    // старшие половины совпадают с её собственной, и разность, взятая здесь,
-    // дала бы ноль там, где до соседа полсотни метров.
+    // Neighbors arrive as offsets from this vertex rather than at their own
+    // places: their high halves coincide with its own, and a difference taken
+    // here would give zero where the neighbor is fifty meters away.
     let clip = camera.view_proj * vec4<f32>(at_eye, 1.0);
     let clip_prev = camera.view_proj * vec4<f32>(at_eye + prev, 1.0);
     let clip_next = camera.view_proj * vec4<f32>(at_eye + next, 1.0);
     out.clip = clip;
-    // Вершина или её сосед за камерой: делить на такое w нельзя, а звено всё
-    // равно не видно — оставляем полосу схлопнутой в линию.
+    // The vertex or its neighbor is behind the camera: dividing by such a w is
+    // not allowed, and the segment is invisible anyway — leave the strip
+    // collapsed into a line.
     if clip.w <= 0.0 || clip_prev.w <= 0.0 || clip_next.w <= 0.0 {
         return out;
     }
@@ -189,8 +198,8 @@ fn vs_ribbon(
     let here = to_screen(clip);
     let back = along(to_screen(clip_prev), here);
     let ahead = along(here, to_screen(clip_next));
-    // Нормаль стыка — биссектриса нормалей соседних звеньев, удлинённая
-    // ровно настолько, чтобы полоса осталась своей ширины и на изломе.
+    // The joint normal is the bisector of the neighboring segments' normals,
+    // lengthened just enough for the strip to keep its width at a bend too.
     let n_back = vec2<f32>(-back.y, back.x);
     let n_ahead = vec2<f32>(-ahead.y, ahead.x);
     var miter = n_back + n_ahead;
@@ -203,29 +212,32 @@ fn vs_ribbon(
     let stretch = 1.0 / max(dot(miter, n_ahead), 1.0 / MITER_LIMIT);
 
     let offset = miter * side * RIBBON_PX * 0.5 * stretch;
-    // Обратно в отсечение: экранные пиксели — это доли кадра, умноженные на w.
+    // Back to clip space: screen pixels are frame fractions multiplied by w.
     out.clip = vec4<f32>(clip.xy + offset / (camera.viewport * 0.5) * clip.w, clip.z, clip.w);
     return out;
 }
 
-// Выбранный снимок: акцент в полную силу. Гаснет у края силуэта тем же
-// правилом, что и линии, — иначе на самом краю полоса сгустилась бы в заливку.
+// The selected image: the accent at full strength. It fades at the silhouette
+// edge by the same rule as the lines — otherwise at the very edge the strip
+// would pack into a fill.
 @fragment
 fn fs_ribbon(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(ACCENT, line_alpha(in));
 }
 
-// --- Занятая область ---
-// Снимок, который на шар только едет: место, куда он ляжет, заштриховано, а по
-// краю обведено обычным контуром. Картинки ещё нет — и это единственное, чем о
-// ней можно сказать «она будет здесь», а не «где-то».
+// --- Reserved area ---
+// An image that is only on its way to the globe: the place where it will land is
+// hatched, and its edge is outlined with the usual contour. There is no picture
+// yet — and this is the only way to say of it "it will be here" rather than
+// "somewhere".
 
-/// Шаг штриховки в пикселях кадра: половина его закрашена, половина выброшена.
+/// Hatching step in frame pixels: half of it is painted, half discarded.
 ///
-/// Меряется кадром, а не миром: в мире шаг зависел бы от приближения — на
-/// отлёте область слилась бы в сплошную заливку, вблизи штрих разъехался бы на
-/// пол-экрана. Наклон — чтобы штрих не совпал с краями области: у контура
-/// снимка стороны чаще всего близки к горизонтали и вертикали.
+/// Measured by the frame, not the world: in the world the step would depend on
+/// zoom — far away the area would merge into a solid fill, up close a hatch line
+/// would sprawl across half the screen. The slant keeps the hatch from aligning
+/// with the area's edges: an image outline most often has sides close to
+/// horizontal and vertical.
 const HATCH_PX: f32 = 18.0;
 
 @fragment
@@ -233,24 +245,27 @@ fn fs_hatch(in: VsOut) -> @location(0) vec4<f32> {
     if fract((in.clip.x + in.clip.y) / HATCH_PX) > 0.5 {
         discard;
     }
-    // Слабее контура: штриховка занимает целую область, и в полную силу она
-    // спорила бы и с самим контуром, и с тем, что уже лежит на шаре рядом.
+    // Weaker than the outline: the hatching covers a whole area, and at full
+    // strength it would compete both with the outline itself and with what
+    // already lies on the globe nearby.
     return vec4<f32>(OUTLINE, line_alpha(in) * 0.5);
 }
 
-// --- Наложения ---
-// Варп-сетка тайла-носителя: позиции уже в мире, интерполяцию между узлами
-// делает GPU. Тайл — sRGB-текстура, сэмплер отдаёт линейное, а таргет —
-// UNORM с sRGB-числами (см. заголовок), поэтому перед записью значение
-// кодируется обратно — тем же правилом, что у канвы превью.
+// --- Overlays ---
+// The carrier tile's warp mesh: positions are already in world space, and the
+// GPU interpolates between the nodes. The tile is an sRGB texture, the sampler
+// hands out linear values, and the target is UNORM holding sRGB values (see the
+// header), so before writing, the value is encoded back — by the same rule as
+// the preview canvas.
 
 struct OverlayVsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) alpha: f32,
-    /// Ноль — ячейка накрыта тем, чем должна, и не рябит. Иначе — её сдвиг по
-    /// фазе, 0..1: у каждой ячейки свой, чтобы грузящееся место переливалось, а
-    /// не мигало разом (см. overlay::ripple_of в globe).
+    /// Zero — the cell is covered by what it should be and does not ripple.
+    /// Otherwise — its phase offset, 0..1: each cell has its own, so a loading
+    /// place shimmers instead of blinking all at once (see overlay::ripple_of in
+    /// globe).
     @location(2) ripple: f32,
 };
 
@@ -279,13 +294,13 @@ fn encode_srgb(linear: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, linear <= vec3<f32>(0.0031308));
 }
 
-/// Синева грузящегося: холодный цвет, которого нет ни у Земли, ни у контуров,
-/// ни у акцента. sRGB, как и остальные здешние числа, и через encode_srgb она
-/// не проходит — он только для сэмплированного.
+/// The blue of the loading: a cold color that belongs to neither the Earth, nor
+/// the outlines, nor the accent. sRGB like the other numbers here, and it does
+/// not pass through encode_srgb — that one is only for sampled values.
 const LOADING = vec3<f32>(0.247, 0.443, 0.643); // #3F71A4
 
-/// На сколько рябь перебивает картинку в самый сильный свой миг. «Слегка
-/// заметная» — это про неё: под ней надо видеть снимок, а не синеву.
+/// How much the ripple overrides the picture at its strongest blink. "Barely
+/// visible" is about it: the image must show through it, not the blue.
 const RIPPLE_DEPTH: f32 = 0.30;
 
 const TAU: f32 = 6.2831855;
@@ -294,16 +309,18 @@ const TAU: f32 = 6.2831855;
 fn fs_overlay(in: OverlayVsOut) -> @location(0) vec4<f32> {
     let sampled = textureSample(overlay_texture, overlay_sampler, in.uv);
     var rgb = encode_srgb(sampled.rgb);
-    // Ячейка приносит признак и свой сдвиг, кадр — саму фазу и силу. Сила
-    // растёт к концу ступени: рябь тем заметнее, чем ближе резкая картинка.
+    // The cell brings the flag and its own offset, the frame brings the phase
+    // itself and the strength. The strength grows toward the end of the loading
+    // step: the ripple is the more visible the closer the sharp picture is.
     if in.ripple > 0.0 {
         let wave = 0.5 + 0.5 * sin(TAU * (camera.phase + in.ripple));
         rgb = mix(rgb, LOADING, RIPPLE_DEPTH * camera.ripple * wave);
     }
-    // Альфа носителя проходит как есть — прозрачные поля квиклуков показывают
-    // Землю, — а прозрачность слоя её домножает: полупрозрачным становится то,
-    // что было видно, и не проступает то, чего не было. Рябь на неё не влияет:
-    // она красит видимое, а не проявляет невидимое, и второе домножение на
-    // прозрачность слоя погасило бы её вдвое там, где ползунок и так убавил.
+    // The carrier's alpha passes as is — the transparent fields of quicklooks
+    // show the Earth — while the layer's opacity multiplies it: what was visible
+    // becomes translucent, and what was not does not show through. The ripple
+    // does not affect it: it paints what is visible rather than reveals what is
+    // invisible, and a second multiplication by the layer's opacity would dim
+    // it by half where the slider has already lowered it.
     return vec4<f32>(rgb, sampled.a * in.alpha);
 }

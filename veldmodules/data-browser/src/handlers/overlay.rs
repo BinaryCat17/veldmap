@@ -1,25 +1,26 @@
-//! Наложения на шар: свести «какой продукт → какие файлы → показать».
+//! Overlays on the globe: tie "which product -> which files -> show" together.
 //!
-//! Ровно та же граница, что у контуров: провайдер знает раскладку продукта и
-//! отдаёт роли растров с рамкой, глобус умеет натянуть открытые ресурсы на
-//! привязку — а свести одно с другим может только тот, у кого и список, и
-//! шар. Ресурсы открывает провайдер (подпись только у него), владение уходит
-//! глобусу вместе с набором наложений.
+//! Exactly the same boundary as for outlines: the provider knows the product
+//! layout and gives out raster roles with the frame, the globe can drape
+//! opened resources over the binding — and only the one who holds both the
+//! list and the globe can tie one to the other. The provider opens the
+//! resources (the signature is only theirs), ownership goes to the globe
+//! together with the overlay set.
 //!
-//! Наложений много, и глобусу они уезжают набором целиком — не потому, что так
-//! дешевле, а потому, что таков его контракт: чего не прислали, того больше
-//! нет. Отсюда единственное правило этого модуля: **всякое изменение набора
-//! кончается отправкой набора** ([`send_set`]). Дописать одно наложение или
-//! погасить одно нечем, и заводить для этого второй способ значило бы держать
-//! набор в двух местах сразу.
+//! There are many overlays, and they travel to the globe as a whole set — not
+//! because it is cheaper, but because that is its contract: what was not sent
+//! is gone. Hence the only rule of this module: **every change of the set ends
+//! with sending the set** ([`send_set`]). There is no way to append one overlay
+//! or fade one, and inventing a second way for that would mean keeping the set
+//! in two places at once.
 //!
-//! Спрашивать перед отправкой «а изменился ли набор» при этом не нужно: топик
-//! объявлен снимком, и совпавший с прошлым до шины не доходит. Правило поэтому
-//! и звучит без оговорок — отправляют всегда.
+//! Asking "did the set change" before sending is not needed: the topic is
+//! declared as a snapshot, and one matching the previous does not reach the
+//! bus. The rule therefore holds without caveats — always send.
 //!
-//! Уже отправленные растры пересылаются теми же дескрипторами: владения за
-//! ними нет, это имена, по которым глобус узнаёт прежнее наложение и не
-//! переоткрывает его.
+//! Already sent rasters are resent with the same descriptors: there is no
+//! ownership over them, these are names by which the globe recognizes the
+//! previous overlay and does not reopen it.
 
 use crate::module::footprint;
 use crate::module::state::{
@@ -35,18 +36,20 @@ use crate::proto::globe::{
 };
 use veldsdk::proto::core::ResourceOpened;
 
-/// Начиная с какого размаха долгот контур перестаёт быть четырёхугольником и
-/// становится поясом вокруг Земли. Полоса съёмки такой ширины не бывает: самая
-/// широкая гранула — четыреста километров, а виток пересекает меридианы,
-/// оставаясь полосой, и в габарит по долготе укладывается с большим запасом.
+/// From which longitude span a footprint stops being a quadrilateral and
+/// becomes a belt around the Earth. An acquisition swath is never this wide:
+/// the widest granule is four hundred kilometers, and an orbit crosses
+/// meridians while staying a strip, fitting the longitude extent with a large
+/// margin.
 const WHOLE_EARTH_DEG: f64 = 350.0;
 
-/// Роль растра у провайдера и роль растра у глобуса — два разных перечисления
-/// в двух разных контрактах, и связаны они здесь, а не совпадением чисел.
+/// The raster role at the provider and the raster role at the globe are two
+/// different enums in two different contracts, and they are linked here, not
+/// by matching numbers.
 ///
-/// Совпадение — не связь: оно держится ровно до того дня, когда одному из
-/// перечислений добавят вариант в середину, и тогда подробный растр поедет
-/// превью, а компилятор об этом не скажет. Match'ем скажет.
+/// A match is not a link: it holds exactly until the day an enum gets a new
+/// variant in the middle, and then the detailed raster will travel as the
+/// preview, and the compiler will not say a word. The `match` will.
 fn role_for_globe(role: crate::proto::data_provider::ImageryRole) -> OverlayRole {
     use crate::proto::data_provider::ImageryRole;
     match role {
@@ -55,145 +58,151 @@ fn role_for_globe(role: crate::proto::data_provider::ImageryRole) -> OverlayRole
     }
 }
 
-/// Последний сегмент ключа хранилища — имя файла, каким его показывают в строке
-/// слоя. Ключ папки с косой чертой на конце называется папкой.
+/// The last segment of the storage key is the file name shown in the layer
+/// row. A folder key ending in a slash is named by the folder.
 fn file_name(identifier: &str) -> &str {
     identifier.trim_end_matches('/').rsplit('/').next().unwrap_or_default()
 }
 
-/// «На глобус» из строки списка — и обратно: тот же значок снимает то, что
-/// положил.
+/// "On the globe" from a list row — and back: the same icon removes what it
+/// placed.
 ///
-/// Переключателем, а не односторонним показом, и ровно по той же механике, что
-/// у значка контура: снимок либо на шаре, либо нет — вопрос один, и отвечать на
-/// него нажатием туда и кнопкой в другом списке обратно значило бы завести
-/// одному состоянию два рычага в разных местах.
+/// A toggle, not a one-way show, and with the exact mechanics of the outline
+/// icon: the snapshot is either on the globe or it is not — one question, and
+/// answering it with a press here and a button in another list back would mean
+/// giving one state two levers in different places.
 ///
-/// Камеру это не двигает. Наводка — отдельное намерение и отдельная кнопка
-/// (`Msg::OutlineFocus`): «покажи здесь» и «отвези меня туда» — разные просьбы,
-/// и сведённые в одну они отбирают друг у друга ответ — положить второй снимок
-/// рядом с первым становится нельзя, не улетев к нему.
+/// It does not move the camera. Aiming is a separate intention and a separate
+/// button (`Msg::OutlineFocus`): "show here" and "take me there" are different
+/// requests, and merged into one they take the answer from each other — placing
+/// a second snapshot next to the first becomes impossible without flying off
+/// to it.
 ///
-/// Ключ приходит уже без завершающего слэша листинга: приводит его к виду
-/// продукта сама строка (см. `Row::snapshot_key`), и второе такое правило
-/// разошлось бы с первым.
+/// The key arrives already without the listing's trailing slash: the row itself
+/// normalizes it to the product form (see `Row::snapshot_key`), and a second
+/// such rule would disagree with the first.
 ///
-/// Показ выбора коробочкой не ставит: это разные намерения. Выбирают, чтобы
-/// что-то с набранным сделать — очертить, удалить, скачать, — а показывают,
-/// чтобы посмотреть, и живёт показанное своим списком («На просмотре»). Ставя
-/// заодно коробочку, показ клал бы снимок в состав следующего пакетного
-/// действия, которого никто не просил.
+/// Showing does not tick the selection checkbox: these are different
+/// intentions. Selection is for doing something with what is picked — outline,
+/// delete, download — while showing is for looking, and what is shown lives in
+/// its own list ("On view"). Ticking the checkbox along the way would put the
+/// snapshot into the next batch action nobody asked for.
 pub fn on_toggle_pressed(state: &mut State, view: ViewId, identifier: String) {
-    // Меню строки закрываем сами: нажатое в нём сделано, а открытым оно
-    // осталось бы висеть над списком.
+    // We close the row menu ourselves: what was pressed in it is done, and left
+    // open it would keep hanging over the list.
     state.close_menus();
-    // Прежний отказ снимается новой попыткой: держать его дальше значило бы
-    // объяснять причиной то, чего больше не происходит, — а сорваться показ
-    // мог и по сети, и второй заход тогда удаётся.
+    // A previous refusal is cleared by a new attempt: keeping it further would
+    // mean explaining with a cause what no longer happens — and the show could
+    // fail over the network too, and then a second try succeeds.
     state.unshowable.remove(&identifier);
-    // Уже на шаре или туда едет — значит просят снять. Скрытый в этот счёт
-    // идёт наравне с видимым: он остаётся слоем, и значок в строке горит у
-    // него так же.
+    // Already on the globe or on the way there — so they ask to remove it. A
+    // hidden one counts the same as a visible one: it remains a layer, and the
+    // icon in its row lights up just the same.
     if state.overlays.iter().any(|overlay| overlay.identifier == identifier) {
         remove(state, &identifier);
         return;
     }
-    // Ход к каталогу за продуктом убить нечем — он ответит всё равно, — но
-    // расхотеть показ можно: ответ спросит, всё ли ещё его ждут (см.
-    // [`on_located`]).
+    // The trip to the catalogue for the product cannot be killed — it will
+    // answer anyway — but the show can become unwanted: the answer will ask
+    // whether it is still awaited (see [`on_located`]).
     if state.showing.remove(&identifier) {
-        veldsdk::log::info!(target: "handlers", "показ '{}' отменён до ответа каталога", identifier);
-        // И просьба о файле с ним: её никто не ждёт.
+        veldsdk::log::info!(target: "handlers", "show of '{}' cancelled before the catalogue answered", identifier);
+        // And the file wish with it: nobody waits for it.
         state.file_wishes.remove(&identifier);
         send_set(state);
         return;
     }
-    // Сперва выдача: там у продукта есть всё, что нужно, и ходить за ним в
-    // каталог второй раз незачем.
+    // First the search results: there the product already has everything
+    // needed, and there is no reason to go to the catalogue a second time.
     if super::search::show(state, view, &identifier) {
         super::nav::on_new_globe(state);
         return;
     }
-    // Продукт придётся восстанавливать у провайдера — и один ход отвечает
-    // обоим: и наложению, и контуру. Ответ помечается ожидаемым здесь же, иначе
-    // сборка контуров послала бы за тем же продуктом второй запрос. Известное
-    // при этом не затирается: у очерченного геометрия уже лежит, и стёртая
-    // означала бы пропавший на кадр контур.
+    // The product has to be restored from the provider — and one trip answers
+    // both: the overlay and the outline. The answer is marked as expected right
+    // here, otherwise the outline assembly would send a second request for the
+    // same product. What is already known is not overwritten: an outlined one
+    // already has its geometry stored, and erasing it would mean an outline
+    // missing for a frame.
     if !matches!(state.located.get(&identifier), Some(Located::Found(_))) {
         state.located.insert(identifier.clone(), Located::Asking);
     }
     state.showing.insert(identifier.clone());
     let correlation = state.locates.begin(Locate::Overlay(identifier.clone()));
     crate::calls::data_provider::on_locate(&LocateRequest { identifier }, &correlation);
-    // Просьба уже видна — значком в строке и полосой под ней (см.
-    // `rows::onto_globe`), — а место снимка на шаре покажет штриховка, если
-    // геометрия под рукой.
+    // The wish is already visible — by the icon in the row and the bar under
+    // it (see `rows::onto_globe`) — and the snapshot's place on the globe will
+    // show hatching if the geometry is at hand.
     send_set(state);
     super::nav::on_new_globe(state);
 }
 
-/// Продукт восстановлен по ключу — показываем, как показывали бы из поиска.
+/// The product is restored by key — show it as we would from search.
 ///
-/// Ключ продукта может оказаться не тем, которым его позвали: спросили файл
-/// внутри снимка, а каталог отвечает корнем продукта (см. `on_locate` у
-/// провайдера). Наложение ложится под ключом продукта — иначе глобус получил
-/// бы два ключа на один снимок.
+/// The product key may turn out different from the one it was called with: a
+/// file inside the snapshot was asked for, but the catalogue answers with the
+/// product root (see `on_locate` at the provider). The overlay is placed under
+/// the product key — otherwise the globe would get two keys for one snapshot.
 pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
-    // Пока ход к каталогу шёл, показа могли и расхотеть — «снять с шара» за
-    // эти секунды нажать успевают. Убить запрос в полёте нечем, он ответит
-    // всё равно, поэтому спрашиваем здесь, всё ли ещё его ждут. Иначе
-    // приложение через несколько секунд после отмены само кладёт на шар
-    // снимок, которого не просили.
+    // While the trip to the catalogue was in flight, the show could become
+    // unwanted — "remove from the globe" gets pressed within those seconds.
+    // The request cannot be killed in flight, it will answer anyway, so we
+    // ask here whether it is still awaited. Otherwise, seconds after the
+    // cancellation, the application itself would place a snapshot on the globe
+    // that nobody asked for.
     //
-    // Закрытая вкладка показа не отменяет: слой лежит в состоянии модуля и
-    // живёт своим списком, а не тем, из которого его позвали.
+    // A closed search tab does not cancel the show: the layer lives in the
+    // module state and its own list, not the one it was called from.
     if !state.showing.remove(key) {
-        veldsdk::log::info!(target: "handlers", "показ '{}' расхотели, пока шёл ответ", key);
+        veldsdk::log::info!(target: "handlers", "show of '{}' became unwanted while the answer was in flight", key);
         return;
     }
     let Some(product) = response.product else {
-        veldsdk::log::warn!(target: "handlers", "показать на шаре не вышло: {}", response.error);
-        state.notice = Some(format!("Показать на шаре не вышло: {}", response.error));
-        // Просьбы больше нет — значит нечего и штриховать (см. [`send_set`]);
-        // и файлу, которым просили лечь, ждать нечего.
+        veldsdk::log::warn!(target: "handlers", "could not show on the globe: {}", response.error);
+        state.notice = Some(format!("Could not show on the globe: {}", response.error));
+        // The wish is gone — so there is nothing left to hatch (see
+        // [`send_set`]); and the file it asked to lie with has nothing to wait
+        // for.
         state.file_wishes.remove(key);
         send_set(state);
         return;
     };
 
-    // Ответ пришёл под другим ключом, и спрошенное под этим больше ничего не
-    // значит: следующий, кому понадобится геометрия файла, спросит заново.
-    // Кроме случая, когда этот ключ очерчен: там ответ ждут, и забытый он
-    // уехал бы в каталог второй раз за тем же самым.
+    // The answer arrived under a different key, and what was asked under this
+    // one no longer means anything: the next one who needs the file geometry
+    // will ask again. Except when this key is outlined: there the answer is
+    // awaited, and forgotten it would go to the catalogue a second time for
+    // the same thing.
     if key != product.identifier && !state.outlines.contains(key) {
         state.located.remove(key);
     }
-    // Продукт кладётся в кэш под своим ключом — тем, которым он теперь и
-    // адресуется: без этого сборка контуров сочла бы его неспрошенным и
-    // послала бы в каталог второй запрос за тем же самым.
+    // The product is cached under its own key — the one it is now addressed
+    // by: without this the outline assembly would consider it unasked and send
+    // a second request to the catalogue for the same thing.
     state.located.insert(product.identifier.clone(), Located::Found(product.clone()));
     show(state, &product, None);
 }
 
-/// Положить продукт на шар. Уже лежащий не кладётся заново: пересборка стоила
-/// бы переоткрытия растров, а на шаре он и так есть.
+/// Place a product on the globe. An already placed one is not placed again: a
+/// rebuild would cost reopening the rasters, and it is on the globe anyway.
 ///
-/// Новый слой встаёт поверх прежних — концом набора, потому что его и просили
-/// показать.
+/// The new layer goes on top of the previous ones — at the end of the set,
+/// because that is what was asked to be shown.
 ///
-/// `source` — вид поиска, из выдачи которого продукт взят; для продукта,
-/// восстановленного по ключу, его нет (см. `OverlayState::source`).
+/// `source` — the search view whose results the product was taken from; for a
+/// product restored by key there is none (see `OverlayState::source`).
 pub fn show(state: &mut State, product: &DataProduct, source: Option<ViewId>) {
-    // Прежний отказ снимается всякой новой попыткой показать, каким бы путём
-    // она ни пришла — значком, контуром или выдачей поиска. Сниматься он обязан
-    // здесь, в общей воронке: у входов в показ три места, и причина, оставшаяся
-    // после удавшегося показа, пережила бы его и всплыла бы охрой на снятом
-    // слое.
+    // A previous refusal is cleared by every new attempt to show, whichever way
+    // it comes — icon, outline, or search results. It must be cleared here, in
+    // the common funnel: there are three entrances to showing, and a reason left
+    // after a successful show would outlive it and surface as ochre on a
+    // removed layer.
     state.unshowable.remove(&product.identifier);
     if state.overlays.iter().any(|overlay| overlay.identifier == product.identifier) {
-        // Класть нечего, а сказать есть о чём: сюда приходят и с ответом
-        // каталога, снявшим просьбу (см. [`on_located`]), — а просьба помечена
-        // на шаре штриховкой, и снять её больше некому.
+        // Nothing to place, but something to say: this is also reached with a
+        // catalogue answer that cancelled the wish (see [`on_located`]) — and
+        // the wish is marked on the globe with hatching, and nobody else can
+        // clear it.
         send_set(state);
         return;
     }
@@ -206,20 +215,22 @@ pub fn show(state: &mut State, product: &DataProduct, source: Option<ViewId>) {
         quad_of(product),
         footprint::frame(&product.footprint),
     );
-    // Просьба положить снимок этим файлом ждала продукта здесь (см.
-    // `State::file_wishes`); слой её и несёт дальше.
+    // The wish to place the snapshot with this file waited for the product
+    // here (see `State::file_wishes`); the layer carries it on.
     overlay.wanted_file = state.file_wishes.remove(&product.identifier);
     state.overlays.push(overlay);
 
     request_imagery(state, &product.identifier);
-    // Набор наложений сам по себе не изменился — собирающийся в него не
-    // попадает, — но изменилось то, что на шаре видно: место снимка помечается
-    // штриховкой, пока картинки нет (см. [`send_set`]).
+    // The overlay set itself has not changed — the one being assembled does
+    // not enter it — but what is visible on the globe has: the snapshot's
+    // place is marked with hatching while there is no picture yet (see
+    // [`send_set`]).
     send_set(state);
 }
 
-/// Спросить у провайдера растры слоя — с файлом, которым просили лечь, если
-/// просили. Одно место на первый запрос и на повторный со сменой файла.
+/// Ask the provider for the layer's rasters — with the file we were asked to
+/// place, if any. One place for the first request and for a repeat with a
+/// changed file.
 fn request_imagery(state: &mut State, key: &str) {
     let correlation = state.imageries.begin(key.to_string());
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
@@ -228,35 +239,38 @@ fn request_imagery(state: &mut State, key: &str) {
     crate::calls::data_provider::on_imagery(&request, &correlation);
 }
 
-/// Чем спрашивать растры слоя: ключ снимка, скачан ли он и файл, которым
-/// просили лечь.
+/// What to ask the layer's rasters with: the snapshot key, whether it is
+/// downloaded, and the file we were asked to place.
 fn imagery_request(library: &crate::module::state::LibraryState, overlay: &OverlayState) -> ImageryRequest {
     ImageryRequest {
-        // Скачан ли снимок, знаем только мы: у провайдера одно хранилище. От
-        // этого зависит состав растров — подробный, читаемый целым проходом,
-        // предлагается лишь тогда, когда файл под рукой.
+        // Whether the snapshot is downloaded is known only to us: the provider
+        // has a single store. The raster set depends on it — the detailed one,
+        // readable in a single pass, is only offered when the file is at hand.
         downloaded: library.whole(&overlay.identifier),
         identifier: overlay.identifier.clone(),
         wanted: overlay.wanted_file.clone().unwrap_or_default(),
     }
 }
 
-/// Положить снимок на шар этим файлом — пункт меню файла внутри снимка.
+/// Place the snapshot on the globe with this file — the file menu item inside
+/// a snapshot.
 ///
-/// Лежащему слою растры спрашиваются заново с названным файлом: приедут
-/// другие ресурсы, и глобус заменит набор (см. его `adopt_overlay`), прежний
-/// лежит до замены. Слоя ещё нет — продукт восстанавливается тем же ходом,
-/// что по значку шара, а просьба ждёт его в `State::file_wishes`. Сборка или
-/// запрос растров в полёте — просьба ждёт их конца: вторая сборка поверх
-/// первой оставила бы её открытия без хозяина. Отменённый показ, отказ
-/// каталога и снятый слой просьбу уносят с собой.
+/// For an already placed layer the rasters are re-asked with the named file:
+/// other resources will arrive, and the globe will replace the set (see its
+/// `adopt_overlay`); the previous one stays until the replacement. If there is
+/// no layer yet, the product is restored by the same trip as via the globe
+/// icon, and the wish waits for it in `State::file_wishes`. If an assembly or
+/// a raster request is in flight, the wish waits for their end: a second
+/// assembly on top of the first would leave its opens without an owner. A
+/// cancelled show, a catalogue refusal, and a removed layer take the wish with
+/// them.
 pub fn on_file_pressed(state: &mut State, product: &str, file: String) {
     state.close_menus();
     place_file(state, product, file);
 }
 
-/// Положить снимок этим файлом — без закрытия меню: сюда приходит и просьба,
-/// дождавшаяся конца сборки (см. [`finish`]).
+/// Place the snapshot with this file — without closing the menu: this is also
+/// where a wish that waited out the assembly comes (see [`finish`]).
 fn place_file(state: &mut State, product: &str, file: String) {
     state.unshowable.remove(product);
     if let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == product) {
@@ -264,7 +278,7 @@ fn place_file(state: &mut State, product: &str, file: String) {
             return;
         }
         if overlay.imagery.is_some() || overlay.assembly.is_some() {
-            veldsdk::log::info!(target: "handlers", "'{}': растры ещё собираются — файл {} подождёт", overlay.label, file_name(&file));
+            veldsdk::log::info!(target: "handlers", "'{}': rasters are still being assembled — file {} will wait", overlay.label, file_name(&file));
             state.file_wishes.insert(product.to_string(), file);
             return;
         }
@@ -294,26 +308,27 @@ fn place_file(state: &mut State, product: &str, file: String) {
     super::nav::on_new_globe(state);
 }
 
-/// Убрать одно наложение: ресурсы отпустить, набор переслать.
+/// Remove one overlay: release the resources, resend the set.
 pub fn remove(state: &mut State, key: &str) {
     let Some(index) = state.overlays.iter().position(|overlay| overlay.identifier == key) else {
         return;
     };
     let overlay = state.overlays.remove(index);
     abandon(state, overlay);
-    // Снятый слой мог быть тем, что обведён лентой: без него ленте не на чем
-    // держаться (см. `outline::forget_gone`).
+    // The removed layer could be the one circled by the ribbon: without it the
+    // ribbon has nothing to hold on to (see `outline::forget_gone`).
     super::outline::forget_gone(state);
     send_set(state);
 }
 
-/// Подвинуть слой в наборе на одно место. Порядок набора — он же порядок слоёв
-/// на шаре снизу вверх, поэтому вся перестановка здесь и кончается: глобус
-/// получит набор целиком и разложит его в присланном порядке.
+/// Move a layer one place within the set. The set order is also the layer
+/// order on the globe from bottom to top, so the whole rearrangement ends
+/// here: the globe receives the set whole and lays it out in the order sent.
 ///
-/// Направление здесь — про набор, а не про экран: список «На просмотре»
-/// перевёрнут (сверху новые), и переворот живёт у него (см. `view::shown`).
-/// Крайний слой не двигается и молча — упереться в край не ошибка.
+/// The direction here is about the set, not the screen: the "On view" list is
+/// reversed (newest on top), and the reversal lives there (see `view::shown`).
+/// The end layer does not move, and silently — bumping into the end is not an
+/// error.
 pub fn shift(state: &mut State, key: &str, shift: Shift) {
     let Some(index) = state.overlays.iter().position(|overlay| overlay.identifier == key) else {
         return;
@@ -327,10 +342,11 @@ pub fn shift(state: &mut State, key: &str, shift: Shift) {
     send_set(state);
 }
 
-/// Снять с шара всё.
+/// Remove everything from the globe.
 pub fn clear_all(state: &mut State) {
-    // И то, что ещё едет: ответ каталога придёт всё равно, а положить снимок
-    // после «снять с шара» значило бы вернуть на шар то, что с него убрали.
+    // And what is still in flight: the catalogue answer will arrive anyway, and
+    // placing a snapshot after "remove all" would mean returning to the globe
+    // what was just removed from it.
     state.showing.clear();
     for overlay in std::mem::take(&mut state.overlays) {
         abandon(state, overlay);
@@ -339,29 +355,33 @@ pub fn clear_all(state: &mut State) {
     send_set(state);
 }
 
-/// Конец одного наложения. Отправленные растры освобождает глобус — он их
-/// владелец, и следующий набор без этого ключа их и освободит; наши остаются
-/// только у сборки, оборванной на середине.
+/// The end of one overlay. The globe frees the sent rasters — it owns them,
+/// and the next set without this key will free them; ours remain only with an
+/// assembly broken off midway.
 fn abandon(state: &mut State, overlay: OverlayState) {
-    // Запрос растров снимается с учёта здесь же, что и открытия: без этого его
-    // ответ опознался бы слоем, положенным под тем же ключом заново, и завёл бы
-    // ему вторую сборку поверх первой.
+    // The raster request is taken off the ledger here, the same as the opens:
+    // otherwise its answer would be recognized as a layer placed under the
+    // same key again and would start a second assembly on top of the first.
     if let Some(correlation) = &overlay.imagery {
         state.imageries.take(correlation);
     }
-    // Просьба о файле, ждавшая конца сборки, уходит вместе со слоем: снятый
-    // слой её не исполнит, а следующий показ того же снимка её не просил.
+    // The file wish that waited for the assembly to end leaves with the layer:
+    // a removed layer will not fulfil it, and the next show of the same
+    // snapshot did not ask for it.
     state.file_wishes.remove(&overlay.identifier);
     let Some(assembly) = overlay.assembly else { return };
-    // Открытия в полёте снимаются с общего учёта здесь: иначе их ответ
-    // опознался бы следующей сборкой того же ключа, а его ресурс лёг бы в
-    // чужой набор. Снятый доедет до общего discard в module::on_open_result.
+    // In-flight opens are taken off the common ledger here: otherwise their
+    // answer would be recognized by the next assembly of the same key, and its
+    // resource would land in a foreign set. The removed one reaches the common
+    // discard in module::on_open_result.
     for correlation in &assembly.opens {
-        // Корреляция остаётся на учёте, но с пустым ключом: наложения с таким
-        // ключом нет, и приехавший позже ответ пройдёт по ветке «наложение
-        // убрали» — ресурс в нём наш, там его примут и отпустят. Снять с учёта
-        // совсем нельзя: неопознанный ответ уходит в `discard`, а тот ресурса
-        // не трогает — файл остался бы открытым до конца сеанса.
+        // The correlation stays on the ledger, but with an empty key: there is
+        // no overlay with such a key, and the answer arriving later takes the
+        // "overlay was removed" branch — the resource in it is ours, there it
+        // is accepted and released. Taking it off the ledger entirely is not
+        // allowed: an unrecognized answer goes to `discard`, and that one does
+        // not touch the resource — the file would stay open until the end of
+        // the session.
         if let Some((_, role, ordinal, part)) = state.opens.take(correlation) {
             state.opens.insert(correlation.clone(), (String::new(), role, ordinal, part));
         }
@@ -371,27 +391,27 @@ fn abandon(state: &mut State, overlay: OverlayState) {
     }
 }
 
-/// Наложение переживает новый поиск в своём виде, только если его продукт
-/// остался в выдаче, — тем же правилом, что и отметка (см.
-/// `search::survivors`). Чужая выдача наложений не трогает: продукт из
-/// каталога или загрузок в ней и не бывал.
+/// An overlay survives a new search in its own view only if its product is
+/// still in the results — the same rule as the marker (see
+/// `search::survivors`). A foreign view's results do not touch overlays: a
+/// product from the catalogue or downloads was never in it.
 pub fn keep_only(state: &mut State, view: ViewId, alive: impl Fn(&str) -> bool) {
     retain(state, |overlay| {
         overlay.source != Some(view) || alive(&overlay.identifier)
     });
 }
 
-/// Вкладка поиска закрылась — наложения из её выдачи уходят вместе с ней.
-/// Восстановленные по ключу живут дальше: их источник не вкладка.
+/// The search tab closed — overlays from its results leave with it. Those
+/// restored by key live on: their source is not a tab.
 pub fn source_closed(state: &mut State, view: ViewId) {
     retain(state, |overlay| overlay.source != Some(view));
 }
 
-/// Оставить те, что прошли условие, и переслать набор.
+/// Keep those that pass the condition and resend the set.
 ///
-/// О снятом говорится вслух: убирает его не человек, а правило («наложение
-/// живёт жизнью своей выдачи»), и снаружи молчаливое исчезновение снимка с
-/// шара выглядит как то, что он выгрузился сам собой.
+/// The removed one is spoken of aloud: it is removed by a rule ("an overlay
+/// lives the life of its results"), not a person, and from outside a silent
+/// disappearance of a snapshot from the globe looks like it unloaded itself.
 fn retain(state: &mut State, keep: impl Fn(&OverlayState) -> bool) {
     let (kept, gone): (Vec<_>, Vec<_>) =
         std::mem::take(&mut state.overlays).into_iter().partition(&keep);
@@ -399,15 +419,15 @@ fn retain(state: &mut State, keep: impl Fn(&OverlayState) -> bool) {
     let said = match gone.as_slice() {
         [] => None,
         [one] => Some(format!(
-            "«{}» снят с шара: его больше нет в выдаче",
+            "\"{}\" removed from the globe: it is no longer in the results",
             crate::module::components::format::ellipsize(&one.label, 40)
         )),
         many => Some(format!(
-            "{} {} снято с шара: их больше нет в выдаче",
+            "{} {} removed from the globe: they are no longer in the results",
             many.len(),
             crate::module::components::format::plural(
                 many.len(),
-                ["снимок", "снимка", "снимков"]
+                ["snapshot", "snapshots", "snapshots"]
             )
         )),
     };
@@ -421,24 +441,24 @@ fn retain(state: &mut State, keep: impl Fn(&OverlayState) -> bool) {
     send_set(state);
 }
 
-// ── Показ ──────────────────────────────────────────────────────
+// ── Showing ──────────────────────────────────────────────────────
 
-/// Прозрачность слоя. Набор пересылается целиком, но растры в нём — прежние
-/// дескрипторы, поэтому движение ползунка ничего не переоткрывает.
+/// Layer opacity. The set is resent whole, but the rasters in it are the same
+/// descriptors, so moving the slider reopens nothing.
 pub fn set_opacity(state: &mut State, key: &str, opacity: f32) {
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
     overlay.opacity = opacity.clamp(0.0, 1.0);
     send_set(state);
 }
 
-/// Скрыть или показать слой.
+/// Hide or show the layer.
 pub fn set_hidden(state: &mut State, key: &str, hidden: bool) {
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
     overlay.hidden = hidden;
     send_set(state);
 }
 
-/// Меню слоя: раскрыть или закрыть раскрытое.
+/// Layer menu: expand or collapse the expanded one.
 pub fn menu(state: &mut State, key: Option<String>) {
     match key {
         Some(key) => state.toggle_open(Open::Layer(key)),
@@ -446,7 +466,7 @@ pub fn menu(state: &mut State, key: Option<String>) {
     }
 }
 
-/// Скрыть или показать все сразу — кнопка «Скрыть все» в списке.
+/// Hide or show all at once — the "Hide all" button in the list.
 pub fn hide_all(state: &mut State, hidden: bool) {
     for overlay in &mut state.overlays {
         overlay.hidden = hidden;
@@ -454,50 +474,54 @@ pub fn hide_all(state: &mut State, hidden: bool) {
     send_set(state);
 }
 
-// ── Сборка ─────────────────────────────────────────────────────
+// ── Assembly ────────────────────────────────────────────────────
 
-/// Отказаться от наложения — значит убрать его, тем же путём, что и по кнопке:
-/// пустая строка, которая никогда ничего не покажет, хуже её отсутствия. Именно
-/// `remove`, а не выкидывание из списка: слой мог уже лежать на шаре, и тогда
-/// его нужно ещё и снять оттуда.
+/// Giving up on an overlay means removing it, the same way as via the button:
+/// a blank row that will never show anything is worse than its absence. Exactly
+/// `remove`, not dropping it from the list: the layer may already lie on the
+/// globe, and then it has to be taken off there too.
 ///
-/// Причина уходит и на экран: нажали «на глобус», а на шаре не появилось
-/// ничего — и без извещения это выглядит как несработавшая кнопка. Одной
-/// функцией на все отказы сборки, потому что снаружи они неразличимы: слой
-/// пропал, и человек вправе узнать почему.
+/// The reason also goes to the screen: "on the globe" was pressed, and nothing
+/// appeared on the globe — and without a notice this looks like a button that
+/// did not work. One function for all assembly refusals, because from outside
+/// they are indistinguishable: the layer is gone, and the person has a right to
+/// know why.
 fn give_up(state: &mut State, key: &str, label: &str, why: String) {
     veldsdk::log::warn!(target: "handlers", "'{}': {}", label, why);
-    // Сказать надо в двух местах, и это не дублирование: вопросы разные.
-    // Строка состояния отвечает «что случилось сейчас» — нажавший значок в
-    // этот миг смотрит на шар, а не в список, и другого места сказать ему нет.
-    // Память у ключа отвечает «что это за снимок»: причина переживает слово в
-    // строке состояния и встречает вернувшегося в список — иначе он видит тот
-    // же зовущий значок и ждёт отказа снова.
+    // It must be said in two places, and this is not duplication: the questions
+    // differ. The status line answers "what happened just now" — the one who
+    // pressed the icon is looking at the globe at that moment, not the list, and
+    // there is no other place to tell them. The key's memory answers "what
+    // snapshot is this": the reason outlives the word in the status line and
+    // meets the one who returned to the list — otherwise they see the same
+    // inviting icon and await a refusal again.
     state.notice =
-        Some(format!("«{}»: {}", crate::module::components::format::ellipsize(label, 40), why));
+        Some(format!("\"{}\": {}", crate::module::components::format::ellipsize(label, 40), why));
     state.unshowable.insert(key.to_string(), why);
     remove(state, key);
 }
 
-/// Ответ провайдера: роли растров и рамка. Открываем каждый растр ресурсом.
+/// The provider's answer: raster roles and the frame. We open every raster as
+/// a resource.
 pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
     let Some(key) = state.imageries.take(&veldsdk::correlation()) else { return };
     let Some(overlay) = state.overlays.iter().find(|o| o.identifier == key) else { return };
     let label = overlay.label.clone();
-    // Сборка уже идёт — значит это ответ на запрос, который сняли с учёта не
-    // до конца. Заводить вторую поверх первой нельзя: её открытия остались бы
-    // без хозяина, а их ресурсы легли бы в чужой набор.
+    // An assembly is already running — so this is the answer to a request that
+    // was not fully taken off the ledger. A second one must not be started on
+    // top of the first: its opens would be left without an owner, and their
+    // resources would land in a foreign set.
     if overlay.assembly.is_some() {
-        veldsdk::log::warn!(target: "handlers", "'{}': растры уже собираются", label);
+        veldsdk::log::warn!(target: "handlers", "'{}': rasters are already being assembled", label);
         return;
     }
 
     if !response.error.is_empty() {
-        return give_up(state, &key, &label, format!("растры не спросились: {}", response.error));
+        return give_up(state, &key, &label, format!("rasters could not be requested: {}", response.error));
     }
-    // Названному файлу отказано — словами на экран и просьбу снять: иначе
-    // нажатие того же пункта было бы пустым, а лёгший файл раскладки —
-    // необъяснённым.
+    // The named file was refused — with words on the screen and the wish
+    // cleared: otherwise pressing the same item again would be empty, and the
+    // layout file that did land would be unexplained.
     if !response.wanted_refused.is_empty() {
         state.notice = Some(format!("«{}»: {}", crate::module::components::format::ellipsize(&label, 40), response.wanted_refused));
         if let Some(named) = state.overlays.iter_mut().find(|o| o.identifier == key) {
@@ -506,21 +530,22 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
     }
     let Some(overlay) = state.overlays.iter().find(|o| o.identifier == key) else { return };
     if response.rasters.is_empty() {
-        // Причину называет провайдер — он один видел, что в продукте лежит.
-        // Своя фраза остаётся на случай, когда он промолчал: пустая строка на
-        // экране хуже общей.
+        // The reason is named by the provider — only it has seen what lies in
+        // the product. Our own phrase stays for when it spoke none: an empty
+        // string on the screen is worse than a generic one.
         let why = match response.reason.is_empty() {
-            true => "нет растров для наложения".to_string(),
+            true => "no rasters to overlay".to_string(),
             false => response.reason,
         };
         return give_up(state, &key, &label, why);
     }
-    // Геометрии нет вовсе — ни рамки, ни контура: снимку негде лежать даже
-    // приблизительно, и открывать растры незачем. Сложный контур сюда не
-    // относится: привязку принесёт сам растр, а до него о ней не узнать
-    // (см. [`quad_of`]).
+    // There is no geometry at all — neither frame nor footprint: the snapshot
+    // has nowhere to lie even approximately, and there is no reason to open the
+    // rasters. A complex footprint does not apply here: the raster itself will
+    // bring the binding, and before it the binding is unknown (see
+    // [`quad_of`]).
     if response.utm.is_none() && overlay.quad.is_none() {
-        return give_up(state, &key, &label, "без привязки: у продукта нет геометрии".to_string());
+        return give_up(state, &key, &label, "no binding: the product has no geometry".to_string());
     }
 
     let utm = response.utm.map(|utm| UtmFrame {
@@ -532,16 +557,18 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
         y1: utm.y1,
     });
     let mut opens = Vec::new();
-    // Имена файлов по номеру в ответе — ими потом называется лежащий подробным.
+    // File names by their number in the answer — by them the one lying as
+    // detailed is named later.
     let files: Vec<String> = response.rasters.iter().map(|raster| raster.identifier.clone()).collect();
-    // Порядковый номер растра в ответе — им координаты находят свой растр:
-    // подробных бывает несколько (выбранный и запасные), и роли на это не
-    // хватает.
+    // The raster's ordinal in the answer is how the coordinates find their
+    // raster: there can be several detailed ones (the chosen one and spares),
+    // and the role is not enough for that.
     for (ordinal, raster) in (0u32..).zip(response.rasters) {
         let role = role_for_globe(raster.role());
-        // Координаты открываются тем же порядком и наравне с растром: у
-        // Sentinel-3 они лежат соседним файлом, и без них полосе съёмки негде
-        // лечь. Пусто — координаты в самом растре либо их нет вовсе.
+        // Coordinates are opened in the same order and on equal terms with the
+        // raster: for Sentinel-3 they lie in a neighboring file, and without
+        // them the swath has nowhere to lie. Empty means the coordinates are in
+        // the raster itself or absent altogether.
         let files = [(Part::Raster, raster.identifier)]
             .into_iter()
             .chain((!raster.geolocation.is_empty()).then_some((
@@ -549,13 +576,14 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
                 raster.geolocation,
             )));
         for (part, identifier) in files {
-            // Чем открывать, решается по файлу, а не по снимку: у продукта
-            // скачана бывает часть, и лежащий рядом квиклук не делает локальным
-            // измерительный растр. Правило общее с просмотром строки — оно в
+            // What to open with is decided by the file, not the snapshot: a
+            // product may be partly downloaded, and a quicklook lying nearby
+            // does not make the measurement raster local. The rule is shared
+            // with the row preview — it is in
             // `LibraryState::local_name`.
             let local = state.library.local_name(&identifier).map(str::to_string);
-            // Роль переводится сразу, на границе: дальше по нашему коду ездит
-            // уже та, которую поймёт глобус.
+            // The role is translated right away, at the boundary: further on,
+            // our code carries the one the globe understands.
             let correlation = state.opens.begin((key.clone(), role, ordinal, part));
             opens.push(correlation.clone());
             super::open_resource(identifier, local, &correlation);
@@ -563,28 +591,30 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
     }
 
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
-    // Запрос растров кончился — его корреляция больше не наша.
+    // The raster request is over — its correlation is no longer ours.
     overlay.imagery = None;
     overlay.assembly = Some(Assembly { utm, files, opens, collected: Vec::new() });
 }
 
-/// Открытие растра наложения. `false` — ответ не наш: чужая корреляция либо
-/// сборка, которую уже оборвали (её открытия сняты с учёта в `abandon`), и
-/// приехавший ресурс добьёт общий discard (см. module::on_open_result).
+/// Opening of an overlay raster. `false` — the answer is not ours: a foreign
+/// correlation or an assembly that was already broken off (its opens were
+/// taken off the ledger in `abandon`), and the arriving resource reaches the
+/// common discard (see module::on_open_result).
 pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     let correlation = veldsdk::correlation();
     let Some((key, role, ordinal, part)) = state.opens.take(&correlation) else { return false };
 
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else {
-        // Наложение убрали между запросом и ответом: ресурс наш, и отпустить
-        // его больше некому.
+        // The overlay was removed between the request and the answer: the
+        // resource is ours, and there is nobody else to release it.
         if let Ok(handle) = veldsdk::resource::accept(opened) {
             veldsdk::resource::release(handle);
         }
         return true;
     };
-    // Сборки нет — она кончилась (или её оборвали) раньше, чем доехал этот
-    // ответ. Ресурс всё равно наш: принять и отпустить его больше некому.
+    // There is no assembly — it ended (or was broken off) before this answer
+    // arrived. The resource is ours anyway: nobody else will accept and release
+    // it.
     let Some(assembly) = overlay.assembly.as_mut() else {
         if let Ok(handle) = veldsdk::resource::accept(opened) {
             veldsdk::resource::release(handle);
@@ -595,9 +625,10 @@ pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     assembly.opens.retain(|waiting| waiting != &correlation);
     match veldsdk::resource::accept(opened) {
         Ok(handle) => assembly.collected.push((role, ordinal, part, handle)),
-        // Не открылось — наложение живёт тем, что открылось: без растра нет
-        // роли, без координат нет привязки, и оба исхода объясняются ниже.
-        Err(error) => veldsdk::log::warn!(target: "handlers", "файл наложения: {}", error),
+        // It did not open — the overlay lives on what did open: without the
+        // raster there is no role, without the coordinates there is no
+        // binding, and both outcomes are explained below.
+        Err(error) => veldsdk::log::warn!(target: "handlers", "overlay file: {}", error),
     }
     if assembly.opens.is_empty() {
         finish(state, &key);
@@ -605,27 +636,31 @@ pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     true
 }
 
-/// Собранное — в пары «растр и его координаты», превью вперёд. Вторым ответом
-/// — координаты, которым растра не нашлось: наложению они не файл, а свойство
-/// растра, и отпускает их вызывающий, пока они ещё его.
+/// The collected items into "raster and its coordinates" pairs, previews
+/// first. The second answer is the coordinates with no raster found for them:
+/// for the overlay they are not a file but a raster property, and the caller
+/// releases them while they are still theirs.
 ///
-/// Порядок здесь не украшение, а цена показа: глобус рассылает описания
-/// подряд по набору (`globe::module::adopt_overlay`), а тайлер описывает по
-/// одному, так что первый в списке держит остальных. Превью — квиклук в сотни
-/// килобайт, подробный — гранула в мегабайты, и по сети между ними десятки
-/// секунд. Провайдер кладёт превью первым, а теряется порядок посередине:
-/// открытия уходят разом, ответы сети приходят вразнобой, и собранное лежит в
-/// порядке их прихода.
+/// The order here is not decoration but the price of showing: the globe sends
+/// descriptions out one after another through the set
+/// (`globe::module::adopt_overlay`), while the tiler describes one at a time,
+/// so the first in the list holds up the rest. A preview is a quicklook of
+/// hundreds of kilobytes, a detailed one a granule of megabytes, and over the
+/// network there are tens of seconds between them. The provider puts the
+/// preview first, and the order is lost in between: the opens go out at once,
+/// the network answers arrive out of order, and the collected items lie in the
+/// order of their arrival.
 ///
-/// Первую картинку это приближает не всякому слою: у квадовой привязки
-/// глобус не рисует ничего, пока не описались оба растра
-/// (`overlay::binding_pending`), — там порядок решает только то, что раньше
-/// освободит очередь тайлера.
+/// This brings the first picture closer for not every layer: with a quad
+/// binding the globe draws nothing until both rasters are described
+/// (`overlay::binding_pending`) — there the order only decides what frees the
+/// tiler queue sooner.
 ///
-/// Подробных растров бывает несколько — выбранный и запасные за ним, в
-/// порядке провайдера (см. `imagery::spares`), — и координаты находят свой
-/// растр по порядковому номеру в ответе, а не по роли: роль у запасных та же.
-/// Порядок номеров внутри роли сохраняется — он и есть порядок предпочтения.
+/// There can be several detailed rasters — the chosen one and the spares after
+/// it, in the provider's order (see `imagery::spares`) — and the coordinates
+/// find their raster by the ordinal in the answer, not by the role: the role
+/// is the same for the spares. The order of ordinals within a role is
+/// preserved — it is the order of preference.
 fn paired<H>(
     collected: Vec<(OverlayRole, u32, Part, H)>,
 ) -> (Vec<(OverlayRole, u32, H, Option<H>)>, Vec<H>) {
@@ -649,35 +684,38 @@ fn paired<H>(
     (pairs, orphans)
 }
 
-/// Все открытия этого наложения кончились — передать владение глобусу и
-/// переслать набор.
+/// All opens of this overlay are done — hand ownership to the globe and
+/// resend the set.
 fn finish(state: &mut State, key: &str) {
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
     let Some(assembly) = overlay.assembly.take() else { return };
     let label = overlay.label.clone();
 
-    // Пары «растр и его координаты» складываются ДО передачи владения.
-    // Порядок здесь не вкусовой: отпустить лишнее можно, только пока оно наше,
-    // а после `hand_off` ресурс принадлежит глобусу — освобождение отклонит
-    // хост, и о брошенном файле вспомнить будет некому.
+    // The "raster and its coordinates" pairs are assembled BEFORE ownership is
+    // handed over. The order here is not a matter of taste: extra items can be
+    // released only while they are ours, and after `hand_off` the resource
+    // belongs to the globe — the host will reject the release, and nobody will
+    // remember the abandoned file.
     let (pairs, orphans) = paired(assembly.collected);
-    // Координаты сами по себе наложению не файл, а свойство растра: растр не
-    // открылся — показывать по ним нечего.
+    // Coordinates by themselves are not a file for the overlay but a raster
+    // property: the raster did not open — there is nothing to show by them.
     for handle in orphans {
-        veldsdk::log::warn!(target: "handlers", "'{}': координаты без растра — отпускаем", label);
+        veldsdk::log::warn!(target: "handlers", "'{}': coordinates without a raster — releasing", label);
         veldsdk::resource::release(handle);
     }
 
-    // Передача владения — до сообщения: получив набор, глобус вправе сразу
-    // считать ресурсы своими. При отказе хелпер освободил ресурс сам.
+    // Ownership hand-off comes before the message: having received the set,
+    // the globe may immediately consider the resources its own. On refusal the
+    // helper has freed the resource itself.
     let mut rasters = Vec::new();
     for (role, ordinal, raster, coordinates) in pairs {
         let raster = match veldsdk::resource::hand_off(raster, "globe") {
             Ok(handle) => handle,
             Err(error) => {
-                veldsdk::log::warn!(target: "handlers", "растр не передался глобусу: {}", error);
-                // Координаты этого растра больше никому не нужны, и они пока
-                // наши — отпускаем, пока есть чем.
+                veldsdk::log::warn!(target: "handlers", "the raster was not handed off to the globe: {}", error);
+                // This raster's coordinates are needed by nobody else, and
+                // they are still ours — release them while there is something
+                // to release.
                 if let Some(handle) = coordinates {
                     veldsdk::resource::release(handle);
                 }
@@ -687,11 +725,12 @@ fn finish(state: &mut State, key: &str) {
         let coordinates = coordinates.and_then(|handle| {
             match veldsdk::resource::hand_off(handle, "globe") {
                 Ok(handle) => Some(handle),
-                // Растр уже у глобуса и ляжет по контуру каталога: привязки
-                // из файла у него не будет, но слой состоится.
+                // The raster is already with the globe and will lie by the
+                // catalogue footprint: it will have no binding from the file,
+                // but the layer will come to be.
                 Err(error) => {
                     veldsdk::log::warn!(target: "handlers",
-                        "координаты не передались глобусу: {}", error);
+                        "the coordinates were not handed off to the globe: {}", error);
                     None
                 }
             }
@@ -705,49 +744,53 @@ fn finish(state: &mut State, key: &str) {
         });
     }
     if rasters.is_empty() {
-        // Тем же путём и с тем же словом, что и прочие отказы сборки (см.
-        // `give_up`): пустая строка, которая никогда ничего не покажет, хуже
-        // её отсутствия, а нажали-то на значок — и на шаре не появилось ничего.
-        return give_up(state, &key, &label, "ни один растр не открылся".to_string());
+        // By the same path and with the same word as the other assembly
+        // refusals (see `give_up`): a blank row that will never show anything
+        // is worse than its absence, and the icon was pressed — yet nothing
+        // appeared on the globe.
+        return give_up(state, &key, &label, "not a single raster opened".to_string());
     }
 
     overlay.utm = assembly.utm;
     overlay.rasters = rasters;
     overlay.files = assembly.files;
-    // Работа не кончилась, а началась: глобус получит растры и примется их
-    // описывать — по сети это десятки секунд. Своего слова о ходе у нас нет и
-    // не будет, его скажет он же (`on_overlay_progress`), но до первого его
-    // слова проходит кадр, и оставленный на этот кадр покой гасил бы и полосу
-    // под строкой, и штрих на шаре — на глазах и без причины.
+    // The work has not ended but begun: the globe will receive the rasters and
+    // start describing them — over the network that is tens of seconds. We
+    // have no word of our own about the progress and never will, it will be
+    // said by the globe itself (`on_overlay_progress`), but a frame passes
+    // before its first word, and the calm left for that frame would dim both
+    // the bar under the row and the hatch on the globe — visibly and for no
+    // reason.
     overlay.progress = Progress { working: true, blank: true, ..Progress::default() };
     send_set(state);
-    // Просьба о файле, пришедшая во время сборки, исполняется здесь: набор,
-    // только что уехавший глобусу, тот сменит следующим — одно описание
-    // впустую, цена того, что просьбу не потеряли.
+    // A file wish that arrived during the assembly is fulfilled here: the set
+    // that just left for the globe will be replaced by the next one — one
+    // description wasted, the price of not losing the wish.
     if let Some(file) = state.file_wishes.remove(key) {
         place_file(state, key, file);
     }
 }
 
-/// Отправить глобусу весь набор. Единственный способ что-либо ему сказать про
-/// наложения — отсюда и одна точка вызова на каждое изменение.
+/// Send the whole set to the globe. The only way to tell it anything about
+/// overlays — hence one call site for every change.
 ///
-/// Собирающиеся в набор не попадают: наложение без растров глобус принять не
-/// может, и слать его значило бы просить снять то, чего он ещё не видел. Зато
-/// именно они и есть та половина набора, которая на шаре видна контуром: место
-/// едущего снимка помечено штрихом, пока картинки нет, — поэтому отсюда же
-/// уезжает и набор контуров (см. `outline::send`). Два набора, но одно
-/// изменение: собирающееся наложение меняет ровно то, что видно на шаре.
+/// Ones being assembled do not enter the set: the globe cannot accept an
+/// overlay without rasters, and sending it would mean asking to remove what it
+/// has not seen yet. But they are exactly that half of the set that is visible
+/// on the globe as an outline: the place of the incoming snapshot is marked
+/// with a hatch while there is no picture yet — so the outline set leaves from
+/// here too (see `outline::send`). Two sets, but one change: an overlay being
+/// assembled changes exactly what is visible on the globe.
 fn send_set(state: &State) {
     let overlays = state
         .overlays
         .iter()
         .filter(|overlay| overlay.on_globe())
         .map(|overlay| {
-            // Квад — запасная привязка; при рамке он глобусу не нужен. Признак
-            // его габаритности решается тем же ходом и не иначе: сказанный при
-            // пустом кваде, он говорил бы о четырёхугольнике, которого в
-            // сообщении нет.
+            // The quad is the fallback binding; with a frame the globe does
+            // not need it. The roughness flag is decided by the same move and
+            // no other: told with an empty quad, it would speak of a
+            // quadrilateral that is not in the message.
             let (quad, rough) = match (overlay.utm.is_some(), overlay.quad) {
                 (false, Some(points)) => (
                     points.map(|(lat, lon)| GeoPoint { lat, lon }).to_vec(),
@@ -772,8 +815,8 @@ fn send_set(state: &State) {
     super::outline::send(state);
 }
 
-/// Растры набора с названной величиной у того, о ком она сказана, — по
-/// номеру файла; у остальных пусто (выбор тайлера).
+/// The set's rasters carry the named variable for the one it is told of — by
+/// file number; empty for the rest (the tiler's choice).
 fn with_variable(rasters: &[OverlayRaster], wanted: Option<&(u32, String)>) -> Vec<OverlayRaster> {
     rasters
         .iter()
@@ -787,8 +830,8 @@ fn with_variable(rasters: &[OverlayRaster], wanted: Option<&(u32, String)>) -> V
         .collect()
 }
 
-/// Список величин в строке слоя: раскрыть, закрыть щелчком мимо или
-/// повторным нажатием. Раскрытое одно на экран (см. `state::Open`).
+/// The variable list in the layer row: expand, close by a click away or a
+/// second press. Only one is expanded on screen (see `state::Open`).
 pub fn variables_menu(state: &mut State, key: Option<String>) {
     match key {
         Some(key) => state.toggle_open(Open::LayerVariables(key)),
@@ -796,9 +839,10 @@ pub fn variables_menu(state: &mut State, key: Option<String>) {
     }
 }
 
-/// Другая величина лежащего подробным файла слоя — глобусу тем же набором:
-/// растр с названной величиной он опишет заново, ресурсы прежние. Показанная
-/// уже она — нечего делать, кроме как закрыть список.
+/// Another variable of the layer's file lying as detailed — to the globe with
+/// the same set: it will re-describe the raster with the named variable, the
+/// resources stay the same. If it is already the shown one — nothing to do but
+/// close the list.
 pub fn variable(state: &mut State, key: &str, variable: String) {
     state.close_menus();
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
@@ -813,22 +857,23 @@ pub fn variable(state: &mut State, key: &str, variable: String) {
     send_set(state);
 }
 
-/// Ход добычи тайлов от глобуса: набор целиком, тем же правилом, что и сам
-/// набор наложений, — о чьём ключе не сказано, у того ничего и не добывают.
+/// Tile extraction progress from the globe: the whole set, with the same rule
+/// as the overlay set itself — whoever is not mentioned is not extracted for.
 ///
-/// Числа приезжают готовыми, и показывает их список слоёв и строка снимка в
-/// каждом списке, где он есть (`rows::onto_globe`). Но одно из них меняет и
-/// сам шар: пока по слою
-/// нечего нарисовать, его место заштриховано, и снять штриховку может только
-/// пришедшее отсюда «уже есть что» (см. `Progress::blank`).
-/// Поэтому набор контуров пересылается здесь же.
+/// The numbers arrive ready-made, and the layer list and the snapshot row show
+/// them in every list where it appears (`rows::onto_globe`). But one of them
+/// changes the globe itself: while there is nothing to draw for a layer, its
+/// place is hatched, and only the "there is something now" coming from here
+/// can clear the hatch (see `Progress::blank`).
+/// Hence the outline set is resent right here.
 pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::OverlaysProgress) {
     for overlay in &mut state.overlays {
-        // О чём не сказано, того не трогаем. Молчание здесь значит не «работа
-        // кончилась», а «глобус про этот слой ещё не знает»: он отчитывается
-        // обо всех, что у него есть, — и слой, только что отданный ему
-        // (`finish`), первые кадры в его наборе не значится. Стёртое молчанием
-        // гасило бы и полосу, и штрих ровно на эти кадры.
+        // What is not mentioned, we do not touch. Silence here means not "the
+        // work is done" but "the globe does not know about this layer yet": it
+        // reports on all it has — and the layer just handed to it
+        // (`finish`) is not in its set for the first frames. Erased by
+        // silence, it would dim both the bar and the hatch for exactly those
+        // frames.
         let Some(said) = msg.overlays.iter().find(|progress| progress.key == overlay.identifier)
         else {
             continue;
@@ -837,18 +882,20 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
         overlay.detailed_trouble = said.detailed_trouble.clone();
         overlay.variable = said.detailed_variable.clone();
         overlay.detailed_ordinal = said.detailed;
-        // Список — от последнего отчёта с ним: отказавшее названной величине
-        // описание списка не несёт, а выбрать другую нужно как раз тогда.
+        // The list comes from the last report that had it: a description that
+        // refused the named variable carries no list, and choosing another one
+        // is needed exactly then.
         if !said.detailed_variables.is_empty() {
             overlay.variables = said.detailed_variables.clone();
         }
-        // Подробным лёг другой файл (запасной) — названное про прежний к нему
-        // не относится.
+        // A different file (a spare) landed as detailed — what was named
+        // about the previous one does not apply to it.
         if overlay.variable_wanted.as_ref().is_some_and(|(ordinal, _)| said.detailed != Some(*ordinal)) {
             overlay.variable_wanted = None;
         }
-        // Номер от глобуса — в имя файла: глобус имён не знает, а строке слоя
-        // нужно имя, и стоять оно обязано рядом с приговором о том же файле.
+        // The number from the globe becomes a file name: the globe knows no
+        // names, and the layer row needs one, and it must stand next to the
+        // verdict about the same file.
         overlay.detailed = said
             .detailed
             .and_then(|at| overlay.files.get(at as usize))
@@ -865,11 +912,12 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
         };
     }
 
-    // Слой, которому нечем лечь, убираем тем же путём и с тем же словом, что и
-    // отказы сборки: набор наложений наш, и снять с него неложащийся слой может
-    // только тот, кто его туда положил. Заметить это может только глобус — у
-    // него растры и привязка, — а «пустая строка, которая никогда ничего не
-    // покажет, хуже её отсутствия» одинаково верно с обеих сторон.
+    // A layer that has nothing to lie with is removed by the same path and
+    // with the same word as the assembly refusals: the overlay set is ours,
+    // and only the one who put a non-lying layer there can take it off. Only
+    // the globe can notice this — it holds the rasters and the binding — and
+    // "a blank row that will never show anything is worse than its absence" is
+    // equally true from both sides.
     let doomed: Vec<(String, String)> = msg
         .overlays
         .iter()
@@ -882,37 +930,42 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
         give_up(state, &key, &label, why);
     }
 
-    // Набор наложений от хода не меняется — меняется то, что на шаре видно
-    // помимо них. Неизменившийся набор до шины не доходит, поэтому платы за
-    // «на всякий случай» здесь нет.
+    // The overlay set does not change from the pass — what changes is what is
+    // visible on the globe besides them. An unchanged set does not reach the
+    // bus, so there is no price for "just in case" here.
     super::outline::send(state);
 }
 
-/// Запасная привязка по контуру каталога и то, насколько ей можно верить.
+/// The fallback binding from the catalogue footprint and how far it can be
+/// trusted.
 ///
-/// Ровно четыре вершины — это углы снятого куска, и растр по ним натягивают
-/// (`rough: false`). Всё сложнее — полоса съёмки, очерченная десятками вершин:
-/// углов у неё нет, и вместо них берётся габарит вписанного круга
-/// (`rough: true`). Натягивать по нему нельзя, и глобус этого не делает — он
-/// держит место, пока привязку не принесёт сам растр (см. `Frame::Rough`).
+/// Exactly four vertices are the corners of the captured piece, and the raster
+/// is stretched over them (`rough: false`). Anything more complex is an
+/// acquisition swath outlined by dozens of vertices: it has no corners, and
+/// instead the extent of the inscribed circle is taken (`rough: true`).
+/// Stretching over it is not allowed, and the globe does not do it — it holds
+/// the place until the raster itself brings the binding (see `Frame::Rough`).
 ///
-/// Отказывать сложному контуру здесь было бы рано: привязка живёт в растре
-/// чаще, чем в каталоге, — гранула Sentinel-5P несёт широту и долготу
-/// поотсчётно, — а спросить растр можно только открыв его.
+/// Refusing a complex footprint here would be premature: the binding lives in
+/// the raster more often than in the catalogue — a Sentinel-5P granule carries
+/// latitude and longitude per sample — and the raster can only be asked by
+/// opening it.
 ///
-/// Четырёхугольник во всю Землю углами тоже не описывается, и это не редкость:
-/// глобальная сетка климатики очерчена прямоугольником от −180 до 180, а это на
-/// шаре одна и та же долгота. Растягивать по нему нечего — все четыре угла
-/// сходятся на одном меридиане, — поэтому такой контур идёт тем же путём, что и
-/// полоса съёмки: местом, а не привязкой.
+/// A quadrilateral over the whole Earth cannot be described by corners either,
+/// and this is not rare: a global climate grid is outlined by a rectangle from
+/// −180 to 180, and on the globe that is one and the same meridian. There is
+/// nothing to stretch over it — all four corners converge on one meridian — so
+/// such a footprint goes the same way as an acquisition swath: as a place, not
+/// as a binding.
 fn quad_of(product: &DataProduct) -> Option<([(f64, f64); 4], bool)> {
-    // Колец несколько — снимок разрезан швом: через антимеридиан каталог
-    // отдаёт его двумя полигонами, по половине с каждой стороны. Взять первое
-    // и растянуть по нему весь растр значит показать снимок вдвое у́же снятого
-    // и на своей же половине; сшить их обратно по вершинам, лежащим ровно на
-    // ±180, нечем — порядок обхода у половин свой. Значит, это не
-    // четырёхугольник, и путь у него тот же, что у полосы съёмки: место, а не
-    // привязка.
+    // There are several rings — the snapshot is cut by a seam: across the
+    // antimeridian the catalogue returns it as two polygons, one half on each
+    // side. Taking the first and stretching the whole raster over it would show
+    // the snapshot twice as narrow as captured and on its own half; stitching
+    // them back by the vertices lying exactly at ±180 is not possible — the
+    // halves have their own traversal order. So this is not a quadrilateral,
+    // and its path is the same as the acquisition swath's: a place, not a
+    // binding.
     if product.footprint.len() == 1
         && let Some(ring) = product.footprint.first()
     {
@@ -934,8 +987,9 @@ fn quad_of(product: &DataProduct) -> Option<([(f64, f64); 4], bool)> {
             }
         }
     }
-    // Круг, в который вписан контур, — единственная мера сложного контура,
-    // которая не врёт ни у полюса, ни на шве (см. `footprint::frame`).
+    // The circle the footprint is inscribed in is the only measure of a
+    // complex footprint that does not lie at a pole or at the seam (see
+    // `footprint::frame`).
     let circle = footprint::frame(&product.footprint)?;
     let (north, south) = (
         (circle.lat + circle.radius_deg).min(90.0),
@@ -945,22 +999,24 @@ fn quad_of(product: &DataProduct) -> Option<([(f64, f64); 4], bool)> {
     Some(([(north, west), (north, east), (south, east), (south, west)], true))
 }
 
-/// Вершины квада по обходу растра — верхний левый, верхний правый, нижний
-/// правый, нижний левый, — как их читает глобус (`Overlay.quad`). Каталог
-/// перечисляет углы контура своим порядком, с любой вершины и в любую сторону,
-/// а глобус кладёт первую вершину в верхний левый угол растра: тот же снимок
-/// лёг бы зеркально либо повёрнутым, смотря с какого угла начал каталог.
-/// Растр считается лежащим севером вверх — так лежат тайлы Sentinel-2 (те,
-/// впрочем, приходят с рамкой UTM и до квада не доходят) и квиклуки; квиклук
-/// Sentinel-1 лежит в геометрии съёмки, и север вверху у него — допущение,
-/// сценарием не проверенное. У полосы, скошенной сильнее сорока пяти
-/// градусов, две вершины делят одну четверть, и вершины остаются как
-/// перечислены: место такой гранулы всё равно уточняет её собственная решётка
-/// координат.
+/// The quad vertices in raster traversal order — upper left, upper right,
+/// lower right, lower left — as the globe reads them (`Overlay.quad`). The
+/// catalogue lists the footprint corners in its own order, from any vertex and
+/// in any direction, while the globe puts the first vertex into the raster's
+/// upper left corner: the same snapshot would land mirrored or rotated,
+/// depending on which corner the catalogue started from. The raster is assumed
+/// to lie north up — that is how Sentinel-2 tiles lie (those, however, come
+/// with a UTM frame and never reach the quad) and quicklooks; the Sentinel-1
+/// quicklook lies in the acquisition geometry, and north up for it is an
+/// assumption not checked by any scenario. For a swath skewed more than
+/// forty-five degrees, two vertices share one quarter, and the vertices stay
+/// as listed: the place of such a granule is refined by its own coordinate
+/// grid anyway.
 fn oriented(corners: [(f64, f64); 4]) -> [(f64, f64); 4] {
-    // Долготы разворачиваются к первой вершине, как в `Frame::quad` глобуса:
-    // у контура через антимеридиан средняя долгота иначе легла бы на другую
-    // сторону Земли, и запад с востоком поменялись бы местами.
+    // Longitudes are unwound toward the first vertex, as in the globe's
+    // `Frame::quad`: for a footprint across the antimeridian the mean longitude
+    // would otherwise land on the other side of the Earth, and west and east
+    // would swap places.
     let base = corners[0].1;
     let unwound = |lon: f64| base + (lon - base + 540.0).rem_euclid(360.0) - 180.0;
     let (lat_mid, lon_mid) = corners
@@ -981,420 +1037,5 @@ fn oriented(corners: [(f64, f64); 4]) -> [(f64, f64); 4] {
     ) {
         ([ul], [ur], [lr], [ll]) => [*ul, *ur, *lr, *ll],
         _ => corners,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::proto::data_provider::{GeoPoint, Ring};
-
-    fn ring(points: &[(f64, f64)]) -> Ring {
-        Ring { points: points.iter().map(|&(lat, lon)| GeoPoint { lat, lon }).collect() }
-    }
-
-    fn shot(footprint: Vec<Ring>) -> DataProduct {
-        DataProduct { footprint, ..Default::default() }
-    }
-
-    /// Убранное наложение не оставляет за собой ничего: ресурсы оборванной
-    /// сборки отпущены, а открытия в полёте сняты с ключа — их ответ пройдёт
-    /// веткой «наложение убрали», а не ляжет в чужой набор.
-    #[test]
-    fn an_abandoned_overlay_leaks_nothing() {
-        veldsdk::fake::install();
-        let mut state = State::new(crate::module::handlers::Config { initial_view: None }).unwrap();
-        let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
-        let quicklook = veldsdk::fake::mount(vec![1, 2, 3]);
-        let raster = veldsdk::fake::mount(vec![4, 5, 6]);
-        state.opens.insert("open-1".to_string(), ("scene".to_string(), detailed, 1, Part::Raster));
-
-        let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
-        overlay.assembly = Some(Assembly {
-            utm: None,
-            files: Vec::new(),
-            opens: vec!["open-1".to_string()],
-            collected: vec![(preview, 0, Part::Raster, quicklook), (detailed, 1, Part::Raster, raster)],
-        });
-
-        abandon(&mut state, overlay);
-
-        assert!(veldsdk::fake::leaked().is_empty(), "собранные растры не отпущены");
-        let (key, ..) = state.opens.take("open-1").expect("открытие в полёте остаётся на учёте");
-        assert!(key.is_empty(), "открытие снято с ключа наложения");
-    }
-
-    /// Набор уезжает глобусу превью вперёд, каким бы ни был порядок ответов
-    /// сети. Тайлер описывает набор по одному, поэтому вставший первым держит
-    /// остальных: у гранулы, где подробный растр вернулся раньше квиклука,
-    /// очередь занимали мегабайты вместо сотен килобайт.
-    #[test]
-    fn превью_уезжает_впереди_подробного() {
-        let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
-        let collected = vec![(detailed, 1, Part::Raster, "подробный"), (preview, 0, Part::Raster, "квиклук")];
-
-        let (pairs, orphans) = paired(collected);
-
-        let order: Vec<_> = pairs.iter().map(|(_, _, raster, ..)| *raster).collect();
-        assert_eq!(order, ["квиклук", "подробный"]);
-        assert!(orphans.is_empty());
-    }
-
-    /// Координаты достаются растру своей роли, а не соседней и не первому
-    /// попавшемуся: у Sentinel-3 подробный растр везёт свои широты отдельным
-    /// файлом, и перепутать их с превью значит уложить снимок мимо себя.
-    #[test]
-    fn координаты_достаются_растру_своей_роли() {
-        let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
-        let collected = vec![
-            (detailed, 1, Part::Geolocation, "широты"),
-            (preview, 0, Part::Raster, "квиклук"),
-            (detailed, 1, Part::Raster, "подробный"),
-        ];
-
-        let (pairs, orphans) = paired(collected);
-
-        assert_eq!(pairs, vec![(preview, 0, "квиклук", None), (detailed, 1, "подробный", Some("широты"))]);
-        assert!(orphans.is_empty());
-    }
-
-    /// Запасные подробные растры едут за выбранным своим порядком, и каждый
-    /// со своими координатами: у гранулы SLSTR полукилометровый канал и
-    /// километровый лежат на разных сетках, и файлы координат у них разные.
-    #[test]
-    fn запасные_идут_за_выбранным_каждый_со_своими_координатами() {
-        let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
-        let collected = vec![
-            (detailed, 2, Part::Raster, "тепловой"),
-            (detailed, 1, Part::Geolocation, "широты an"),
-            (detailed, 2, Part::Geolocation, "широты tx"),
-            (preview, 0, Part::Raster, "квиклук"),
-            (detailed, 1, Part::Raster, "видимый"),
-        ];
-
-        let (pairs, orphans) = paired(collected);
-
-        assert_eq!(
-            pairs,
-            vec![
-                (preview, 0, "квиклук", None),
-                (detailed, 1, "видимый", Some("широты an")),
-                (detailed, 2, "тепловой", Some("широты tx")),
-            ]
-        );
-        assert!(orphans.is_empty());
-    }
-
-    /// Номер от глобуса становится именем файла: лежащий подробным называется
-    /// последним сегментом ключа из ответа провайдера, а пустой номер — нет
-    /// подробного — оставляет строку без имени.
-    #[test]
-    fn лежащий_подробным_называется_именем_файла() {
-        let mut state = State::new(crate::module::handlers::Config { initial_view: None }).unwrap();
-        let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
-        overlay.files = vec![
-            "eodata/S3A.SEN3/quicklook.jpg".to_string(),
-            "eodata/S3A.SEN3/S1_radiance_an.nc".to_string(),
-            "eodata/S3A.SEN3/F1_BT_fn.nc".to_string(),
-        ];
-        state.overlays.push(overlay);
-        let progress = |detailed: Option<u32>| crate::proto::globe::OverlaysProgress {
-            overlays: vec![crate::proto::globe::OverlayProgress {
-                key: "scene".to_string(),
-                detailed,
-                ..Default::default()
-            }],
-        };
-
-        on_overlay_progress(&mut state, progress(Some(2)));
-        assert_eq!(state.overlays[0].detailed.as_deref(), Some("F1_BT_fn.nc"), "запасной назван своим именем");
-        on_overlay_progress(&mut state, progress(None));
-        assert_eq!(state.overlays[0].detailed, None);
-        on_overlay_progress(&mut state, progress(Some(9)));
-        assert_eq!(state.overlays[0].detailed, None, "номер вне ответа — имени нет");
-
-        // Величина едет с тем же отчётом и хранится как приехала: словами её
-        // называет строка слоя.
-        let variable = crate::proto::globe::Variable {
-            path: "/F1_BT_fn".to_string(),
-            said: "brightness temperature".to_string(),
-            units: "K".to_string(),
-        };
-        on_overlay_progress(&mut state, crate::proto::globe::OverlaysProgress {
-            overlays: vec![crate::proto::globe::OverlayProgress {
-                key: "scene".to_string(),
-                detailed: Some(2),
-                detailed_variable: Some(variable.clone()),
-                ..Default::default()
-            }],
-        });
-        assert_eq!(state.overlays[0].variable, Some(variable));
-        on_overlay_progress(&mut state, progress(Some(2)));
-        assert_eq!(state.overlays[0].variable, None, "отчёт без величины снимает прежнюю");
-    }
-
-    /// Файл, которым просили лечь: у лежащего слоя — новый запрос растров с
-    /// ним; у слоя в сборке — ждёт её конца; у слоя, которого нет, — ждёт
-    /// продукта и уходит с первым запросом.
-    #[test]
-    fn файл_которым_просили_лечь_едет_в_запрос_растров() {
-        let mut state = State::new(crate::module::handlers::Config { initial_view: None }).unwrap();
-        let raster = |ordinal: u32| crate::proto::globe::OverlayRaster { ordinal, ..Default::default() };
-        let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
-        overlay.rasters = vec![raster(0), raster(1)];
-        state.overlays.push(overlay);
-
-        on_file_pressed(&mut state, "scene", "scene/F2_BT_in.nc".to_string());
-        let overlay = &state.overlays[0];
-        assert_eq!(overlay.wanted_file.as_deref(), Some("scene/F2_BT_in.nc"));
-        assert!(overlay.imagery.is_some(), "растры не спрошены заново");
-        assert!(state.file_wishes.is_empty());
-        let request = imagery_request(&state.library, overlay);
-        assert_eq!((request.identifier.as_str(), request.wanted.as_str()), ("scene", "scene/F2_BT_in.nc"), "просьба не едет в запрос");
-
-        // Запрос в полёте — вторая просьба ждёт, а не заводит второй запрос.
-        let pending = state.overlays[0].imagery.clone();
-        on_file_pressed(&mut state, "scene", "scene/S8_BT_in.nc".to_string());
-        assert_eq!(state.overlays[0].imagery, pending, "второй запрос поверх первого");
-        assert_eq!(state.file_wishes.get("scene").map(String::as_str), Some("scene/S8_BT_in.nc"));
-
-        // Слоя нет — просьба ждёт продукта; отменённый показ уносит её.
-        on_file_pressed(&mut state, "other", "other/a.nc".to_string());
-        assert_eq!(state.file_wishes.get("other").map(String::as_str), Some("other/a.nc"));
-        assert!(state.showing.contains("other"), "продукт не спрошен у провайдера");
-        let view: ViewId = "7".parse().expect("ViewId из строки");
-        on_toggle_pressed(&mut state, view, "other".to_string());
-        assert!(!state.file_wishes.contains_key("other"), "отменённый показ оставил просьбу");
-
-        // Тот же файл повторно — нечего делать.
-        state.overlays[0].imagery = None;
-        state.file_wishes.clear();
-        state.overlays[0].wanted_file = Some("scene/F2_BT_in.nc".to_string());
-        on_file_pressed(&mut state, "scene", "scene/F2_BT_in.nc".to_string());
-        assert!(state.overlays[0].imagery.is_none(), "тот же файл спрошен заново");
-
-        // Продукт под рукой — показ заводится сразу, и просьба уходит в слой.
-        let product = crate::proto::data_provider::DataProduct { identifier: "cached".to_string(), name: "cached".to_string(), ..Default::default() };
-        state.located.insert("cached".to_string(), Located::Found(product));
-        on_file_pressed(&mut state, "cached", "cached/b.nc".to_string());
-        let placed = state.overlays.iter().find(|o| o.identifier == "cached").expect("слой заведён");
-        assert_eq!(placed.wanted_file.as_deref(), Some("cached/b.nc"));
-        assert!(state.file_wishes.is_empty(), "просьба не ушла в слой");
-        // Снятый слой уносит и просьбу, ждавшую его сборки.
-        state.file_wishes.insert("cached".to_string(), "cached/c.nc".to_string());
-        remove(&mut state, "cached");
-        assert!(state.file_wishes.is_empty(), "снятый слой оставил просьбу");
-    }
-
-    /// Названная величина уезжает глобусу у растра с тем номером, о котором
-    /// сказана, и снимается, когда подробным лёг другой файл; список величин
-    /// переживает отчёт без него.
-    #[test]
-    fn названная_величина_едет_к_своему_растру_и_снимается_с_запасным() {
-        let raster = |ordinal: u32| crate::proto::globe::OverlayRaster { ordinal, ..Default::default() };
-        let sent = with_variable(&[raster(0), raster(1), raster(2)], Some(&(1, "/PRODUCT/qa_value".to_string())));
-        assert_eq!(sent.iter().map(|r| r.variable.as_str()).collect::<Vec<_>>(), ["", "/PRODUCT/qa_value", ""]);
-        assert!(with_variable(&[raster(0)], None).iter().all(|r| r.variable.is_empty()));
-
-        let mut state = State::new(crate::module::handlers::Config { initial_view: None }).unwrap();
-        let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
-        overlay.rasters = vec![raster(0), raster(1)];
-        state.overlays.push(overlay);
-        let listed = |detailed: Option<u32>, paths: &[&str]| crate::proto::globe::OverlaysProgress {
-            overlays: vec![crate::proto::globe::OverlayProgress {
-                key: "scene".to_string(),
-                detailed,
-                detailed_variables: paths
-                    .iter()
-                    .map(|path| crate::proto::globe::Variable { path: path.to_string(), ..Default::default() })
-                    .collect(),
-                ..Default::default()
-            }],
-        };
-        on_overlay_progress(&mut state, listed(Some(1), &["/a", "/b"]));
-        // Показанную шаром называть заново нечего: набор с названным выбором
-        // тайлера — второй отпечаток тех же тайлов.
-        state.overlays[0].variable = Some(crate::proto::globe::Variable { path: "/a".to_string(), ..Default::default() });
-        variable(&mut state, "scene", "/a".to_string());
-        assert_eq!(state.overlays[0].variable_wanted, None, "показанная названа заново");
-        variable(&mut state, "scene", "/b".to_string());
-        assert_eq!(state.overlays[0].variable_wanted, Some((1, "/b".to_string())));
-
-        // Отчёт без списка прежнего не стирает; тот же файл — названное живёт.
-        on_overlay_progress(&mut state, listed(Some(1), &[]));
-        assert_eq!(state.overlays[0].variables.len(), 2, "отказ стёр список");
-        assert_eq!(state.overlays[0].variable_wanted, Some((1, "/b".to_string())));
-        // Подробным лёг запасной — названное снято.
-        on_overlay_progress(&mut state, listed(Some(2), &["/c"]));
-        assert_eq!(state.overlays[0].variable_wanted, None);
-    }
-
-    /// Имя файла — последний сегмент ключа; ключ папки называется папкой, а
-    /// ключ без косых — сам собой.
-    #[test]
-    fn имя_файла_это_последний_сегмент_ключа() {
-        assert_eq!(file_name("eodata/S3A.SEN3/F1_BT_fn.nc"), "F1_BT_fn.nc");
-        assert_eq!(file_name("eodata/S3A.SEN3/"), "S3A.SEN3");
-        assert_eq!(file_name("quicklook.jpg"), "quicklook.jpg");
-        assert_eq!(file_name(""), "");
-    }
-
-    /// Координаты, чей растр не открылся, наложению не файл: их возвращают
-    /// вызывающему, пока они ещё его и есть чем их отпустить.
-    #[test]
-    fn координаты_без_своего_растра_возвращаются_отпустить() {
-        let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
-        let collected = vec![(detailed, 1, Part::Geolocation, "широты"), (preview, 0, Part::Raster, "квиклук")];
-
-        let (pairs, orphans) = paired(collected);
-
-        assert_eq!(pairs, vec![(preview, 0, "квиклук", None)]);
-        assert_eq!(orphans, vec!["широты"]);
-    }
-
-    /// Значок кладёт снимок на шар и им же снимает — в обоих положениях, в
-    /// каких показ бывает: пока продукт восстанавливают по ключу и когда слой
-    /// уже заведён. Без второго нажатия снять слой можно было бы только из
-    /// другого списка, то есть одному состоянию досталось бы два рычага в
-    /// разных местах.
-    #[test]
-    fn показ_снимается_тем_же_значком() {
-        let key = "eodata/store/A.SAFE";
-        let mut state =
-            State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние");
-        let pane = state.focused();
-        let view = state.open_in(
-            pane,
-            crate::module::state::ViewKind::Browse(crate::module::state::BrowseState::default()),
-        );
-
-        // Продукта под рукой нет — ушёл вопрос к каталогу, и просьба записана.
-        on_toggle_pressed(&mut state, view, key.to_string());
-        assert!(state.showing.contains(key), "просьба не записана");
-
-        // Второе нажатие снимает её, не дожидаясь ответа.
-        on_toggle_pressed(&mut state, view, key.to_string());
-        assert!(!state.showing.contains(key), "просьбу нечем отменить");
-
-        // Слой уже заведён — второе нажатие убирает его.
-        let product = DataProduct {
-            identifier: key.to_string(),
-            footprint: vec![ring(&[(10.0, 10.0), (10.0, 20.0), (20.0, 20.0), (20.0, 10.0)])],
-            ..Default::default()
-        };
-        show(&mut state, &product, None);
-        assert_eq!(state.overlays.len(), 1);
-        on_toggle_pressed(&mut state, view, key.to_string());
-        assert!(state.overlays.is_empty(), "лежащий слой нечем снять");
-    }
-
-    /// Обычный четырёхугольник остаётся привязкой-догадкой: по нему растр и
-    /// кладут, пока из самого растра не приехала решётка.
-    #[test]
-    fn один_четырёхугольник_остаётся_догадкой() {
-        let (corners, rough) = quad_of(&shot(vec![ring(&[
-            (60.0, 10.0),
-            (60.0, 20.0),
-            (50.0, 20.0),
-            (50.0, 10.0),
-        ])]))
-        .expect("контур есть");
-        assert!(!rough, "четырёхугольник назван местом");
-        assert_eq!(corners[0], (60.0, 10.0));
-    }
-
-    /// Вершины квада — по обходу растра, а не каталога: контур, начатый с
-    /// нижнего левого угла против часовой, ложится верхним левым вперёд, а
-    /// начатый с верхнего правого по часовой — тоже; параллелограмм полосы,
-    /// скошенной сильнее сорока пяти градусов, остаётся как перечислен.
-    #[test]
-    fn квад_ложится_углами_растра_а_не_порядком_каталога() {
-        let north_up = [(20.0, 10.0), (20.0, 20.0), (10.0, 20.0), (10.0, 10.0)];
-        let (corners, _) = quad_of(&shot(vec![ring(&[(10.0, 10.0), (10.0, 20.0), (20.0, 20.0), (20.0, 10.0)])]))
-            .expect("контур есть");
-        assert_eq!(corners, north_up, "с нижнего левого против часовой");
-        let (corners, _) = quad_of(&shot(vec![ring(&[(20.0, 20.0), (10.0, 20.0), (10.0, 10.0), (20.0, 10.0)])]))
-            .expect("контур есть");
-        assert_eq!(corners, north_up, "с верхнего правого по часовой");
-
-        // Полоса под шестьдесят градусов: две вершины в одной четверти.
-        let slanted = [(10.0, 10.0), (12.0, 14.0), (30.0, 24.0), (28.0, 20.0)];
-        let (corners, _) = quad_of(&shot(vec![ring(&slanted)])).expect("контур есть");
-        assert_eq!(corners, slanted, "скошенная полоса остаётся как перечислена");
-
-        // Через антимеридиан: долготы разворачиваются к первой вершине, и
-        // запад — это 170°, а не −170°.
-        let seam = [(10.0, 170.0), (10.0, -170.0), (20.0, -170.0), (20.0, 170.0)];
-        let (corners, _) = quad_of(&shot(vec![ring(&seam)])).expect("контур есть");
-        assert_eq!(corners, [(20.0, 170.0), (20.0, -170.0), (10.0, -170.0), (10.0, 170.0)], "через шов");
-    }
-
-    /// Снимок через антимеридиан каталог отдаёт двумя полигонами. Первый из
-    /// них — половина снимка, и растянутый по ней растр лёг бы вдвое у́же
-    /// снятого; такой контур идёт местом, а не привязкой.
-    #[test]
-    fn разрезанный_швом_контур_привязкой_не_становится() {
-        // Живой футпринт S1C_EW_OCN…: две половины по обе стороны от ±180.
-        let halves = vec![
-            ring(&[(83.13, 180.0), (86.61, 180.0), (87.43, 136.38), (83.76, 147.32)]),
-            ring(&[(86.61, -180.0), (83.13, -180.0), (83.09, -178.30), (86.10, -153.28)]),
-        ];
-        let (_, rough) = quad_of(&shot(halves)).expect("контур есть");
-        assert!(rough, "половина снимка выдана за его привязку");
-    }
-
-    /// Контура нет вовсе — наводить и класть не по чему.
-    #[test]
-    fn без_контура_нет_и_места() {
-        assert!(quad_of(&shot(Vec::new())).is_none());
-    }
-
-    /// Отказ показа помнится ключом снимка и переживает слово в строке
-    /// состояния: вернувшись в список через минуту, человек обязан увидеть, что
-    /// этот снимок уже пробовали и почему не вышло, — иначе он жмёт тот же
-    /// значок и ждёт тех же полминуты.
-    ///
-    /// А новая попытка причину снимает: сорваться показ мог и по сети, и
-    /// объяснять отказом то, чего больше не происходит, — врать.
-    #[test]
-    fn отказ_показа_помнится_снимком_и_снимается_новой_попыткой() {
-        let key = "eodata/store/A.SEN3";
-        let mut state =
-            State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние");
-        let pane = state.focused();
-        let view = state.open_in(
-            pane,
-            crate::module::state::ViewKind::Browse(crate::module::state::BrowseState::default()),
-        );
-
-        give_up(&mut state, key, "A.SEN3", "это измерения, а не изображение".to_string());
-        assert_eq!(
-            crate::module::components::rows::unshowable(&state, key),
-            "это измерения, а не изображение",
-            "причина не досталась строке"
-        );
-        // Сказано и там, где смотрит нажавший: он в этот миг на шаре, а не в
-        // списке.
-        assert!(state.notice.is_some(), "о случившемся не сказано вовсе");
-
-        on_toggle_pressed(&mut state, view, key.to_string());
-        assert!(
-            crate::module::components::rows::unshowable(&state, key).is_empty(),
-            "прежний отказ пережил новую попытку"
-        );
-
-        // Чужой строки это не касается: причина принадлежит снимку.
-        give_up(&mut state, key, "A.SEN3", "не влезает".to_string());
-        assert!(crate::module::components::rows::unshowable(&state, "eodata/store/B.SEN3").is_empty());
-
-        // И снимается она всяким путём в показ, а не одним лишь значком: путей
-        // три (значок, контур, выдача поиска), и причина, пережившая удавшийся
-        // показ, всплыла бы охрой на снятом слое.
-        let product = DataProduct { identifier: key.to_string(), ..Default::default() };
-        show(&mut state, &product, None);
-        assert!(
-            crate::module::components::rows::unshowable(&state, key).is_empty(),
-            "показ другим путём оставил прежнюю причину"
-        );
     }
 }

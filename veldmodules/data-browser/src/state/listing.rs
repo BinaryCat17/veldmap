@@ -1,27 +1,28 @@
-//! state/listing.rs — то, чем список отличается от самого себя: отбор,
-//! группировка, порядок, страница и открытое меню.
+//! state/listing.rs — what makes a list differ from itself: filtering,
+//! grouping, ordering, the page, and the open menu.
 //!
-//! Одно на все три вида: сетевой каталог, поиск и скачанное — это один и тот же
-//! список из разных источников, и настройки показа у них общие по устройству, а
-//! не по совпадению. Своя копия у каждого вида, потому что настройка
-//! принадлежит вкладке: в соседней открыта другая папка со своим отбором.
+//! One shape for all three views: the network catalogue, search, and
+//! downloaded are the same list over different sources, and their display
+//! settings are shared by design, not by coincidence. Each view keeps its own
+//! copy because the setting belongs to the tab: the neighbouring one has a
+//! different folder open with its own filter.
 
 use crate::module::components::RowStatus;
 
-/// Значение выпадающего списка: конечный набор, который ездит в разметку и
-/// обратно строкой. Один трейт на все три списка — иначе у каждого свои
-/// `all/label/parse`, и они расходятся.
+/// A dropdown value: a finite set that travels to the markup and back as a
+/// string. One trait for all three lists — otherwise each has its own
+/// `all/label/parse` and they drift apart.
 pub trait Choice: Copy + PartialEq + Sized + 'static {
-    /// Все значения по порядку — им же выложено меню.
+    /// All values in order — the menu is laid out by them.
     const ALL: &'static [Self];
-    /// Ключ в сообщении разметки: имя, а не индекс, чтобы порядок в меню можно
-    /// было менять.
+    /// Key in the markup message: a name, not an index, so the menu order can
+    /// change freely.
     fn key(self) -> &'static str;
-    /// Подпись в меню — полная.
+    /// Label in the menu — full.
     fn title(self) -> &'static str;
-    /// Подпись на самом чипе. По умолчанию та же, что в меню: короче она
-    /// бывает не у всякого набора, а разная там, где рядом уже написано, чего
-    /// она касается.
+    /// Label on the chip itself. Defaults to the menu one: not every set has a
+    /// shorter form, and it differs only where nearby text already says what it
+    /// refers to.
     fn label(self) -> &'static str {
         self.title()
     }
@@ -31,15 +32,15 @@ pub trait Choice: Copy + PartialEq + Sized + 'static {
     }
 }
 
-/// Объявляет набор вместе с его ключом провода и подписями.
+/// Declares a set together with its wire key and labels.
 ///
-/// Одним местом на четыре списка: сами варианты, порядок в меню, ключ, которым
-/// вариант ездит в разметку и обратно, и то, как он назван человеку. Написанные
-/// порознь четырьмя `match`, они расходятся молча — забытая ветка `key` даёт не
-/// ошибку компиляции, а нажатие, которое не разобралось.
+/// One place for all four lists: the variants themselves, the menu order, the
+/// key a variant travels to the markup and back with, and how it is named for a
+/// person. Written as four separate `match`es, they drift silently — a missing
+/// `key` branch gives not a compile error but a click that fails to resolve.
 ///
-/// Первый вариант — умолчание набора. Подпись на чипе необязательна: не
-/// написана — та же, что в меню.
+/// The first variant is the set's default. The chip label is optional: if not
+/// written, it matches the menu.
 macro_rules! choice {
     (
         $(#[$outer:meta])*
@@ -91,13 +92,13 @@ macro_rules! choice {
 pub(crate) use choice;
 
 choice! {
-    /// Отбор по состоянию записи.
+    /// Filtering by record state.
     Filter {
-        All         = "all",         "Все",         "все";
-        Downloading = "downloading", "Скачиваются", "скачиваются";
-        Interrupted = "interrupted", "Прервано",    "прервано";
-        OnDisk      = "on-disk",     "На диске",    "на диске";
-        Remote      = "remote",      "В хранилище", "в хранилище";
+        All         = "all",         "All",          "all";
+        Downloading = "downloading", "Downloading",  "downloading";
+        Interrupted = "interrupted", "Interrupted",  "interrupted";
+        OnDisk      = "on-disk",     "On disk",      "on disk";
+        Remote      = "remote",      "In storage",   "in storage";
     }
 }
 
@@ -114,45 +115,46 @@ impl Filter {
 }
 
 choice! {
-    /// Во что складывать строки одной папки.
+    /// How to group the rows of one folder.
     Grouping {
-        None = "none", "Без группировки", "нет";
-        /// Заголовок на папку целиком — одна ступень.
-        Folder = "folder", "По папкам", "по папкам";
-        /// Заголовок на каждый сегмент пути — сколько их, столько и ступеней.
-        Tree = "tree", "Полное дерево", "дерево";
+        None = "none", "No grouping", "none";
+        /// A header for the folder as a whole — one level.
+        Folder = "folder", "By folder", "folder";
+        /// A header for each path segment — as many segments, as many levels.
+        Tree = "tree", "Full tree", "tree";
     }
 }
 
 choice! {
-    /// Порядок строк.
+    /// Row order.
     Sorting {
-        Newest = "newest", "Сначала новые", "новые";
-        Name   = "name",   "По имени",      "имя";
-        Size   = "size",   "По размеру",    "размер";
+        Newest = "newest", "Newest first", "newest";
+        Name   = "name",   "By name",      "name";
+        Size   = "size",   "By size",      "size";
     }
 }
 
-/// Какое из меню списка. Что раскрыто хоть что-то, говорит не этот тип, а
-/// `State::open`: «ничего не раскрыто» — свойство экрана, а не списка.
+/// Which of the list's menus it is. Whether anything is open at all is told not
+/// by this type but by `State::open`: "nothing open" is a property of the
+/// screen, not of the list.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Menu {
     Filter,
     Grouping,
     Sorting,
-    /// Меню полосы запроса у поиска. Живут здесь вместе с остальными потому,
-    /// что раскрытое меню бывает одно на вид, а полоса запроса стоит в том же
-    /// виде, что и полоса отбора.
+    /// Menus of the search query bar. They live here with the rest because at
+    /// most one menu is open per view, and the query bar stands in the same view
+    /// as the filter bar.
     Mission,
     Period,
     Cloud,
-    /// Меню строки, названной своим ключом (см. `Row::key`).
+    /// A row menu, named by the row's key (see `Row::key`).
     Row(String),
 }
 
 impl Menu {
-    /// Ключ в сообщении разметки. Меню строки названо её ключом — им же оно и
-    /// адресуется, второго имени у строки нет.
+    /// Key in the markup message. A row menu is named by the row's key — that
+    /// is also how it is addressed; a row has no second name.
     pub fn key(&self) -> String {
         match self {
             Menu::Filter => "filter".to_string(),
@@ -165,8 +167,8 @@ impl Menu {
         }
     }
 
-    /// `None` — закрыть раскрытое: пустым именем едет и «закрой», и
-    /// неизвестное имя, а показывать по нему нечего.
+    /// `None` — close what is open: both "close" and an unknown name arrive as
+    /// an empty name, and there is nothing to show for it.
     pub fn from_key(key: &str) -> Option<Menu> {
         Some(match key {
             "filter" => Menu::Filter,
@@ -180,67 +182,69 @@ impl Menu {
     }
 }
 
-/// Умолчание собирается из умолчаний полей: у каждого оно своё и названо там,
-/// где живёт сам тип, — вторая копия этого списка расходилась бы с ними молча.
+/// The default is assembled from field defaults: each has its own, named where
+/// the type itself lives — a second copy of this list would drift from them
+/// silently.
 #[derive(Default)]
 pub struct ListingState {
     pub filter: Filter,
     pub grouping: Grouping,
     pub sorting: Sorting,
-    /// Отбор по имени — то, что набрано в поле фильтра.
+    /// Filter by name — what is typed in the filter field.
     pub query: String,
-    /// Страница, считая с нуля. Любая правка отбора возвращает на первую:
-    /// «страница 3» списка из одной строки — не состояние, а недоразумение.
+    /// The page, counting from zero. Any filter edit returns to the first one:
+    /// "page 3" of a one-row list is a mistake, not a state.
     pub page: usize,
-    /// Строки, раскрытые в своё содержимое. Множество имён, а не флаг у
-    /// строки: строки пересобираются на каждый кадр из библиотеки и из
-    /// листинга, а «я это раскрыл» — свойство экрана и переживает пересборку.
+    /// Rows expanded into their content. A set of names, not a flag on the row:
+    /// rows are rebuilt every frame from the library and the listing, while
+    /// "I expanded this" is a property of the screen and survives the rebuild.
     pub expanded: std::collections::HashSet<String>,
-    /// Выбранные строки: ключ строки → что за ней стои́т. Своё у каждой
-    /// вкладки и переживает пересборку по той же причине, что и `expanded`.
+    /// Selected rows: row key → what stands behind it. Each tab has its own and
+    /// it survives a rebuild for the same reason as `expanded`.
     pub selected: std::collections::HashMap<String, Chosen>,
-    /// Номер просьбы навести прокрутку — растёт на каждый переход к строке.
+    /// The scroll-aim request number — grows on every jump to a row.
     ///
-    /// Считать «навести» по самой строке нельзя: к одной и той же приводят
-    /// дважды подряд, и разметка во второй раз выходит та же — рендерер видит
-    /// прежнее смещение и решает, что уже навёл (см. `Scrollable.scroll_to` в
-    /// ui-service/types.proto).
+    /// "Aim" cannot be keyed by the row itself: the same row is targeted twice
+    /// in a row, and the markup comes out identical the second time — the
+    /// renderer sees the previous offset and decides it has already aimed (see
+    /// `Scrollable.scroll_to` in ui-service/types.proto).
     pub aim: u64,
 }
 
-/// Что стои́т за выбранной строкой.
+/// What stands behind a selected row.
 ///
-/// Род, а не флаг «очерчивается»: выбирают строку, чтобы что-то с ней сделать —
-/// удалить, скачать, — и это разное действие у снимка и у отдельного файла.
-/// Снимок библиотека не знает вовсе, его разворачивают в файлы (см.
-/// `handlers::library::files_of`), а файл адресуют его собственными ключами.
-/// Про шар род ничего не говорит: контур и показ — свои состояния снимка
-/// (см. handlers::outline).
+/// A kind, not a "gets outlined" flag: a row is selected to do something with
+/// it — delete, download — and that is a different action for a snapshot and
+/// for a single file. The library does not know snapshots at all; they are
+/// expanded into files (see `handlers::library::files_of`), while a file is
+/// addressed by its own keys. The kind says nothing about the globe: outline
+/// and shown are separate snapshot states (see handlers::outline).
 ///
-/// Ключи файл несёт с собой, а не берутся из строки в момент действия: выбор
-/// переживает переход в другую папку, и строки к тому времени может уже не
-/// быть на экране.
+/// The file carries its keys with it rather than taking them from the row at
+/// action time: the selection survives a move to another folder, and the row
+/// may already be off the screen by then.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Chosen {
-    /// Снимок — одна логическая единица каталога. Ключ выбора у него и есть
-    /// ключ снимка, поэтому своих полей ему не нужно.
+    /// A snapshot — one logical unit of the catalogue. Its selection key is the
+    /// snapshot key itself, so it needs no fields of its own.
     Snapshot,
-    /// Файл сам по себе: скачанный вне снимка либо снимку неизвестный.
+    /// A file on its own: downloaded outside a snapshot or unknown to one.
     File {
-        /// Ключ провайдера; пусто — скачивать нечем.
+        /// Provider key; empty — nothing to download with.
         identifier: String,
-        /// Снимок, в который файл ложится: границу снимка знает провайдер, и
-        /// закачка спрашивает её вместе с ключом.
+        /// The snapshot the file belongs to: the provider knows the snapshot
+        /// boundary, and the download asks for it along with the key.
         product: String,
-        /// Имя записи в библиотеке; пусто — на диске её нет, удалять нечего.
+        /// The record name in the library; empty — it is not on disk, nothing
+        /// to delete.
         name: String,
     },
 }
 
 impl ListingState {
-    /// Раскрыть строку в её содержимое или свернуть обратно. `true` — теперь
-    /// раскрыта: содержимое папки подгружается лениво, и спрашивать его надо
-    /// только при раскрытии (см. handlers::browse::request_children).
+    /// Expand a row into its content or collapse it back. `true` — it is now
+    /// expanded: folder content loads lazily and must be requested only on
+    /// expansion (see handlers::browse::request_children).
     pub fn expand(&mut self, key: String) -> bool {
         if self.expanded.remove(&key) {
             return false;
@@ -249,7 +253,7 @@ impl ListingState {
         true
     }
 
-    /// Выбрать строку или снять выбор.
+    /// Select a row or clear the selection.
     pub fn select(&mut self, key: String, chosen: Chosen) {
         if self.selected.remove(&key).is_none() {
             self.selected.insert(key, chosen);

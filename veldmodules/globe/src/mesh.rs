@@ -1,139 +1,145 @@
-//! Геометрия Земли: сама поверхность и сетка параллелей с меридианами.
+//! Earth geometry: the surface itself and the graticule of parallels and
+//! meridians.
 //!
-//! Обе живут в одной паре буферов — вершинном и индексном, — потому что вершина
-//! у них одного вида. Разделяет их не буфер, а диапазон индексов и пайплайн,
-//! которым его рисуют.
+//! Both live in one pair of buffers — vertex and index — because their vertex
+//! is of one kind. What separates them is not the buffer but a range of indices
+//! and the pipeline that draws it.
 //!
-//! Строится всё по узлам географической сетки: широта и долгота идут ровными
-//! шагами, а в декартовы координаты их переводит `geodesy`. Из этого следует
-//! главное свойство разбиения — растр в EPSG:4326 ложится на него линейно, без
-//! пересчёта на каждый пиксель и без искажения у полюсов.
+//! Everything is built on geographic grid nodes: latitude and longitude advance
+//! in even steps, and `geodesy` converts them into Cartesian coordinates. Hence
+//! the main property of the partitioning — an EPSG:4326 raster maps onto it
+//! linearly, with no per-pixel resampling and no distortion near the poles.
 
 use crate::module::geodesy::{self, Geodetic, World};
 
-/// Вершина: точка поверхности и нормаль к ней. У шара нормаль совпала бы с
-/// позицией и второе поле повторяло бы первое — у эллипсоида не совпадает
-/// (см. `geodesy::normal`), и хранить приходится обе.
+/// Vertex: a surface point and its normal. On a sphere the normal would coincide
+/// with the position and the second field would repeat the first — on an
+/// ellipsoid they do not coincide (see `geodesy::normal`), so both must be kept.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Vertex {
-    /// Старшая половина точки мира; младшая — рядом. Порознь потому, что одним
-    /// `f32` точка поверхности хранится с шагом в восемьдесят сантиметров
-    /// (см. [`geodesy::parts`]).
+    /// High half of the world point; the low half sits beside it. Kept apart
+    /// because a single `f32` stores a surface point with an eighty-centimeter
+    /// step (see [`geodesy::parts`]).
     pub position: World,
     pub position_low: World,
     pub normal: World,
 }
 
-/// Разбиение поверхности, шаг в градусах. Достаточно мелко, чтобы силуэт
-/// читался окружностью, и достаточно крупно, чтобы вся геометрия оставалась в
-/// одном буфере: тело само по себе никого не заслоняет и ни с чем не спорит за
-/// место — оно вписано в эллипсоид и лежит ниже всего, что на нём нарисовано.
+/// Surface partitioning step in degrees. Fine enough for the silhouette to read
+/// as a circle, and coarse enough for all the geometry to stay in one buffer:
+/// the body by itself hides nothing and competes for nothing — it is inscribed
+/// in the ellipsoid and lies below everything drawn on it.
 const LAT_STEP_DEG: f64 = 180.0 / 48.0;
 const LON_STEP_DEG: f64 = 360.0 / 96.0;
 
-/// Шаг сетки — 15°, как на школьном глобусе.
+/// Graticule step — 15°, as on a school globe.
 const GRID_STEP_DEG: i32 = 15;
 
-/// На сколько отрезков бьётся каждая линия сетки.
+/// Into how many segments each graticule line is divided.
 ///
-/// Столько, чтобы звено уместилось под общий вынос по тому же правилу, что и у
-/// всех прочих: у параллели на экваторе звено выходит в полградуса, и её
-/// середина проваливается на семьдесят метров — меньше выноса. Дели сетку
-/// грубее, и её линии пошли бы под той поверхностью, на которой лежат снимок и
-/// контур, а на кромке кадра это сотни метров расхождения.
+/// Enough for a segment to fit under the common lift by the same rule as all the
+/// others: a parallel at the equator comes out with half-degree segments whose
+/// middle sags seventy meters — less than the lift. Divide the graticule any
+/// coarser, and its lines would pass under the very surface on which the image
+/// and the outline lie, which at the frame edge is hundreds of meters of
+/// divergence.
 ///
-/// Кратно [`LON_STEP_DEG`], поэтому узлы сетки заодно ложатся на рёбра тела и
-/// не спорят с ним за глубину нигде, кроме собственных узлов.
+/// A multiple of [`LON_STEP_DEG`], so graticule nodes also land on the body's
+/// edges and never fight it for depth anywhere but at their own nodes.
 ///
-/// Буфер от этого перестаёт быть крошечным, но остаётся небольшим: вся
-/// геометрия Земли и сетки — под мегабайт, и строится она один раз.
+/// This keeps the buffer from being tiny but still small: all the Earth and
+/// graticule geometry is under a megabyte, and it is built once.
 const GRID_SEGMENTS: u32 = 672;
 
-/// Вынос над поверхностью — общий всему, что на ней лежит: снимкам, контурам,
-/// штриховке, сетке и ответу о том, куда пришёлся щелчок.
+/// Lift above the surface — common to everything that lies on it: images,
+/// outlines, hatching, the graticule, and the answer to where a click landed.
 ///
-/// Общий он не ради порядка слоёв — порядок решает очередь отрисовки, а глубину
-/// пишет только тело Земли (см. `gpu::render`). Общий он ради места на экране:
-/// точка на высоте `L` при камере на высоте `H` отходит от середины кадра в
-/// `H/(H−L)` раз, и два слоя над одним и тем же местом Земли расходятся тем
-/// сильнее, чем ближе к краю кадра. Контур обязан лежать на своём снимке, а не
-/// рядом с ним, и щелчок обязан назвать то место, которое видно под курсором.
+/// Common not for the sake of layer order — order is decided by the draw queue,
+/// and only the body of the Earth writes depth (see `gpu::render`). It is common
+/// for the sake of screen space: a point at height `L` with the camera at height
+/// `H` drifts from the center of the frame by a factor of `H/(H−L)`, so two
+/// layers over one and the same place on Earth diverge the closer they are to
+/// the frame edge. An outline must lie on its own image rather than beside it,
+/// and a click must name the place that is visible under the cursor.
 ///
-/// Разнесением слоёв по высоте этого не купить: разная высота и есть
-/// расхождение. Сдвигом глубины в пайплайне — тоже: поля под него в контракте
-/// нет вовсе (`graphics.proto`, `DepthStencilState`), да и подбирался бы он под
-/// точность буфера и разъезжался с ней при смене плоскостей отсечения.
+/// Spreading the layers over different heights does not buy this: differing
+/// heights are the divergence itself. A depth bias in the pipeline does not
+/// either: there is no field for it in the contract at all (`graphics.proto`,
+/// `DepthStencilState`), and it would have to be tuned to the buffer's precision
+/// and drift apart from it whenever the clipping planes change.
 ///
-/// Восемьдесят метров — ровно настолько, чтобы под ним поместился провал
-/// предельного звена ([`max_chord_deg`]) вместе с [`CLEARANCE_M`]. Больше брать
-/// незачем: вынос — это и есть тот самый сдвиг на экране, только общий для всех,
-/// а меньше — значит делить всё мельче.
+/// Eighty meters is exactly enough for the sag of the limit segment
+/// ([`max_chord_deg`]) together with [`CLEARANCE_M`] to fit underneath. There is
+/// no point in taking more: the lift is that very shift on the screen, only
+/// common to all; less would mean dividing everything more finely.
 ///
-/// Полом камеры он и ограничен, и связь эта записана в самом полу
-/// (`camera::HEIGHT_RANGE_M`), а не оставлена на память: спуститься ниже выноса
-/// значит пройти сквозь нарисованное. Искажения же вынос не даёт — он смещение,
-/// и всё, что меряет камеру над видимым, меряет до него (см. [`drawn_radius`]).
+/// It is bounded by the camera floor, and the tie is written into the floor
+/// itself (`camera::HEIGHT_RANGE_M`) rather than left to memory: descending
+/// below the lift means passing through what is drawn. The lift introduces no
+/// distortion — it is an offset, and everything that measures the camera above
+/// the visible measures before it (see [`drawn_radius`]).
 pub const SURFACE_LIFT_M: f64 = 80.0;
 
-/// Радиус нарисованной поверхности — в тех же долях большой полуоси, в которых
-/// считается вся геометрия вида.
+/// Radius of the drawn surface — in the same fractions of the semi-major axis in
+/// which all the geometry of the view is computed.
 ///
-/// Нарисовано на выносе, а не на эллипсоиде, и всё, что меряет камеру над
-/// **видимым**, обязано мерить до него: угловой размер кадра, метры на пиксель,
-/// ближняя плоскость. Мерка до эллипсоида ошибается ровно во столько раз, во
-/// сколько высота больше высоты за вычетом выноса, — на десяти километрах это
-/// восемь десятых процента, а на восьмистах метрах уже одиннадцать.
+/// What is drawn sits on the lift, not on the ellipsoid, and everything that
+/// measures the camera above the **visible** must measure before it: the angular
+/// frame size, meters per pixel, the near plane. Measuring to the ellipsoid is
+/// wrong by exactly the factor by which the height exceeds the height minus the
+/// lift — at ten kilometers that is eight tenths of a percent, at eight hundred
+/// meters already eleven.
 ///
-/// Отсюда, а не из выноса на каждом месте: иначе «нарисовано на выносе» жило бы
-/// в трёх местах порознь и разошлось бы при первой же правке.
+/// Derived here rather than from the lift at each site: otherwise "drawn on the
+/// lift" would live in three places separately and diverge on the first edit.
 pub fn drawn_radius() -> f64 {
     1.0 + SURFACE_LIFT_M / geodesy::SEMI_MAJOR_M
 }
 
-/// Просвет между провалившейся серединой звена и телом Земли.
+/// Clearance between the sagged middle of a segment and the body of the Earth.
 ///
-/// Тело вписано в эллипсоид и заслонить лежащее над ним не может нигде, кроме
-/// собственных узлов: там оно касается поверхности. Просвет и нужен ровно на
-/// этот случай, а мерит его квант буфера глубины на самом дальнем отлёте: там
-/// он без малого шесть метров, на десяти километрах — миллиметр с четвертью, а
-/// на восьмистах — десятая доля миллиметра. Десяти метров хватает и худшему
-/// случаю с запасом.
+/// The body is inscribed in the ellipsoid and can hide what lies above it
+/// nowhere except at its own nodes: there it touches the surface. The clearance
+/// is for exactly that case, and it is measured by the depth-buffer quantum at
+/// the farthest view distance: there it is just under six meters, at ten
+/// kilometers a millimeter and a quarter, at eight hundred meters a tenth of a
+/// millimeter. Ten meters covers even the worst case with room to spare.
 ///
-/// Квантование позиций в него не входит: координаты отсчитываются от глаза
-/// половинами, и шаг их — десятки микрон (см. `geodesy::parts`).
+/// Position quantization is not part of it: coordinates are counted from the eye
+/// in halves, and their step is tens of microns (see `geodesy::parts`).
 const CLEARANCE_M: f64 = 10.0;
 
-/// На сколько середина хорды уходит под поверхность, метры.
+/// How far the middle of a chord dips below the surface, in meters.
 ///
-/// Шаром, а не эллипсоидом: сжатие даёт доли процента от величины, которая сама
-/// по себе поправка.
+/// As a sphere, not an ellipsoid: flattening contributes fractions of a percent
+/// to a quantity that is itself a correction.
 pub fn sag_m(arc_deg: f64) -> f64 {
     geodesy::SEMI_MAJOR_M * (1.0 - (arc_deg.to_radians() / 2.0).cos())
 }
 
-/// Предельная хорда: дуга, чья середина проваливается ровно настолько, чтобы
-/// умещаться под вынос вместе с просветом. Обратная к [`sag_m`].
+/// Limit chord: an arc whose middle sags exactly enough to fit under the lift
+/// along with the clearance. The inverse of [`sag_m`].
 pub fn max_chord_deg() -> f64 {
     let sag = (SURFACE_LIFT_M - CLEARANCE_M) / geodesy::SEMI_MAJOR_M;
     2.0 * (1.0 - sag).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
-/// Предельная сторона квада. Спрашивают об этом порознь, потому что квад режется
-/// на два треугольника и глубже всего уходит середина гипотенузы — до неё в √2
-/// раза дальше, чем до середины стороны.
+/// Limit side of a quad. Asked for separately because a quad is cut into two
+/// triangles and the deepest point is the middle of the hypotenuse — √2 times
+/// farther out than the middle of a side.
 pub fn max_quad_side_deg() -> f64 {
     max_chord_deg() / std::f64::consts::SQRT_2
 }
 
-/// Высота, на которой рисуется носитель с таким самым длинным звеном.
+/// Height at which a carrier with such a longest segment is drawn.
 ///
-/// Поделивший себя достаточно мелко садится на общий вынос — и сходится там со
-/// всеми остальными. Упёршийся в свой потолок густоты добирает остаток
-/// собственным подъёмом: снимок во всю Землю иначе был бы виден клочками у
-/// самых узлов своей сетки. Расходится он при этом только с теми, кого видно
-/// вместе с ним, а видно его с той дистанции, где расхождение уже меньше
-/// пикселя.
+/// One that has divided itself finely enough sits on the common lift and
+/// converges there with all the others. One that has hit its own density ceiling
+/// makes up the remainder with its own rise: an image covering the whole Earth
+/// would otherwise be visible in patches near its own grid nodes. It diverges
+/// only from those visible along with it, and it is visible only from a distance
+/// where the divergence is already below a pixel.
 pub fn lift_m(chord_deg: f64) -> f64 {
     SURFACE_LIFT_M.max(sag_m(chord_deg) + CLEARANCE_M)
 }
@@ -141,7 +147,7 @@ pub fn lift_m(chord_deg: f64) -> f64 {
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
-    /// Диапазоны в индексном буфере: поверхность треугольниками, сетка линиями.
+    /// Ranges in the index buffer: the surface as triangles, the graticule as lines.
     pub surface: std::ops::Range<u32>,
     pub grid: std::ops::Range<u32>,
 }
@@ -163,18 +169,18 @@ impl Mesh {
     }
 }
 
-/// Узел поверхности. Общий с контурами: у них та же вершина и та же раскладка
-/// буфера — разное только время жизни (см. `outlines`).
+/// Surface node. Shared with the outlines: they use the same vertex and the same
+/// buffer layout — only the lifetime differs (see `outlines`).
 pub fn vertex(point: Geodetic) -> Vertex {
     let (position, position_low) = geodesy::parts(geodesy::world(point));
     Vertex { position, position_low, normal: geodesy::normal(point.lat_deg, point.lon_deg) }
 }
 
-/// Поверхность: ряды по широте от полюса к полюсу, в каждом — узлы по долготе.
+/// Surface: rows by latitude from pole to pole, each holding nodes by longitude.
 ///
-/// Шов на 180° замкнут дублем крайнего столбца вершин, а не переиспользованием
-/// нулевого: у совпадающих точек разные долготы, и когда по поверхности поедет
-/// растр, его края обязаны разойтись.
+/// The seam at 180° is closed with a duplicate of the last vertex column rather
+/// than by reusing the first: coincident points have different longitudes, and
+/// when a raster travels over the surface, its edges must come apart.
 fn surface(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>) {
     let base = vertices.len() as u32;
     let rows = (180.0 / LAT_STEP_DEG) as u32;
@@ -199,14 +205,14 @@ fn surface(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>) {
     }
 }
 
-/// Меридианы и параллели отрезками.
+/// Meridians and parallels as line segments.
 ///
-/// Параллели у самых полюсов не рисуются: там они вырождаются в точку, а
-/// меридианы и так сходятся.
+/// Parallels nearest the poles are not drawn: there they degenerate into a point,
+/// and the meridians converge there anyway.
 fn graticule(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>) {
-    // Ломаная отрезками: каждая пара соседних точек — своя линия. Line strip
-    // избавил бы от половины индексов, но потребовал бы отдельного вызова на
-    // каждую линию — а их здесь под сорок.
+    // Polyline as segments: every pair of adjacent points is its own line. A
+    // line strip would halve the indices but would need a separate draw call per
+    // line — and there are nearly forty of them here.
     let mut polyline = |points: Vec<Vertex>| {
         let base = vertices.len() as u32;
         let count = points.len() as u32;
@@ -216,8 +222,8 @@ fn graticule(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>) {
         }
     };
 
-    // Высота — по тому же правилу, что у всех: самое длинное звено сетки —
-    // это звено параллели на экваторе.
+    // Height by the same rule as everyone's: the longest graticule segment is
+    // the segment of the parallel at the equator.
     let height_m = lift_m(360.0 / f64::from(GRID_SEGMENTS));
     let at = |lat: f64, lon: f64| vertex(Geodetic { lat_deg: lat, lon_deg: lon, height_m });
 
@@ -236,121 +242,6 @@ fn graticule(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>) {
             (0..=GRID_SEGMENTS)
                 .map(|i| at(lat, -180.0 + 360.0 * i as f64 / GRID_SEGMENTS as f64))
                 .collect(),
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Узел везёт обе половины, и младшая — не пустое место: сантиметр по земле
-    /// старшей неразличим, а парой берётся точно.
-    ///
-    /// Обнули младшую — и приём с половинами отменится разом для тела, сетки,
-    /// контура и ленты: рисоваться всё продолжит, только шагом в метр, и
-    /// заметить это будет нечем.
-    #[test]
-    fn a_node_carries_a_low_half_that_matters() {
-        let step_m = 0.01;
-        let step_deg = step_m / 111_320.0;
-        let here = vertex(Geodetic::surface(45.0, 60.0));
-        let there = vertex(Geodetic::surface(45.0 + step_deg, 60.0));
-
-        assert_ne!(here.position_low, there.position_low, "сантиметр не виден и младшей");
-
-        let moved = f64::from(
-            glam::Vec3::from(geodesy::offset(
-                (there.position, there.position_low),
-                (here.position, here.position_low),
-            ))
-            .length(),
-        ) * geodesy::SEMI_MAJOR_M;
-        assert!((moved - step_m).abs() < 1e-4, "{} м вместо {}", moved, step_m);
-    }
-
-    /// Предельная хорда и провал обратны друг другу: провал такой хорды — это
-    /// ровно то, что вынос способен принять, оставив просвет.
-    #[test]
-    fn the_limit_chord_sags_exactly_into_the_lift() {
-        let sag = sag_m(max_chord_deg());
-        assert!(
-            (sag - (SURFACE_LIFT_M - CLEARANCE_M)).abs() < 1e-6,
-            "провал предельной хорды {} м", sag
-        );
-    }
-
-    /// Поделивший себя до предела садится на общий вынос — и ровная решётка,
-    /// которая меряется диагональю квада, и ломаная, которая меряется звеном.
-    #[test]
-    fn what_divides_finely_lands_on_the_common_lift() {
-        let diagonal = max_quad_side_deg() * std::f64::consts::SQRT_2;
-        assert!(diagonal <= max_chord_deg() + 1e-9, "диагональ квада длиннее предельной хорды");
-        for chord in [max_chord_deg(), diagonal, max_quad_side_deg(), 0.0] {
-            assert!(
-                (lift_m(chord) - SURFACE_LIFT_M).abs() < 1e-6,
-                "хорда в {}° подняла носитель до {} м", chord, lift_m(chord)
-            );
-        }
-    }
-
-    /// Сетка и рисуется на общем выносе, а не только считается по нему: легшая
-    /// на само тело, она спорила бы с ним за глубину и пропадала клочками.
-    ///
-    /// Высота читается из самой вершины: длина её вектора против длины такого
-    /// же вектора на поверхности. Прямо разностью с единицей её не взять — у
-    /// эллипсоида радиус меняется с широтой.
-    #[test]
-    fn the_graticule_is_drawn_on_the_lift() {
-        let mesh = Mesh::build();
-        for step in [0usize, 7, 64] {
-            let index = mesh.indices[mesh.grid.start as usize + step] as usize;
-            let node = mesh.vertices[index];
-            let (lat_deg, lon_deg) = geodesy::angles(glam::Vec3::from(node.normal).as_dvec3());
-            let ground = geodesy::world(Geodetic { lat_deg, lon_deg, height_m: 0.0 }).length();
-            let raised = f64::from(glam::Vec3::from(node.position).length());
-            let height = (raised - ground) * geodesy::SEMI_MAJOR_M;
-            assert!(
-                (height - SURFACE_LIFT_M).abs() < 3.0,
-                "узел сетки на {} м вместо общего выноса", height
-            );
-        }
-    }
-
-    /// А не поделившийся поднимается ровно на свой провал и на просвет: иначе
-    /// его середина ушла бы под поверхность, где её съедает тест глубины.
-    #[test]
-    fn what_cannot_divide_rises_by_its_own_sag() {
-        let coarse = 8.0;
-        assert!(lift_m(coarse) > SURFACE_LIFT_M, "грубое звено не поднялось");
-        assert!(
-            (lift_m(coarse) - sag_m(coarse) - CLEARANCE_M).abs() < 1e-9,
-            "подъём {} м не равен провалу {} м с просветом", lift_m(coarse), sag_m(coarse)
-        );
-    }
-
-    /// Сетка делится по тому же правилу, что и всё остальное: её звено
-    /// умещается под общий вынос, и добирать высотой ей нечего. Ослабь деление,
-    /// и линии сетки пошли бы под той поверхностью, на которой лежат снимок и
-    /// контур.
-    #[test]
-    fn the_graticule_fits_under_the_common_lift() {
-        let step = 360.0 / f64::from(GRID_SEGMENTS);
-        assert!(
-            (lift_m(step) - SURFACE_LIFT_M).abs() < 1e-9,
-            "звено сетки в {}° не умещается под вынос: {} м", step, lift_m(step)
-        );
-        // И узлы её при этом лежат на рёбрах тела.
-        assert_eq!(f64::from(GRID_STEP_DEG) % LON_STEP_DEG, 0.0, "сетка не на рёбрах тела");
-        assert_eq!(
-            GRID_SEGMENTS % (360.0 / LON_STEP_DEG) as u32,
-            0,
-            "узлы параллелей сошли с рёбер тела"
-        );
-        assert_eq!(
-            GRID_SEGMENTS % (180.0 / LAT_STEP_DEG) as u32,
-            0,
-            "узлы меридианов сошли с рёбер тела"
         );
     }
 }

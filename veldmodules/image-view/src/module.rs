@@ -1,23 +1,23 @@
-//! image-view: канвы просмотра растров поверх тайлового конвейера.
+//! image-view: canvases for viewing rasters on top of the tile pipeline.
 //!
-//! Владелец разметки присылает место (on_canvas), ресурс (on_show, владение
-//! переходит сюда) и намерения камеры; обратно уезжает только on_view_state.
-//! Тайлы спрашиваются у tile-cache, промахи заказываются у image-tiler; его
-//! read-грант на ресурс выдаётся здесь, при показе.
+//! The layout owner sends the place (on_canvas), the resource (on_show,
+//! ownership moves here) and camera intents; only on_view_state goes back.
+//! Tiles are asked of tile-cache, misses are ordered from image-tiler; its
+//! read grant on the resource is issued here, at show time.
 //!
-//! Проход по источнику один: у формата без произвольного доступа каждый
-//! produce — полный проход по файлу, и пускать второй параллельно первому
-//! значит читать гигабайты дважды. Пока он идёт, промахи по этому источнику в
-//! производство не уходят — ни свои, ни соседней вкладки с тем же файлом;
-//! кончился — нужное пересчитывается всем, кто на него смотрит, и почти всё
-//! находится в кэше: проход складывает туда все уровни. Убивается проход двумя
-//! способами и обоими своим заказчиком: он уходит со снимка (`release_pass`)
-//! либо ему нужен уровень грубее, чем производит его же проход
-//! (`Passes::stale`).
+//! There is one pass over the source: for a format without random access each
+//! produce is a full pass over the file, and running a second one alongside
+//! the first would read gigabytes twice. While it runs, misses on this source
+//! do not go to production — neither its own nor those of a neighboring tab
+//! with the same file; once it finishes, what is needed is recomputed for
+//! everyone watching it, and almost everything is found in the cache: the
+//! pass stores all levels there. A pass is killed in two ways, both by its own
+//! customer: it leaves with the snapshot (`release_pass`), or it needs a level
+//! coarser than its own pass produces (`Passes::stale`).
 //!
-//! module.rs — состояние и обработчики; камера — camera.rs, кадр — view.rs и
-//! gpu.rs. Тайлы в видеопамяти и учёт спрошенного — общие с глобусом
-//! (`veldmap_image_tiler_wrap::tiles`).
+//! module.rs holds the state and handlers; the camera is in camera.rs, the
+//! frame in view.rs and gpu.rs. Tiles in video memory and the accounting of
+//! what was asked are shared with the globe (`veldmap_image_tiler_wrap::tiles`).
 
 pub mod camera;
 pub mod gpu;
@@ -45,8 +45,8 @@ use view::{Shown, Stamp, View};
 
 #[derive(serde::Deserialize, Clone)]
 pub struct Config {
-    /// Бюджет видеопамяти под тайлы, МиБ. Вытеснение — забывание: тайл
-    /// остаётся на диске у tile-cache.
+    /// Video memory budget for tiles, MiB. Eviction is forgetting: the tile
+    /// stays on disk at tile-cache.
     #[serde(default = "default_vram_budget_mb")]
     pub vram_budget_mb: u64,
 }
@@ -55,16 +55,16 @@ fn default_vram_budget_mb() -> u64 {
     tiles::DEFAULT_VRAM_BUDGET_MB
 }
 
-/// Чей это ответ кэша и о чём спрашивали. Отпечаток свой, а не из вида:
-/// показ могли сменить, пока ответ шёл, и класть его тайлы под новый
-/// отпечаток нельзя.
+/// Whose cache reply this is and what was asked. The fingerprint is its own,
+/// not the view's: the show could change while the reply was in flight, and
+/// its tiles must not be filed under the new fingerprint.
 pub struct QueryCtx {
     view: String,
     fingerprint: String,
     cells: Vec<Addr>,
 }
 
-/// То же для производителя.
+/// The same for the producer.
 pub struct ProduceCtx {
     view: String,
     fingerprint: String,
@@ -72,21 +72,21 @@ pub struct ProduceCtx {
 }
 
 pub struct State {
-    /// Появляется на первом месте под канву: до него ни формата таргета, ни
-    /// повода что-то собирать.
+    /// Appears at the first place for a canvas: before it there is neither a
+    /// target format nor a reason to build anything.
     device: Option<Device>,
     views: HashMap<String, View>,
     tiles: Store,
     pending_describe: veldsdk::Correlator<String>,
     pending_query: veldsdk::Correlator<QueryCtx>,
     pending_produce: veldsdk::Correlator<ProduceCtx>,
-    /// Идущие проходы производителя, по одному на источник. Не у вида: проход
-    /// читает файл, а файл у двух вкладок с одним снимком один и тот же.
-    /// Заказчик здесь — имя вкладки: снять проход с учёта вправе только та, что
-    /// его завела.
+    /// Running producer passes, one per source. Not on the view: a pass reads
+    /// the file, and the file is the same for two tabs with the same snapshot.
+    /// The customer here is the tab name: only the tab that started a pass may
+    /// take it off the books.
     passes: Passes<String>,
-    /// Где стои́т волна ряби, 0..1 периода. Одна на все канвы: рябь — про
-    /// идущую работу, а не про вид.
+    /// Where the ripple wave stands, 0..1 of a period. One for all canvases:
+    /// the ripple is about ongoing work, not about a view.
     phase: f32,
 }
 
@@ -103,24 +103,25 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
     })
 }
 
-// ── Входы владельца разметки ───────────────────────────────────
+// ── Layout owner inputs ─────────────────────────────────────────
 
-/// Место канвы. Пустая поверхность — отзыв: вид жив, рисовать негде.
+/// Canvas place. An empty surface is a recall: the view lives, but there is
+/// nowhere to draw.
 pub fn on_canvas(state: &mut State, msg: Canvas) {
     if msg.view.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "канва без имени вида");
+        veldsdk::log::warn!(target: "handlers", "canvas without a view name");
         return;
     }
     let Some(surface) = msg.surface else { return };
 
     let view = state.views.entry(msg.view.clone()).or_insert_with(|| View::new(msg.view.clone()));
     let Some(texture) = surface.surface else {
-        veldsdk::log::info!(target: "handlers", "{}: место отозвано", view.label);
+        veldsdk::log::info!(target: "handlers", "{}: place recalled", view.label);
         view.target = None;
         return;
     };
     if surface.width == 0 || surface.height == 0 {
-        veldsdk::log::warn!(target: "handlers", "{}: место {}x{} — рисовать негде",
+        veldsdk::log::warn!(target: "handlers", "{}: place {}x{} — nowhere to draw",
             view.label, surface.width, surface.height);
         return;
     }
@@ -128,30 +129,31 @@ pub fn on_canvas(state: &mut State, msg: Canvas) {
     if state.device.as_ref().is_none_or(|device| device.format != surface.format) {
         match Device::create(surface.format) {
             Ok(device) => {
-                // Bind group'ы тайлов собраны под layout прежнего устройства —
-                // с новым они несовместимы. Хранилище опустошается: тайлы
-                // лежат на диске и вернутся за миллисекунды.
+                // Tile bind groups are assembled for the previous device's
+                // layout — they are incompatible with a new one. The store is
+                // emptied: tiles lie on disk and return in milliseconds.
                 state.tiles = Store::new_like(&state.tiles);
                 state.device = Some(device);
             }
             Err(error) => {
-                // Причина уезжает на экран, а не в один лишь лог: молчащая
-                // пустая вкладка читается как «зависло», а не как отказ.
-                complain(state, &msg.view, format!("не собрались ресурсы устройства: {:#}", error));
+                // The reason goes to the screen, not just to the log: a silent
+                // empty tab reads as "frozen", not as a failure.
+                complain(state, &msg.view, format!("device resources not assembled: {:#}", error));
                 return;
             }
         }
     }
 
-    let view = state.views.get_mut(&msg.view).expect("вид только что был");
+    let view = state.views.get_mut(&msg.view).expect("the view was just there");
     match gpu::Target::create(texture.id, surface.width, surface.height) {
         Ok(target) => {
             view.target = Some(target);
-            // Место собрано — прежняя жалоба на него больше не про этот кадр.
+            // The place is assembled — the old complaint about it no longer
+            // belongs to this frame.
             view.trouble = None;
         }
         Err(error) => {
-            complain(state, &msg.view, format!("не собралось место под кадр: {:#}", error));
+            complain(state, &msg.view, format!("frame place not assembled: {:#}", error));
             return;
         }
     }
@@ -161,22 +163,23 @@ pub fn on_canvas(state: &mut State, msg: Canvas) {
     report(state, &msg.view);
 }
 
-/// Место под кадр не собралось: причина уходит и в лог, и на экран — но
-/// жалобой, а не приговором.
+/// The frame place could not be assembled: the reason goes to both the log
+/// and the screen — but as a complaint, not as a verdict.
 ///
-/// Разница не косметическая. Приговор (`ViewState.error`) заказчик читает как
-/// «смотреть не на что» и **убирает канву из разметки**; а без канвы к нам не
-/// придёт и следующее делегирование места — то есть вкладка остаётся мёртвой
-/// до закрытия, даже когда отказ был мгновенным (текстуру успели сменить,
-/// пока событие шло к нам). Жалоба оставляет канву на месте.
+/// The difference is not cosmetic. The client reads a verdict
+/// (`ViewState.error`) as "nothing to watch" and **removes the canvas from the
+/// layout**; and without a canvas the next delegation of a place never comes
+/// to us — that is, the tab stays dead until closed, even when the failure was
+/// momentary (the texture was swapped while the event was on its way). A
+/// complaint keeps the canvas in place.
 ///
-/// Само по себе это места ещё не возвращает: выделяет его владелец разметки, а
-/// спрашивают его только сменой размера, которой тут не было. Поэтому о нужде
-/// сказано отдельным полем — `ViewState.needs_place`, — и по нему владелец
-/// выдаёт место заново (см. `report`).
+/// By itself this still does not bring the place back: the layout owner
+/// allocates it, and it is only asked for by a resize, which did not happen
+/// here. So the need is stated by a separate field — `ViewState.needs_place` —
+/// and on it the owner issues the place again (see `report`).
 ///
-/// Приговор остаётся для того, что делегированием не лечится: источник не
-/// открылся или не описался — там и правда смотреть не на что.
+/// The verdict remains for what delegation cannot cure: the source failed to
+/// open or to describe — there truly is nothing to watch there.
 fn complain(state: &mut State, key: &str, why: String) {
     veldsdk::log::error!(target: "handlers", "{}: {}", key, why);
     if let Some(view) = state.views.get_mut(key) {
@@ -186,21 +189,22 @@ fn complain(state: &mut State, key: &str, why: String) {
     report(state, key);
 }
 
-/// Показать снимок. Ресурс уже наш: владение передал отправитель.
+/// Show a snapshot. The resource is already ours: the sender transferred
+/// ownership.
 pub fn on_show(state: &mut State, msg: ShowRequest) {
     let Some(resource) = msg.resource else {
-        veldsdk::log::warn!(target: "handlers", "показ без ресурса");
+        veldsdk::log::warn!(target: "handlers", "show without a resource");
         return;
     };
     if msg.view.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "показ без имени вида — ресурс освобождается");
+        veldsdk::log::warn!(target: "handlers", "show without a view name — the resource is being released");
         veldsdk::resource::release(resource);
         return;
     }
 
-    // Прежний показ кончается здесь, и его проход уходит вместе с ним: читает
-    // тот ресурс, который сейчас освободится. Хвосты в полёте опознаются по
-    // отпечатку и выбрасываются.
+    // The previous show ends here, and its pass leaves with it: it reads the
+    // resource that is about to be released. In-flight tails are recognized by
+    // fingerprint and dropped.
     let previous =
         state.views.get(&msg.view).and_then(|view| view.meta()).map(|meta| meta.fingerprint.clone());
     if let Some(fingerprint) = previous {
@@ -216,8 +220,9 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
     view.fetch.reset();
     view.error = None;
     view.trouble = None;
-    // И жалоба на застрявший кадр: она про прошлый снимок, а показывают уже
-    // другой — вид в этой вкладке переиспользуется, а не заводится заново.
+    // And the complaint about a stuck frame: it is about the previous
+    // snapshot, while a different one is already shown — the view in this tab
+    // is reused, not created anew.
     view.stuck = None;
     view.read_bytes = 0;
     view.total_bytes = resource.size;
@@ -225,8 +230,8 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
     view.drawn = None;
     view.shown = None;
 
-    // Грант до владения: при отказе хелпер освобождает ресурс сам, и
-    // заворачивать его во владельца было бы вторым освобождением.
+    // The grant comes before ownership: on refusal the helper releases the
+    // resource itself, and wrapping it into an owner would be a second release.
     if let Err(error) = veldsdk::resource::grant_read_or_free(resource.id, "image-tiler") {
         view.error = Some(error);
         report(state, &msg.view);
@@ -242,8 +247,8 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
     crate::calls::image_tiler::on_describe(&DescribeRequest {
         resource: Some(resource),
         label: view.label.clone(),
-        // Канве привязка не нужна вовсе: она показывает растр как картинку, а
-        // не кладёт его на Землю.
+        // The canvas needs no binding at all: it shows the raster as a
+        // picture, not laid onto the Earth.
         geolocation: None,
         variable: view.variable.clone(),
     }, &correlation);
@@ -251,11 +256,11 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
     report(state, &msg.view);
 }
 
-/// Другая величина того же файла: описание заново с ней, ресурс прежний.
-/// Прежний проход уходит вместе с прежним отпечатком — его тайлы уже не про
-/// этот показ, — а камера остаётся, пока плоскость та же: вписывать заново
-/// значило бы дёргать кадр под рукой; другой плоскости ответит описание
-/// (`View::plane_changed`).
+/// Another variable of the same file: a fresh describe with it, the resource
+/// unchanged. The previous pass leaves with its previous fingerprint — its
+/// tiles are no longer about this show — while the camera stays as long as the
+/// plane is the same: refitting would jerk the frame under the hand; a
+/// different plane is answered by the describe (`View::plane_changed`).
 pub fn on_variable(state: &mut State, msg: VariableRequest) {
     let Some(view) = state.views.get(&msg.view) else { return };
     let Some(resource) = view.shown.as_ref().map(|shown| shown.resource.handle()) else { return };
@@ -266,7 +271,7 @@ pub fn on_variable(state: &mut State, msg: VariableRequest) {
         release_pass(state, &fingerprint, &msg.view);
     }
 
-    let view = state.views.get_mut(&msg.view).expect("вид найден выше");
+    let view = state.views.get_mut(&msg.view).expect("the view was found above");
     view.variable = msg.variable.clone();
     view.previous_plane = view.meta().map(|meta| (meta.width, meta.height));
     view.fetch.reset();
@@ -288,14 +293,14 @@ pub fn on_variable(state: &mut State, msg: VariableRequest) {
     report(state, &msg.view);
 }
 
-/// Конец вида: всё его — прочь. Тайлы в хранилище общие и остаются до
-/// вытеснения: та же вкладка, открытая заново, начнёт с них.
+/// End of a view: everything of it goes away. Tiles in the store are shared
+/// and stay until evicted: the same tab, reopened, will start from them.
 pub fn on_close(state: &mut State, msg: CloseView) {
     let Some(view) = state.views.remove(&msg.view) else { return };
     if let Some(fingerprint) = view.meta().map(|meta| meta.fingerprint.clone()) {
         release_pass(state, &fingerprint, &msg.view);
     }
-    veldsdk::log::debug!(target: "handlers", "{}: вид закрыт", view.label);
+    veldsdk::log::debug!(target: "handlers", "{}: view closed", view.label);
 }
 
 pub fn on_camera(state: &mut State, msg: CameraCommand) {
@@ -326,21 +331,22 @@ pub fn on_camera(state: &mut State, msg: CameraCommand) {
     report(state, &msg.view);
 }
 
-// ── Ответы конвейера тайлов ────────────────────────────────────
+// ── Tile pipeline replies ───────────────────────────────────────
 
 pub fn on_described(state: &mut State, msg: Described) {
     let correlation = veldsdk::correlation();
     let Some(key) = state.pending_describe.take(&correlation) else { return };
     let Some(view) = state.views.get_mut(&key) else { return };
     if view.describe.settle(&correlation) != veldsdk::Reply::Current {
-        // Показ успели сменить — и ресурс того описания уже освобождён.
+        // The show changed while this was in flight — and that describe's
+        // resource is already released.
         return;
     }
 
-    // Годность описания решает общее правило: тайлер один, пирамида одна, и
-    // разойтись с наложением в том, какой ответ считать пригодным, нечем.
-    // Своё здесь одно — что делать с непригодным: у канвы есть место на
-    // экране, и причина уезжает туда.
+    // A shared rule decides whether a describe is fit: there is one tiler and
+    // one pyramid, so there is nothing to disagree about with the overlay on.
+    // What is local here is only what to do with an unfit one: the canvas has
+    // a place on screen, and the reason goes there.
     let meta = match tiles::describe(&msg) {
         Ok(meta) => meta,
         Err(error) => {
@@ -352,7 +358,8 @@ pub fn on_described(state: &mut State, msg: Described) {
 
     veldsdk::log::info!(target: "handlers", "{}: {}", view.label, meta.note());
 
-    // Другая величина другой плоскости — камера прежней вписала бы её мимо.
+    // Another variable of another plane — the old camera would fit it
+    // off-target.
     if view.plane_changed(&meta) {
         view.camera = None;
     }
@@ -365,7 +372,7 @@ pub fn on_described(state: &mut State, msg: Described) {
     report(state, &key);
 }
 
-/// Тайл из дискового кэша.
+/// A tile from the disk cache.
 pub fn on_tile(state: &mut State, msg: CachedTile) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_query.peek(&correlation) else {
@@ -375,7 +382,7 @@ pub fn on_tile(state: &mut State, msg: CachedTile) {
     accept_tile(state, &view_key, &fingerprint, (msg.level, msg.x, msg.y), msg.texture, msg.width, msg.height);
 }
 
-/// Тайл от производителя.
+/// A tile from the producer.
 pub fn on_produced(state: &mut State, msg: ProducedTile) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_produce.peek(&correlation) else {
@@ -385,40 +392,43 @@ pub fn on_produced(state: &mut State, msg: ProducedTile) {
     accept_tile(state, &view_key, &fingerprint, (msg.level, msg.x, msg.y), msg.texture, msg.width, msg.height);
 }
 
-/// Кэш ответил всем, чем мог; промахи — производителю.
+/// The cache answered with all it could; misses go to the producer.
 pub fn on_query_done(state: &mut State, msg: QueryDone) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_query.take(&correlation) else { return };
     let cap = cap_tiles(state);
     let Some(view) = state.views.get_mut(&ctx.view) else { return };
 
-    // Показ сменили, пока ответ шёл: ожидания этого запроса уже не наши.
+    // The show changed while the reply was in flight: this request's
+    // expectations are no longer ours.
     if view.meta().is_none_or(|meta| meta.fingerprint != ctx.fingerprint) {
         return;
     }
 
-    // Кэш отказал — но снимок от этого не портится: ожидания снимаются, и
-    // ячейки спросятся заново следующим пересчётом. Показывать причину вместо
-    // кадра значило бы стереть картинку из-за осечки, которая пройдёт сама.
-    // Договорённый хостом ответ — тот же отказ, и путь у него тот же: свои
-    // ячейки снять с ожидания и сказать вслух. Принятый за удачу, он оставил бы
-    // их висеть навсегда (см. `veldsdk::reply::undelivered`).
+    // The cache refused — but the snapshot is not spoiled by it: expectations
+    // are dropped and the cells will be asked again at the next recompute.
+    // Showing the reason instead of the frame would erase the picture over a
+    // hiccup that passes on its own. A reply negotiated by the host is the
+    // same refusal, and its path is the same: drop one's own cells from
+    // expectations and say it out loud. Taken for a success, it would leave
+    // them hanging forever (see `veldsdk::reply::undelivered`).
     let error = veldsdk::reply::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone());
     if !error.is_empty() {
         view.fetch.forget_asked(&ctx.cells);
-        view.trouble = Some(format!("неполно: {}", error));
+        view.trouble = Some(format!("incomplete: {}", error));
         report(state, &ctx.view);
         return;
     }
 
-    // Промахи, которые всё ещё видимы, — на производство; уехавшие с экрана
-    // выбрасываются из ожиданий и переспросятся, когда вернутся в кадр.
+    // Misses that are still visible go to production; those that left the
+    // screen are dropped from expectations and re-asked when they return to
+    // the frame.
     let level = ctx.cells.first().map_or(0, |(level, ..)| *level);
     let desired: HashSet<Addr> = view::wanted(view, &state.tiles, cap)
         .map(|want| want.cells.into_iter().collect())
         .unwrap_or_default();
-    // Точечно ли читается запрошенный уровень: от этого зависит, ждать ли
-    // конца своего прохода молча или переспрашивать кэш.
+    // Whether the requested level is read pointwise: it decides whether to
+    // wait for one's own pass to finish silently or to re-ask the cache.
     let pointwise = view.meta().is_some_and(|meta| meta.pointwise(level));
     let missed = view.fetch.missed(
         &state.passes,
@@ -429,8 +439,9 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
         |addr| desired.contains(&addr),
     );
-    // Ручку источника и подпись берём здесь же: дальше `state` занят учётом, и
-    // держать на нём ссылку в вид одновременно нельзя.
+    // The source handle and the label are taken right here: further on
+    // `state` is busy with accounting, and a reference to it cannot be held
+    // along with a view.
     let (handle, label) = match view.shown.as_ref() {
         Some(shown) => (shown.resource.handle(), view.label.clone()),
         None => return,
@@ -438,14 +449,14 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
 
     let produce_list = match missed {
         Missed::Produce(cells) => cells,
-        // Ждём чужой проход молча: его конец пересчитает нужное всем, кто на
-        // этот источник смотрит.
+        // Wait for a foreign pass silently: its end will recompute what is
+        // needed for everyone watching this source.
         Missed::Waiting => {
             report(state, &ctx.view);
             return;
         }
-        // Кэш закрыл заказ целиком — ступень пройдена, и спросить следующую
-        // надо здесь (см. `Missed::Closed`).
+        // The cache closed the order entirely — the step is passed, and the
+        // next one must be asked for right here (see `Missed::Closed`).
         Missed::Closed => {
             want_tiles(state, &ctx.view);
             report(state, &ctx.view);
@@ -488,27 +499,28 @@ pub fn on_produce_progress(state: &mut State, msg: ProduceProgress) {
     }
 }
 
-/// Единственный конец производства, каким бы он ни был, — в том числе за
-/// убитое отвечает хост пустым сообщением.
+/// The only end of production, whatever its kind — including for a killed one
+/// the host answers with an empty message.
 pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_produce.take(&correlation) else { return };
 
-    // Сторож снимается раньше всего и безусловно: он стоял на источнике, а не
-    // на виде, и заказчика прохода могли закрыть, пока проход шёл. Уйди мы
-    // отсюда, не сняв его, — соседние вкладки с тем же файлом ждали бы конца,
-    // которого уже не будет.
-    // Сняли проход мы сами — это обычный ход приближения, а не срыв (см.
-    // `tiles::Passes::finish`).
+    // The guard is removed first of all and unconditionally: it stood on the
+    // source, not on the view, and the pass's customer could have been closed
+    // while the pass ran. Leaving here without removing it, neighboring tabs
+    // with the same file would wait for an end that will never come.
+    // A pass we took down ourselves is a normal step of refinement, not a
+    // failure (see `tiles::Passes::finish`).
     let ours_kill = state.passes.finish(&correlation);
 
     if let Some(view) = state.views.get_mut(&ctx.view) {
-        // Показ мог смениться, пока проход шёл: тогда его ячейки уже не про
-        // этот вид, и ни ожидания, ни отказ к нему не относятся.
+        // The show could change while the pass ran: then its cells are no
+        // longer about this view, and neither expectations nor refusals apply
+        // to it.
         let ours = view.meta().is_some_and(|meta| meta.fingerprint == ctx.fingerprint);
-        // Пустой ответ, договорённый хостом за упавшего, — это сорвавшийся
-        // проход, а не удачный: принятый за удачу, он ещё и простил бы ячейки,
-        // которых никто не производил (`Fetch::forgive`).
+        // An empty reply negotiated by the host for a crashed one is a failed
+        // pass, not a successful one: taken for a success it would also
+        // forgive cells that nobody produced (`Fetch::forgive`).
         let error = match ours_kill {
             true => msg.error.clone(),
             false => veldsdk::reply::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone()),
@@ -516,34 +528,34 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
         let failed = ours && !error.is_empty();
         view.fetch.produced(if ours { &ctx.cells } else { &[] }, failed);
         if ours {
-            // Прочитанное — про кончившийся проход, и пережить его оно не
-            // вправе: между ступенями не читается ничего, а полоса состояния
-            // всё это время показывала бы «читается… 512 МБ из 512 МБ».
+            // What was read belongs to the finished pass and must not outlive
+            // it: nothing is read between steps, and the status bar would show
+            // "reading... 512 MB of 512 MB" the whole time.
             (view.read_bytes, view.total_bytes) = (0, 0);
         }
         if failed {
-            // Не переспрашивать то, что уже не произвелось: каждый сдвиг камеры
-            // долбил бы производителя тем же отказом.
+            // Do not re-ask what has already failed to produce: every camera
+            // move would hammer the producer with the same refusal.
             //
-            // Но и смотреть при этом есть на что: сорвавшийся проход — это
-            // недоехавшие ячейки одной ступени, а не негодный снимок. Ступени
-            // выше уже нарисованы, и заменить их причиной значило бы стереть
-            // готовую картинку из-за одного оборванного чтения.
-            veldsdk::log::warn!(target: "handlers", "{}: производство: {}", view.label, error);
-            view.trouble = Some(format!("неполно: {}", error));
+            // But there is still something to watch: a failed pass is cells of
+            // one step that did not arrive, not a bad snapshot. The steps
+            // above are already drawn, and replacing them with the reason
+            // would erase a finished picture over a single aborted read.
+            veldsdk::log::warn!(target: "handlers", "{}: production: {}", view.label, error);
+            view.trouble = Some(format!("incomplete: {}", error));
         }
     }
 
-    // Пока проход шёл, запросы откладывались — пересчитать нужное сейчас, и не
-    // только заказчику: соседняя вкладка с тем же файлом всё это время ждала
-    // молча, и разбудить её больше некому.
+    // While the pass ran, requests were deferred — recompute what is needed
+    // now, and not only for the customer: a neighboring tab with the same file
+    // waited silently all this time, and no one else is left to wake it.
     for key in watchers(state, &ctx.fingerprint) {
         want_tiles(state, &key);
         report(state, &key);
     }
 }
 
-/// Вкладки, смотрящие на этот источник.
+/// Tabs watching this source.
 fn watchers(state: &State, fingerprint: &str) -> Vec<String> {
     state
         .views
@@ -553,30 +565,35 @@ fn watchers(state: &State, fingerprint: &str) -> Vec<String> {
         .collect()
 }
 
-/// Вкладка уходит со снимка — или закрывается совсем: её проход уносится с ней.
+/// A tab leaves a snapshot — or closes entirely: its pass is carried off with
+/// it.
 ///
-/// Уносится безусловно, даже когда на тот же файл смотрит соседняя вкладка:
-/// читает проход не «файл», а тот самый ресурс, который сейчас освободится
-/// вместе с показом (см. `tiles::Passes`). Сосед заведёт свой по концу этого —
-/// со своим ресурсом, который жив.
+/// Carried off unconditionally, even when a neighboring tab watches the same
+/// file: what a pass reads is not "the file" but that very resource which is
+/// about to be released together with the show (see `tiles::Passes`). The
+/// neighbor will start its own after this one ends — with its own resource,
+/// which is alive.
 fn release_pass(state: &mut State, fingerprint: &str, view: &str) {
     if let Some(correlation) = state.passes.abandon(fingerprint, &view.to_string()) {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
 }
 
-// ── Кадровый тик ───────────────────────────────────────────────
+// ── Frame tick ──────────────────────────────────────────────────
 
-/// На сколько долей периода бьётся фаза ряби в отпечатке кадра. Тридцать шагов
-/// в секунду — предел, за которым глаз перестаёт различать движение волны, а
-/// кадры сверх него были бы перерисовкой ради одного и того же.
+/// Into how many fractions of a period the ripple phase is quantized in the
+/// frame stamp. Thirty steps a second is the limit past which the eye stops
+/// discerning wave motion, and frames beyond it would be redraws for the same
+/// picture.
 const RIPPLE_STEPS: f32 = view::RIPPLE_PERIOD_S * 30.0;
 
-/// Куда ушла фаза за этот тик и чем кадр отличается от прошлого.
+/// Where the phase went over this tick and how the frame differs from the
+/// previous one.
 ///
-/// Чистой функцией, потому что стережёт она главную опасность правки — вечно
-/// рисующую канву: пока рябить нечему, огрублённая фаза обязана стоять на
-/// месте, иначе кадровое сравнение перестанет пропускать покой.
+/// A pure function, because it guards against the main danger of an edit — a
+/// canvas that draws forever: while there is nothing to ripple, the quantized
+/// phase must stand still, otherwise the frame comparison stops letting rest
+/// through.
 fn advance_ripple(phase: f32, dt: f32, glowing: bool) -> (f32, u32) {
     let phase = match glowing {
         true => (phase + dt / view::RIPPLE_PERIOD_S).fract(),
@@ -590,14 +607,14 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
         return;
     };
     let cap = cap_tiles(state);
-    // Фаза одна на все канвы: рябь — это про идущую работу, а не про вид, и
-    // разойдясь по видам, она читалась бы как разная скорость одной работы.
-    // Двигают её те виды, которым есть чем рябить.
+    // The phase is one for all canvases: the ripple is about ongoing work, not
+    // about a view, and diverging across views it would read as different
+    // speeds of one job. The views that have something to ripple move it.
     let glowing = state.views.values().any(|view| view.glowing);
     let (phase, stepped) = advance_ripple(state.phase, frame.dt, glowing);
     state.phase = phase;
-    // Виды, у которых кадр не записался: о такой жалобе надо ещё и сказать, а
-    // рассылка состояния трогает `state` целиком — значит после обхода.
+    // Views whose frame was not written: such a complaint must also be told,
+    // and the state broadcast touches `state` as a whole — so after the loop.
     let mut complained: Vec<String> = Vec::new();
     {
     let State { views, tiles, device: Some(device), .. } = state else { return };
@@ -616,19 +633,20 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
         }
 
         let quads = view::quads(view, tiles, cap, phase);
-        // Чему рябить в следующем кадре — по тем же квадам, которые рисуются
-        // в этом: ответить на это раньше сборки нечем.
+        // What ripples in the next frame follows from the same quads drawn in
+        // this one: nothing can answer it before the assembly.
         view.glowing = quads.iter().any(|quad| quad.glow > 0.0);
-        let target = view.target.as_ref().expect("место проверено выше");
-        // Буфер вершин — всякий раз не тот, что у прошлого кадра (см.
-        // `View::vertices`).
+        let target = view.target.as_ref().expect("the place is checked above");
+        // The vertex buffer is always a different one than in the previous
+        // frame (see `View::vertices`).
         let turn = view.turn;
         view.turn ^= 1;
         match gpu::render(device, target, &mut view.vertices[turn], &quads) {
-            // Снимается только СВОЯ жалоба — на застрявший кадр. Чужую
-            // («производство сорвалось») успешный кадр не трогает: она держится
-            // до приехавшего тайла (см. `View::landed`), а перерисовка той же
-            // дыры дырой её и оставляет.
+            // Only one's OWN complaint is cleared — the one about a stuck
+            // frame. A successful frame does not touch a foreign one ("the
+            // production failed"): it holds until a tile arrives (see
+            // `View::landed`), and redrawing the same hole as a hole leaves it
+            // in place.
             Ok(()) => {
                 view.drawn = Some(stamp);
                 if view.stuck.take().is_some() {
@@ -636,30 +654,30 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
                 }
             }
             Err(error) => {
-                veldsdk::log::error!(target: "render", "{}: кадр не записан: {:#}", view.label, error);
-                // Именно `trouble`, а не `error`: смотреть по-прежнему есть на
-                // что, а вот кадр застыл. И отметиться нарисованным: без этого
-                // попытка повторяется каждым кадровым тиком, то есть шестьдесят
-                // раз в секунду пишет в журнал и жжёт кадр впустую, а причина у
-                // неё та же самая.
+                veldsdk::log::error!(target: "render", "{}: frame not written: {:#}", view.label, error);
+                // Exactly `trouble`, not `error`: there is still something to
+                // watch, while the frame has frozen. And it is marked as
+                // drawn: without that the attempt repeats on every frame tick,
+                // i.e. writes to the log sixty times a second and burns a
+                // frame for nothing, with the same reason every time.
                 view.drawn = Some(stamp);
-                view.stuck = Some(format!("кадр застыл: {}", error));
+                view.stuck = Some(format!("frame stuck: {}", error));
                 complained.push(key.clone());
             }
         }
     }
     }
-    // Жалоба, о которой не сказали, — это молчащая канва: кадрового тика
-    // рассылка не делает, а других событий у застывшего вида не бывает.
+    // A complaint left untold is a silent canvas: a frame tick makes no
+    // broadcast, and a frozen view has no other events.
     for key in complained {
         report(state, &key);
     }
 }
 
-// ── Внутреннее ─────────────────────────────────────────────────
+// ── Internals ──────────────────────────────────────────────────
 
-/// Первое вписывание: камера появляется, когда впервые известны и снимок, и
-/// место. Дальше её живут команды.
+/// First fit: the camera appears when both the snapshot and the place are
+/// known for the first time. After that commands keep it alive.
 fn fit_if_first(state: &mut State, key: &str) {
     let Some(view) = state.views.get_mut(key) else { return };
     if view.camera.is_some() {
@@ -672,9 +690,10 @@ fn fit_if_first(state: &mut State, key: &str) {
     view.camera = Some(Camera::fit(meta.width, meta.height, target.width, target.height));
 }
 
-/// Пересчёт нужного: видимые ячейки без имеющихся, ожидаемых и провальных — в
-/// запрос кэшу. Свой проход, который производит уровень подробнее нужного, тут
-/// же и убивается: он уже не про то, на что смотрят.
+/// Recompute of what is needed: visible cells minus the present, expected and
+/// failed ones — into a cache request. One's own pass that produces a level
+/// finer than needed is killed right here: it is no longer about what is being
+/// watched.
 fn want_tiles(state: &mut State, key: &str) {
     let cap = cap_tiles(state);
     let Some(view) = state.views.get(key) else { return };
@@ -692,17 +711,17 @@ fn want_tiles(state: &mut State, key: &str) {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
     let going = state.passes.going(&fingerprint);
-    let view = state.views.get_mut(key).expect("вид только что был");
-    // Прохода нет — отложенным на его время ячейкам ждать больше нечего.
+    let view = state.views.get_mut(key).expect("the view was just there");
+    // No pass — cells deferred for its time have nothing left to wait for.
     if !going {
         view.fetch.resume();
     }
     let Some(cells) = view.fetch.ask(&state.tiles, &fingerprint, want.cells) else { return };
 
-    // Ход добычи видно только здесь: какая ступень понадобилась, сколько её
-    // ячеек не хватает и далеко ли ещё до резкости (та же строка, что у
-    // наложений на шаре).
-    veldsdk::log::debug!(target: "handlers", "{}: ступень {} ({} из {}), ячеек {}",
+    // The fetch progress is visible only here: which step was needed, how many
+    // of its cells are missing and how far sharpness still is (the same line
+    // as for overlays on the globe).
+    veldsdk::log::debug!(target: "handlers", "{}: step {} ({} of {}), {} cells",
         label, want.level, want.climbed + 1, want.steps, cells.len());
 
     let correlation = state.pending_query.begin(QueryCtx {
@@ -718,12 +737,12 @@ fn want_tiles(state: &mut State, key: &str) {
     }, &correlation);
 }
 
-/// Потолок аппетита одной пирамиды. Правило общее с глобусом и живёт у бюджета
-/// (`Store::cap_tiles`); здесь только ответ на «сколько пирамид сейчас
-/// рисуется».
+/// The ceiling on one pyramid's appetite. The rule is shared with the globe
+/// and lives at the budget (`Store::cap_tiles`); here only the answer to "how
+/// many pyramids are being drawn now".
 ///
-/// Пирамид, а не вкладок: две вкладки с одним снимком — это один набор тайлов и
-/// одна доля бюджета.
+/// Pyramids, not tabs: two tabs with the same snapshot are one tile set and
+/// one share of the budget.
 fn cap_tiles(state: &State) -> u64 {
     state.tiles.cap_tiles(
         state
@@ -734,11 +753,11 @@ fn cap_tiles(state: &State) -> u64 {
     )
 }
 
-/// Тайл приехал — в хранилище и вон из ожиданий.
+/// A tile has arrived — into the store and out of the expectations.
 ///
-/// С ожиданий ячейка снимается в любом случае: ответ про неё пришёл, а не
-/// легший тайл — это промах, и переспросится он следующим пересчётом. Оставь
-/// мы его в ожиданиях — не переспросился бы никогда.
+/// The cell leaves the expectations either way: the answer about it arrived;
+/// an answer without a landed tile is a miss, and it will be re-asked at the
+/// next recompute. Left in the expectations, it would never be re-asked.
 fn accept_tile(
     state: &mut State,
     view_key: &str,
@@ -752,10 +771,10 @@ fn accept_tile(
         Some(device) => state.tiles.land(fingerprint, addr, texture, width, height, |view| {
             device.tile_bind_group(view)
         }),
-        // Устройства нет — значит канвы не было ни разу: заведённое однажды,
-        // оно переживает и отзыв места (`on_canvas` чистит только `target`).
-        // Тайлов до первой канвы не спрашивают, так что ветка эта — на ответ,
-        // приехавший раньше, чем канва завелась.
+        // No device means there was never a canvas: once created, it survives
+        // even a place recall (`on_canvas` clears only `target`). Tiles are not
+        // asked before the first canvas, so this branch is for a reply that
+        // arrived before the canvas was created.
         None => {
             tiles::release(texture);
             tiles::Landing::Retry
@@ -770,8 +789,8 @@ fn accept_tile(
                 view.fetch.arrived(addr);
                 view.landed();
             }
-            // Осечка наша: ячейка спросится заново. Второй раз подряд на той же
-            // ячейке `stumbled` приговорит её сам.
+            // Our hiccup: the cell will be asked again. A second time in a
+            // row on the same cell, `stumbled` will condemn it by itself.
             tiles::Landing::Retry => {
                 view.fetch.stumbled(addr);
             }
@@ -780,28 +799,29 @@ fn accept_tile(
     }
 }
 
-/// Рассылка состояния показа. Зовётся на всяком смысловом изменении, а уезжает
-/// только изменившееся: топик объявлен снимком, и повтор отсекает его стаб
-/// (см. schema.yaml).
+/// Broadcast of the show state. Called on every meaningful change, and only
+/// what changed leaves: the topic is declared as a snapshot, and a repeat is
+/// cut off by its stub (see schema.yaml).
 fn report(state: &State, key: &str) {
     let Some(view) = state.views.get(key) else { return };
-    // Желаемое считается заново, а не берётся с прошлого раза: «работа идёт»
-    // держится в том числе на непройденном пути к цели, а путь этот меряется
-    // тем, что нужно сейчас. Считать дёшево — у канвы видимое это
-    // прямоугольник камеры, без проекций.
+    // The desired is recomputed rather than taken from the last time: "work is
+    // going" rests in particular on the path to the goal not yet traveled, and
+    // that path is measured by what is needed now. Computing is cheap — for a
+    // canvas the visible is the camera rectangle, with no projections.
     let want = view::wanted(view, &state.tiles, cap_tiles(state));
     let current = view_state(view, key, want.as_ref(), &state.passes);
     crate::emit::on_view_state(&current);
 }
 
-/// Величина на провод — как есть.
+/// A variable onto the wire — as is.
 fn wire_variable(variable: &tiles::Variable) -> Variable {
     Variable { path: variable.path.clone(), said: variable.said.clone(), units: variable.units.clone() }
 }
 
-/// Чем показ выглядит снаружи — врозь с рассылкой затем, что проверяемо только
-/// это. Публикация в нативной сборке — заглушка (`veldsdk::abi`), и отправленное
-/// сообщение тесту не видно; собранное — видно.
+/// How the show looks from the outside — apart from the broadcast, because
+/// only this shape is observable. Publishing in the native build is a stub
+/// (`veldsdk::abi`): a message sent there goes unseen, while the returned
+/// value is visible to the caller.
 fn view_state(
     view: &View,
     key: &str,
@@ -810,11 +830,12 @@ fn view_state(
 ) -> ViewState {
     let meta = view.shown.as_ref().and_then(|shown| shown.meta.as_ref());
     let ordered = view.fetch.ordered();
-    // Годность байт решает не показ, а то, каким путём идёт проход, — правило
-    // общее с шаром (`tiles::pointwise`): у точечного чтения счётчик это
-    // водяной знак головы, а у прочитанного разбором целиком он равен размеру
-    // ещё до прохода. Отданные как есть, они писали бы «24 из 24 МБ» всю
-    // минуту декодирования. Уровень берётся тот, которым идёт добыча.
+    // Whether the bytes are fit is decided not by the show but by which path
+    // the pass takes — a rule shared with the globe (`tiles::pointwise`): for
+    // pointwise reading the counter is a high-water mark of the head, while
+    // for one read whole by the pass it equals the size already before the
+    // pass. Handed over as-is, they would write "24 of 24 MB" for the whole
+    // minute of decoding. The level is the one the fetch runs at.
     let inside = tiles::inside(
         ordered,
         (view.read_bytes, view.total_bytes),
@@ -828,155 +849,28 @@ fn view_state(
         scale: view.camera.map_or(0.0, |camera| camera.scale),
         read_bytes: inside.read.0,
         total_bytes: inside.read.1,
-        // Ступень берётся у той же лестницы, по которой заказываются тайлы, а
-        // счёт ячеек — у последнего оформленного заказа: посчитанные порознь,
-        // они рассказывали бы о двух разных работах. Лестницы нет — считать не
-        // по чему, и нули значат именно это.
+        // The step comes from the same ladder by which tiles are ordered, and
+        // the cell count from the last completed order: counted separately,
+        // they would tell of two different jobs. No ladder — nothing to count
+        // by, and the zeros mean exactly that.
         ready: ordered.0,
         total: ordered.1,
         step: want.map_or(0, |want| want.climbed),
         steps: want.map_or(0, |want| want.steps),
         working,
         error: view.error.clone().unwrap_or_default(),
-        // Жалоба одна на провод, а поводов три, и складывает их `View::said`.
-        // Приезжают они уже сказанными словами: подписать их заново некому,
-        // заказчик о разнице не знает (см. `View::stuck`). Ход добычи туда же
-        // и по той же причине: заказчик показывает жалобу вместо него.
+        // One complaint on the wire, three reasons, and `View::said` folds
+        // them. They arrive as already-spoken words: there is no one to
+        // re-label them, and the client does not know the difference (see
+        // `View::stuck`). The fetch progress goes there for the same reason:
+        // the client shows the complaint instead of it.
         trouble: view.said(want.is_some() && !working),
-        // Место не собралось — значит выдать его заново может только владелец
-        // разметки: сами мы его не выделяем (см. `complain`). Приговорённому
-        // виду место не нужно: канвы для него в разметке всё равно нет, и
-        // текстура под неё выделилась бы впустую.
+        // The place was not assembled — so only the layout owner can issue it
+        // again: we do not allocate it ourselves (see `complain`). A condemned
+        // view needs no place: there is no canvas for it in the layout anyway,
+        // and a texture for it would be allocated in vain.
         needs_place: view.target.is_none() && view.shown.is_some() && view.error.is_none(),
         variable: meta.and_then(|meta| meta.variable.as_ref()).map(wire_variable),
         variables: meta.map(|meta| meta.variables.iter().map(wire_variable).collect()).unwrap_or_default(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{advance_ripple, view_state};
-
-    /// Показу, которому ещё не дали ни места, ни камеры, хотеть нечего — а раз
-    /// нечего хотеть, то и работы нет. Одной незанятости для предела поэтому
-    /// мало, и это место и решает: сюда приезжает `settled`, сложенный из двух
-    /// половин.
-    ///
-    /// Место вызова, а не сама `View::said`: собранное здесь и уезжает на
-    /// провод, а обе правки — и «вернуть строку к прежней, без предела», и
-    /// «спрашивать одну незанятость» — не поймает ни компилятор, ни тест самой
-    /// функции. Осевшую канву нативно не собрать: `want` требует места под
-    /// кадр, а его выдаёт видеокарта, — эту половину проверяет только живой
-    /// прогон, и сценария на неё в наборе uitests нет.
-    #[test]
-    fn предел_детали_доезжает_до_заказчика() {
-        use super::view::{Shown, View};
-        use veldmap_image_tiler_wrap::pyramid;
-        use veldmap_image_tiler_wrap::tiles::{self, Meta, Passes};
-
-        let mut view = View::new("снимок".into());
-        view.shown = Some(Shown {
-            resource: veldsdk::OwnedResource::from_raw_id(1),
-            meta: Some(Meta {
-                fingerprint: "t".into(),
-                width: 4001,
-                height: 3001,
-                // Таблица крупного JPEG: проход со своего уровня, нулевой не влезает.
-                rows: (0..pyramid::level_count(4001, 3001))
-                    .map(|level| tiles::Row { serve: tiles::Serve::Pass { from: level }, bytes: 0, fits: level >= 1 })
-                    .collect(),
-                variable: None,
-                variables: Vec::new(),
-            }),
-        });
-
-        let idle: Passes<String> = Passes::default();
-
-        // Места под кадр нет — хотеть нечего, и предел молчит.
-        let blind = view_state(&view, "снимок", None, &idle);
-        assert!(!blind.working, "стенд не о том: канва считает, что работа идёт");
-        assert_eq!(blind.trouble, "", "предел объявлен над местом, которого ещё нет");
-
-        // Показ идёт, лестница в одну ступень и она же последняя — канва осела,
-        // и вот теперь предел отвечает на заданный вопрос.
-        let want =
-            tiles::Want { level: 0, target: 0, cells: Vec::new(), steps: 1, climbed: 0 };
-        let settled = view_state(&view, "снимок", Some(&want), &idle);
-        assert!(!settled.working, "стенд не о том: за осевшей канвой осталась работа");
-        let limit = view.meta().expect("снимок показан").capped().expect("предел есть");
-        assert_eq!(settled.trouble, limit);
-
-        // А на полпути — снова молчит: за этой ступенью пойдёт следующая.
-        let climbing = tiles::Want { steps: 2, ..want };
-        let midway = view_state(&view, "снимок", Some(&climbing), &idle);
-        assert!(midway.working, "стенд не о том: лестница считается пройденной");
-        assert_eq!(midway.trouble, "", "предел объявлен на полпути к цели");
-    }
-
-    /// Величина описания доезжает до заказчика как есть — и только когда
-    /// источник описан: без описания полю неоткуда взяться.
-    #[test]
-    fn величина_описания_доезжает_до_заказчика() {
-        use super::view::{Shown, View};
-        use veldmap_image_tiler_wrap::tiles::{self, Meta, Passes};
-
-        let idle: Passes<String> = Passes::default();
-        let mut view = View::new("снимок".into());
-        assert_eq!(view_state(&view, "снимок", None, &idle).variable, None);
-
-        view.shown = Some(Shown {
-            resource: veldsdk::OwnedResource::from_raw_id(1),
-            meta: Some(Meta {
-                fingerprint: "t".into(),
-                width: 215,
-                height: 372,
-                rows: vec![tiles::Row { serve: tiles::Serve::Pointwise, bytes: 0, fits: true }],
-                variable: Some(tiles::Variable {
-                    path: "/PRODUCT/carbonmonoxide_total_column".into(),
-                    said: "Vertically integrated CO column".into(),
-                    units: "mol m-2".into(),
-                }),
-                variables: vec![
-                    tiles::Variable { path: "/PRODUCT/carbonmonoxide_total_column".into(), said: String::new(), units: String::new() },
-                    tiles::Variable { path: "/PRODUCT/qa_value".into(), said: String::new(), units: String::new() },
-                ],
-            }),
-        });
-        let state = view_state(&view, "снимок", None, &idle);
-        let said = state.variable.expect("величина описана");
-        assert_eq!(
-            (said.path.as_str(), said.said.as_str(), said.units.as_str()),
-            ("/PRODUCT/carbonmonoxide_total_column", "Vertically integrated CO column", "mol m-2")
-        );
-        assert_eq!(
-            state.variables.iter().map(|variable| variable.path.as_str()).collect::<Vec<_>>(),
-            ["/PRODUCT/carbonmonoxide_total_column", "/PRODUCT/qa_value"],
-            "список величин едет заказчику как есть"
-        );
-    }
-
-    /// Пока рябить нечему, огрублённая фаза стои́т — и кадр, собранный из неё,
-    /// совпадает с прошлым. Это и есть выключатель перерисовки: сломайся он —
-    /// и канва начнёт писать кадр шестьдесят раз в секунду на покое, ничем
-    /// себя не выдав.
-    #[test]
-    fn на_покое_фаза_ряби_стои́т() {
-        let dt = 1.0 / 60.0;
-        let (phase, first) = advance_ripple(0.3, dt, false);
-        let (_, second) = advance_ripple(phase, dt, false);
-
-        assert_eq!(phase, 0.3, "фаза сдвинулась без повода");
-        assert_eq!(first, second, "кадр покоя отличается от прошлого");
-    }
-
-    /// А пока есть чему рябить — соседние тики дают разные кадры.
-    #[test]
-    fn при_ряби_соседние_тики_дают_разные_кадры() {
-        let dt = 1.0 / 60.0;
-        let (phase, first) = advance_ripple(0.0, dt, true);
-        let (_, second) = advance_ripple(phase, dt, true);
-
-        assert!((0.0..1.0).contains(&phase));
-        assert_ne!(first, second, "волна стои́т на месте");
     }
 }

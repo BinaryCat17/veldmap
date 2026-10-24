@@ -1,34 +1,37 @@
-//! Из чего сложен тайл и по скольку их спрашивают — то единственное, о чём
-//! кэш, производитель и потребители обязаны говорить одно и то же.
+//! What a tile is made of and how many are asked for at once — the one thing
+//! the cache, the producer, and the consumers must all agree on.
 //!
-//! Файл включён трижды: самим модулем (`crate::module::tile`), его
-//! wrap-крейтом (`wraps/rust/src/wrap.rs` через `#[path]`) и wrap-крейтом
-//! тайлера (`image-tiler/wraps/rust/src/wrap.rs`, откуда потребители режут
-//! свой аппетит), — потому что вторая копия константы однажды разошлась бы с
-//! первой. Всё, что из `crate::`, сломало бы включение в wrap молча;
-//! библиотека годится только объявленная всем крейтам
-//! (`rust.wrap_dependencies` в config.yaml), и сейчас файлу хватает `veldsdk`,
-//! который есть у всех по построению.
+//! The file is included three times: by the module itself
+//! (`crate::module::tile`), by its wrap crate (`wraps/rust/src/wrap.rs` via
+//! `#[path]`), and by the tiler's wrap crate
+//! (`image-tiler/wraps/rust/src/wrap.rs`, where the consumers size their
+//! appetite) — because a second copy of the constants would eventually drift
+//! apart from the first. Anything from `crate::` would silently break
+//! inclusion in a wrap; only a library declared to all crates qualifies
+//! (`rust.wrap_dependencies` in config.yaml), and for now the file needs
+//! nothing beyond `veldsdk`, which every crate has by construction.
 //!
-//! Раскладка кэша на диске сюда не относится и остаётся при кэше
-//! (`layout.rs`): потребителю там делать нечего.
+//! The on-disk cache layout does not belong here and stays with the cache
+//! (`layout.rs`): a consumer has no business there.
 
-/// Формат текстуры тайла. sRGB, потому что в тайле лежит готовое к показу
-/// содержимое: сэмплер потребителя отдаст линейные значения, и фильтрация
-/// дробных масштабов пройдёт в линейном пространстве.
+/// Tile texture format. sRGB, because a tile holds display-ready content: the
+/// consumer's sampler yields linear values, and filtering at fractional scales
+/// passes through linear space.
 ///
-/// Расходиться этим двоим нельзя: тайлы из кэша и от производителя ложатся в
-/// один кадр, и разный формат дал бы там разную яркость — шахматкой, меняющей
-/// рисунок от запуска к запуску по мере наполнения кэша.
+/// The two must not diverge: tiles from the cache and from the producer land
+/// in one frame, and a different format would give a different brightness
+/// there — a checkerboard that changes the picture from run to run as the
+/// cache fills.
 pub const TILE_FORMAT: veldsdk::graphics::TextureFormat =
     veldsdk::graphics::TextureFormat::TexRgba8UnormSrgb;
 
-/// Потолок числа тайлов в одном запросе к кэшу. Экран — это десятки тайлов;
-/// тысячи означают ошибку в расчёте видимого у заказчика, и честнее отказать,
-/// чем молча открыть тысячи файлов.
+/// Ceiling on the number of tiles in a single cache query. A screen is tens of
+/// tiles; thousands mean a mistake in the client's visibility math, and
+/// refusing is more honest than silently opening thousands of files.
 ///
-/// Заказчик режет своё желаемое по бюджету видеопамяти
-/// (`tiles::Store::cap_tiles`, при умолчании в 256 МиБ это 128 ячеек) и этим
-/// же числом сверху — так он не пришлёт список, которому кэш откажет, а выхода
-/// из такого отказа у него нет: он прислал бы тот же список снова.
+/// The client cuts its request down to the video memory budget
+/// (`tiles::Store::cap_tiles`, 128 cells at the default 256 MiB) and caps it
+/// with this same number — so it never sends a list the cache would refuse,
+/// and it has no way out of such a refusal: it would just send the same list
+/// again.
 pub const MAX_QUERY_TILES: usize = 1024;

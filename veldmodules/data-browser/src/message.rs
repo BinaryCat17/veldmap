@@ -1,20 +1,20 @@
-//! Сообщения разметки: что виджет говорит модулю.
+//! Markup messages: what a widget tells the module.
 //!
-//! Один тип на все нажатия и весь ввод. Отправляет его view (`on_press`,
-//! `on_input`), принимает `module::on_ui_event` исчерпывающим match'ем — то
-//! есть завести вариант и забыть его обработать нельзя, как нельзя и обработать
-//! несуществующий.
+//! One type for every press and all input. The view sends it (`on_press`,
+//! `on_input`), `module::on_ui_event` receives it with an exhaustive match — so
+//! a variant cannot be added and forgotten, nor can a nonexistent one be handled.
 //!
-//! По шине едет имя метода, нагрузка и адресат (см. `UiMessage`). Имена —
-//! приватная проводка модуля: ui-service возвращает их эхом, смысла их не зная
-//! и не проверяя.
+//! The bus carries the method name, the payload, and the addressee (see
+//! `UiMessage`). The names are the module's private wiring: ui-service returns
+//! them as an echo, neither knowing nor checking their meaning.
 //!
-//! **Адресат — отдельно от нагрузки.** Панелей на экране сколько угодно, и
-//! «активный вид» на вопрос «чей это щелчок» не отвечает: щёлкнуть могли в той
-//! панели, что не под рукой. Поэтому всё, что рождается в теле вкладки, едет обёрнутым в
-//! [`Msg::In`], а вкладка называет себя полем `Handler.key` — тем самым, которое
-//! не подменяет рендерер. Сложить её в нагрузку было бы нельзя: у поля ввода,
-//! области и ползунка нагрузку изготавливает он.
+//! **The addressee is separate from the payload.** Any number of panels can be
+//! on screen, and the "active view" does not answer "whose click is this": the
+//! click could have happened in a panel that is not at hand. So everything born
+//! in a tab body travels wrapped in [`Msg::In`], and the tab names itself via the
+//! `Handler.key` field — exactly the one the renderer does not substitute. It
+//! could not go into the payload: for a text input, an area, and a slider the
+//! payload is made by the renderer.
 
 use crate::module::state::listing::{choice, Choice, Filter, Grouping, Menu, Sorting};
 use crate::module::state::search::{Cloud, Mission, Period};
@@ -23,69 +23,71 @@ use crate::proto::ui_service::{DropEvent, PointerEvent, UiEventResponse, Viewpor
 use veld_ui_service_wrap::{Payload, UiMessage};
 
 choice! {
-    /// Что можно открыть новой вкладкой. Один вариант вместо пяти сообщений:
-    /// различаются они только тем, какой вид завести, а панель, куда его
-    /// класть, — у всех одна и та же забота.
+    /// What can be opened as a new tab. One variant instead of five messages:
+    /// they differ only in which view to create, while the panel to put it in
+    /// is the same concern for all of them.
     ///
-    /// Порядок — порядок пунктов «плюса». Пустая вкладка последней: она не про
-    /// то, что смотреть, а про место, где это решат потом.
+    /// The order is the order of the "plus" menu items. The empty tab goes last:
+    /// it is not about what to look at, but about the place where that is decided
+    /// later.
     NewTab {
-        Browse     = "browse",     "Сетевой каталог";
-        Search     = "search",     "Поиск снимков";
-        Downloaded = "downloaded", "Скачанное";
-        Globe      = "globe",      "Глобус";
-        Shown      = "shown",      "На просмотре";
-        /// Вкладка, которая ещё ничего не показывает (см. `ViewKind::Empty`).
-        Empty      = "empty",      "Пустая вкладка";
+        Browse     = "browse",     "Network catalog";
+        Search     = "search",     "Scene search";
+        Downloaded = "downloaded", "Downloaded";
+        Globe      = "globe",      "Globe";
+        Shown      = "shown",      "On display";
+        /// A tab that shows nothing yet (see `ViewKind::Empty`).
+        Empty      = "empty",      "Empty tab";
     }
 }
 
 impl NewTab {
-    /// Чем наполняют пустую вкладку — та же пятёрка без неё самой: пустое
-    /// пустым не наполняют.
+    /// What fills an empty tab — the same five without itself: an empty tab is
+    /// not filled with an empty one.
     pub const KINDS: [NewTab; 5] =
         [NewTab::Browse, NewTab::Search, NewTab::Downloaded, NewTab::Globe, NewTab::Shown];
 }
 
-/// Всё, что таблица знает про набор сообщений: как каждое объявляется в
-/// разметке, кого адресует и как читается обратно.
+/// Everything the table knows about a message set: how each message is declared
+/// in markup, whom it addresses, and how it is read back.
 ///
-/// Трейтом, а не тройкой свободных функций: `Msg` спрашивает у вложенного
-/// набора ровно то же, чем отвечает сам (см. [`Msg::In`]).
+/// A trait, not a trio of free functions: `Msg` asks the nested set for exactly
+/// the same thing it answers with itself (see [`Msg::In`]).
 trait Wired: Sized {
-    /// Имя метода и объявленная нагрузка.
+    /// Method name and declared payload.
     fn declared(&self) -> (&'static str, String);
-    /// Кого сообщение адресует; пусто — никого, и это законно.
+    /// Whom the message addresses; empty means nobody, and that is legal.
     fn named(&self) -> String;
-    /// `None` — метод не наш: это сообщение набору не принадлежит.
+    /// `None` means the method is not ours: this message does not belong to the set.
     fn parse(event: &UiEventResponse) -> Option<Self>;
 }
 
-/// Объявляет набор сообщений вместе с тем, как каждое ездит по шине.
+/// Declares a message set together with how each message travels over the bus.
 ///
-/// Одним местом на четыре списка: сам вариант, имя метода, сборка нагрузки и её
-/// разбор. Написанные порознь, они держатся вниманием, и держатся неодинаково:
-/// сборка матчится по перечислению исчерпывающе, и забыть её нельзя, а разбор
-/// смотрит на имя метода строкой и кончается «прочее — не наше», поэтому
-/// забытый рукав разбора компилируется молча и превращает нажатие в
-/// «непонятное сообщение разметки» в логе. Из таблицы порождаются оба, и
-/// забыть разбор больше не из чего: одно сообщение — одна строка.
+/// One place for four lists: the variant itself, the method name, payload
+/// assembly, and payload parsing. Written separately, they are held together by
+/// attention alone, and unevenly at that: assembly matches the enumeration
+/// exhaustively and cannot be forgotten, while parsing matches the method name
+/// as a string and ends in "anything else — not ours", so a forgotten parsing arm
+/// compiles silently and turns a press into an "unrecognized markup message" in
+/// the log. Both are generated from the table, and there is nothing left to
+/// forget: one message — one row.
 ///
-/// Строка называет вариант, его поля и имя метода. Перед полем стоит его род —
-/// то, каким полем `UiEventResponse` оно ездит:
+/// A row names the variant, its fields, and the method name. Each field is
+/// prefixed with its kind — how it rides in `UiEventResponse`:
 ///
-/// * `val` — нагрузка, названная самой разметкой;
-/// * `sub` — нагрузка, которую подставляет рендерер: объявлять её нечем, а
-///   читается она так же, как всякая другая;
-/// * `key` — адресат.
+/// * `val` — the payload, named by the markup itself;
+/// * `sub` — the payload supplied by the renderer: it cannot be declared, but
+///   it is read like any other;
+/// * `key` — the addressee.
 ///
-/// Как ездит нагрузка каждого типа, сказано по разу на тип — в [`Value`] и
-/// [`Addressee`], — а не по разу на сообщение.
+/// How each type's payload travels is stated once per type — in [`Value`] and
+/// [`Addressee`] — rather than once per message.
 ///
-/// Хвостом за таблицей объявляется вариант, у которого своего имени метода
-/// нет: его называет вложенный набор, им же оно и опознаётся при разборе.
-/// Строкой таблицы такое не выразить, поэтому оно стоит отдельно — и потому же
-/// последним в перечислении.
+/// After the table a variant is declared that has no method name of its own:
+/// the nested set names it, and it is recognized by that name during parsing. A
+/// table row cannot express this, so it stands separately — and therefore last
+/// in the enumeration.
 macro_rules! messages {
     (
         $(#[$outer:meta])*
@@ -139,9 +141,8 @@ macro_rules! messages {
         }
     };
 
-    // Поле называет себя только в той сборке, которая его и спрашивает: связанное
-    // и неиспользованное — это предупреждение компилятора на каждую строку
-    // таблицы.
+    // A field names itself only in the assembly that asks for it: a bound but
+    // unused field would be a compiler warning on every table row.
     (@declaring val $bound:ident) => { $bound };
     (@declaring sub $bound:ident) => { _ };
     (@declaring key $bound:ident) => { _ };
@@ -149,8 +150,8 @@ macro_rules! messages {
     (@naming val $bound:ident) => { _ };
     (@naming sub $bound:ident) => { _ };
 
-    // Нагрузку несёт не больше одного поля, адресата — тоже: остальные поля
-    // обходятся, а не найдя своего — пусто.
+    // No more than one field carries the payload, and likewise for the
+    // addressee: the other fields are skipped, and if none is found — empty.
     (@declare) => { String::new() };
     (@declare val $bound:ident $($rest:tt)*) => { $bound.declare() };
     (@declare sub $bound:ident $($rest:tt)*) => { messages!(@declare $($rest)*) };
@@ -164,7 +165,7 @@ macro_rules! messages {
     (@read sub $ty:ty, $event:ident) => { <$ty as Value>::read($event)? };
     (@read key $ty:ty, $event:ident) => { <$ty as Addressee>::read($event)? };
 
-    // Имя не из таблицы: либо его знает вложенный набор, либо оно не наше.
+    // Name not from the table: either the nested set knows it, or it is not ours.
     (@rest $event:ident) => { None };
     (@rest $event:ident, $name:ident $tail:ident $tail_key:ty, $tail_msg:ty) => {
         Some($name::$tail(
@@ -173,8 +174,8 @@ macro_rules! messages {
         ))
     };
 
-    // Числа ездят строкой и разбираются обратно ею же: негодная строка — не
-    // число, а значит и не сообщение.
+    // Numbers ride as strings and are parsed back the same way: an unfit string
+    // is not a number, and so not a message.
     (@numbers $($ty:ty),+ $(,)?) => { $(
         impl Value for $ty {
             fn declare(&self) -> String {
@@ -187,8 +188,8 @@ macro_rules! messages {
         }
     )+ };
 
-    // Нагрузка, которую изготавливает рендерер: объявить её в разметке нечем —
-    // где какая зона и куда встал указатель, знает только он.
+    // Payload made by the renderer: it cannot be declared in markup — only the
+    // renderer knows where each zone is and where the pointer landed.
     (@substituted $($ty:ty => $carried:ident),+ $(,)?) => { $(
         impl Value for $ty {
             fn declare(&self) -> String {
@@ -201,7 +202,7 @@ macro_rules! messages {
         }
     )+ };
 
-    // Наборы `Choice` ездят своим ключом — все одинаково.
+    // `Choice` sets ride by their own key — all alike.
     (@choices $($ty:ty),+ $(,)?) => { $(
         impl Value for $ty {
             fn declare(&self) -> String {
@@ -214,16 +215,16 @@ macro_rules! messages {
         }
     )+ };
 
-    // Идентификаторы адресуют так же — и сами по себе, и необязательные.
+    // Identifiers address the same way — both on their own and optional.
     (@ids $($ty:ty),+ $(,)?) => { $(
         impl Addressee for $ty {
             fn name(&self) -> String {
                 self.to_string()
             }
 
-            /// Разбор идентификатора — здесь и только здесь: обратно он
-            /// приезжает строкой, и место, где строка снова становится
-            /// идентификатором, должно быть одно.
+            /// Identifier parsing happens here and only here: it comes back as
+            /// a string, and the place where the string becomes an identifier
+            /// again must be exactly one.
             fn read(event: &UiEventResponse) -> Option<Self> {
                 event.key.parse().ok()
             }
@@ -234,8 +235,8 @@ macro_rules! messages {
                 self.map(|id| id.to_string()).unwrap_or_default()
             }
 
-            /// Неразобранное имя — «никого»: пустым ключом едет и «закрой», и
-            /// сообщение, которому адресат не нужен.
+            /// An unparsed name means "nobody": an empty key carries both
+            /// "close" and a message that needs no addressee.
             fn read(event: &UiEventResponse) -> Option<Self> {
                 Some(event.key.parse().ok())
             }
@@ -245,236 +246,249 @@ macro_rules! messages {
 
 messages! {
     Msg {
-        // -- Вкладки --
+        // -- Tabs --
         //
-        // Вкладка адресуется идентификатором, а не позицией: позиция меняется,
-        // когда закрывают соседа.
+        // A tab is addressed by identifier, not by position: the position
+        // changes when a neighbor is closed.
         TabSelect(key ViewId) = "tab_select";
         TabClose(key ViewId) = "tab_close";
-        /// Меню «плюса» названной панели; `None` — закрыть раскрытое.
+        /// The "plus" menu of the named panel; `None` closes what is open.
         TabMenu(key Option<PaneId>) = "tab_menu";
-        /// Меню самой вкладки: перенести, закрыть. `None` — закрыть.
+        /// The tab's own menu: move, close. `None` closes.
         TabOptions(key Option<ViewId>) = "tab_options";
-        /// Завести вкладку в названной панели.
+        /// Create a tab in the named panel.
         NewTab(key PaneId, val NewTab) = "new_tab";
-        /// Перенести вкладку туда, где человек видит эту сторону: в соседнюю
-        /// панель либо в заведённую с этой стороны (см. `State::move_aside`).
+        /// Move the tab to where the user sees this side: into the neighboring
+        /// panel or into one created on this side (see `State::move_aside`).
         TabMove(key ViewId, val Side) = "tab_move";
-        /// Свести все панели в одну.
+        /// Merge all panels into one.
         TabCollapse = "tab_collapse";
-        /// Границу деления потянули: сдвиг в точках разметки. Что это в долях,
-        /// знает только тот, кто их задавал (см. `State::divide`).
+        /// The split divider was dragged: the offset in markup points. What that
+        /// means in fractions is known only to whoever set them (see
+        /// `State::divide`).
         Divide(key SplitId, sub f32) = "divide";
-        /// Границу отпустили. Отдельным сообщением, а не концом потока сдвигов:
-        /// «перетаскивание кончилось» — момент, а не отсутствие событий, и ждать
-        /// его молчанием значило бы не дождаться вовсе.
+        /// The divider was released. A separate message, not the end of the
+        /// offset stream: "the drag is over" is a moment, not an absence of
+        /// events, and waiting for it in silence would mean never reaching it.
         Divided = "divided";
-        /// В панель бросили вкладку. Что принесли и в какой край панели попали,
-        /// изготавливает рендерер: где какая зона, знает только он (см. `Drop` в
-        /// ui-service/types.proto). Нагрузка едет как есть — разбирает её
-        /// обработчик, ровно как у указателя над областью.
+        /// A tab was dropped onto a panel. What was carried and which edge of the
+        /// panel it hit is made by the renderer: only it knows where each zone is
+        /// (see `Drop` in ui-service/types.proto). The payload travels as-is —
+        /// the handler parses it, exactly like for the pointer over an area.
         TabDrop(key PaneId, sub DropEvent) = "tab_drop";
 
-        // -- Записи --
+        // -- Records --
         //
-        // Действуют не на вид, а на библиотеку, поэтому вкладки-источника не несут:
-        // скачанное одно на всё окно, из какой панели его ни попроси.
+        // They act on the library, not on a view, so they carry no source tab:
+        // downloads are one per window, no matter which panel asks.
         //
-        // Снимок у закачки едет ключом: нагрузку занял сам файл, а вопрос «к чему
-        // его отнести» — это тот же вопрос «с кем», на который ключ и отвечает.
-        /// Скачать, докачать или приостановить — по ключу провайдера. Второе поле —
-        /// снимок, к которому файл относится (пусто — сам по себе): библиотека
-        /// пишет его в свой снимок, а вывести это из ключа не может.
+        // A download's snapshot rides in the key: the payload is taken by the
+        // file itself, and "what it belongs to" is the same "with whom" question
+        // the key answers.
+        /// Download, resume, or pause — by provider key. The second field is the
+        /// snapshot the file belongs to (empty — on its own): the library writes
+        /// it into its own snapshot and cannot derive that from the key.
         Download(val String, key String) = "download";
-        /// Выбросить запись: удалить скачанное или отказаться от начатого. Одно
-        /// сообщение на оба, потому что оставляют они после себя одно и то же —
-        /// ничего; разными их делает только подпись в меню.
+        /// Discard a record: delete the downloaded or abandon the started. One
+        /// message for both, because they leave behind the same thing — nothing;
+        /// only the menu label makes them different.
         Delete(val String) = "delete";
-        /// Выбросить снимок целиком — все его файлы. Ключом здесь снимок, а не
-        /// запись: «снимок» — понятие показа (библиотека ведёт учёт файлам), и
-        /// разворачивает его в записи тот, кто его и собрал (см.
+        /// Discard a whole snapshot — all its files. The key here is the snapshot,
+        /// not the record: "snapshot" is a display notion (the library keeps track
+        /// of files), and the one who assembled it expands it into records (see
         /// `handlers::library::on_delete_snapshot`).
         DeleteSnapshot(val String) = "delete_snapshot";
-        /// Скачать снимок целиком — по ключу продукта. Список файлов приезжает
-        /// рекурсивным листингом от провайдера: раскладку .SAFE знает только он, а
-        /// закачка идёт по одному файлу (см. `handlers::library::on_download_snapshot`).
+        /// Download a whole snapshot — by product key. The file list comes from a
+        /// recursive listing by the provider: only it knows the .SAFE layout, and
+        /// the download goes file by file (see
+        /// `handlers::library::on_download_snapshot`).
         DownloadSnapshot(val String) = "download_snapshot";
-        /// Приостановить закачку снимка целиком. Ключом снимок — по той же
-        /// причине, что и у выброса: разворачивает его в файлы тот, кто его собрал.
+        /// Pause the download of a whole snapshot. The key is the snapshot — for
+        /// the same reason as discarding: the one who assembled it expands it
+        /// into files.
         PauseSnapshot(val String) = "pause_snapshot";
-        /// Показать запись в файловом менеджере. Путь считает библиотека — раскладка
-        /// хранения её, — а показывает платформа.
+        /// Show the record in the file manager. The library computes the path —
+        /// the storage layout is its own — while the platform does the showing.
         Reveal(val String) = "reveal";
 
-        // -- Шар --
-        /// Снять с шара всё: и наложения, и контуры. Порознь их не снять ничем, а
-        /// разделять их пользователю не по чему — он видит один шар.
+        // -- Globe --
+        /// Remove everything from the globe: overlays and outlines alike. There
+        /// is no way to remove them separately, and no reason to separate them
+        /// for the user — one globe is what the user sees.
         GlobeClear = "globe_clear";
 
-        // -- На просмотре --
+        // -- On display --
         //
-        // Слой адресуется ключом продукта, и едет он тем же полем, что вкладка у
-        // `In`: вопрос у них один — «с кем», — и отвечать на него двумя способами
-        // было бы незачем.
-        /// Прозрачность слоя, 0..1.
+        // A layer is addressed by the product key, and it rides in the same
+        // field as the tab in `In`: their question is the same — "with whom" —
+        // and answering it in two ways would be needless.
+        /// Layer opacity, 0..1.
         OverlayOpacity(key String, sub f32) = "overlay_opacity";
-        /// Скрыть слой или вернуть его на шар.
+        /// Hide the layer or put it back on the globe.
         OverlayHidden(key String, val bool) = "overlay_hidden";
-        /// Убрать слой совсем: ресурсы отпускаются, вернуть его — это открыть
-        /// снимок заново.
+        /// Remove the layer entirely: resources are released; bringing it back
+        /// means reopening the snapshot.
         OverlayRemove(key String) = "overlay_remove";
-        /// Подвинуть слой в наборе: порядок набора — это порядок слоёв на шаре
-        /// снизу вверх, и другого способа сказать «этот поверх того» нет.
+        /// Move the layer within the set: the set's order is the order of layers
+        /// on the globe from bottom to top, and there is no other way to say
+        /// "this one above that one".
         OverlayShift(key String, val Shift) = "overlay_shift";
-        /// Скрыть или показать все слои разом.
+        /// Hide or show all layers at once.
         OverlayHideAll(val bool) = "overlay_hide_all";
-        /// Меню слоя: порядок и переходы к снимку. `None` — закрыть раскрытое.
+        /// Layer menu: ordering and jumps to the snapshot. `None` closes what is
+        /// open.
         OverlayMenu(key Option<String>) = "overlay_menu";
-        /// Раскрыть список величин лежащего подробным файла слоя или закрыть
-        /// раскрытый (`None`).
+        /// Expand the variable list of the layer's detailed file or close the
+        /// expanded one (`None`).
         OverlayVariables(key Option<String>) = "overlay_variables";
-        /// Показать на шаре другую величину файла слоя — путь из списка.
+        /// Show another variable of the layer's file on the globe — a path from
+        /// the list.
         OverlayVariable(key String, val String) = "overlay_variable";
-        /// Положить снимок на шар этим файлом: ключ снимка и ключ файла внутри
-        /// него, которому лечь подробным растром.
+        /// Put a snapshot on the globe with this file: the snapshot key and the
+        /// key of the file within it that becomes the detailed raster.
         GlobeFile(key String, val String) = "globe_file";
 
-        // -- Контуры --
+        // -- Outlines --
         //
-        // Контур адресуется тем же ключом снимка, что и слой, и тем же полем: на
-        // шаре они про один и тот же снимок, просто с разной подробностью.
-        /// Очертить снимок на шаре или убрать контур — значок в строке списка.
-        /// Ни выбора коробочкой, ни показа растром это не касается: три
-        /// состояния строки независимы (см. handlers::outline).
+        // An outline is addressed by the same snapshot key as a layer, and in
+        // the same field: on the globe they refer to the same snapshot, just at
+        // different detail.
+        /// Outline the snapshot on the globe or remove the outline — the icon in
+        /// the list row. This touches neither the checkbox selection nor the
+        /// raster display: the three row states are independent (see
+        /// handlers::outline).
         OutlineToggle(key String) = "outline_toggle";
-        /// Убрать контур — строка списка «На просмотре», где он стои́т своей
-        /// строкой и убрать его больше неоткуда.
+        /// Remove the outline — the "On display" list row, where it stands as its
+        /// own row and there is nowhere else to remove it from.
         OutlineRemove(key String) = "outline_remove";
-        /// Навести шар на контур и выбрать его.
+        /// Aim the globe at the outline and select it.
         OutlineFocus(key String) = "outline_focus";
     }
-    // Своего имени метода у этого варианта нет — его называет вложенное
-    // сообщение, им же оно и опознаётся при разборе; строкой таблицы такое не
-    // выразить.
-    /// Сообщение, рождённое в теле названной вкладки.
+    // This variant has no method name of its own — the nested message names it,
+    // and it is recognized by that name during parsing; a table row cannot
+    // express this.
+    /// A message born in the body of the named tab.
     In(key ViewId, nested ViewMsg);
 }
 
 messages! {
-    /// То, что говорит виджет внутри вкладки. Отдельный тип, а не два десятка
-    /// вариантов с `ViewId` первым полем: адресат у них общий и приписывается один
-    /// раз — в [`Msg::In`].
+    /// What a widget says inside a tab. A separate type, not two dozen variants
+    /// with `ViewId` as the first field: their addressee is shared and is
+    /// assigned once — in [`Msg::In`].
     ViewMsg {
-        /// Чем наполнить пустую вкладку. Ей, а не панели: вкладка становится
-        /// выбранным видом на месте, не заводя рядом вторую и не оставляя после
-        /// себя пустую (см. `handlers::nav::fill`).
+        /// What to fill an empty tab with. The tab, not the panel: the tab
+        /// becomes the chosen view in place, without creating a second one beside
+        /// it or leaving itself empty (see `handlers::nav::fill`).
         Fill(val NewTab) = "fill";
 
-        // -- Показ списка --
-        /// Раскрыть меню или закрыть раскрытое (`None`).
+        // -- List display --
+        /// Expand a menu or close the expanded one (`None`).
         OpenMenu(val Option<Menu>) = "open_menu";
         Filter(val Filter) = "filter";
         Group(val Grouping) = "group";
         Sort(val Sorting) = "sort";
-        /// Набранное в поле фильтра — его подставляет рендерер, а не разметка.
+        /// What was typed in the filter field — supplied by the renderer, not by
+        /// the markup.
         Query(val String) = "query";
         Page(val usize) = "page";
-        /// Раскрыть строку в её содержимое или свернуть обратно.
+        /// Expand a row into its contents or collapse it back.
         Expand(val String) = "expand";
-        /// Выбрать строку или снять выбор — набор для пакетных действий.
-        /// Шара это не касается: контур и показ ставят свои значки.
+        /// Select a row or deselect it — the set for batch actions. The globe is
+        /// unaffected: outline and display set their own icons.
         Check(val String) = "check";
-        /// Выбрать или снять выбор разом со всего, что показано, — коробочка в
-        /// шапке. Действует ровно на то, о чём говорит: на выбираемые строки
-        /// этой страницы.
+        /// Select or deselect everything shown at once — the checkbox in the
+        /// header. It acts on exactly what it says: the selectable rows of this
+        /// page.
         CheckShown(val bool) = "check_shown";
-        /// Снять весь выбор списка, включая сделанный в другой папке, — кнопка в
-        /// заголовке. Отдельное сообщение, а не `CheckShown(false)`: выбор
-        /// переживает переход по папкам, и «снять видимое» оставило бы набранным
-        /// то, чего на экране уже нет.
+        /// Clear the entire list selection, including what was made in another
+        /// folder — the button in the header. A separate message, not
+        /// `CheckShown(false)`: the selection survives folder navigation, and
+        /// "deselect visible" would leave selected what is no longer on screen.
         CheckClear = "check_clear";
-        /// Скачать всё выбранное в этом списке.
+        /// Download everything selected in this list.
         CheckDownload = "check_download";
-        /// Удалить всё выбранное в этом списке — и с диска, и из очереди
-        /// закачек.
+        /// Delete everything selected in this list — from disk and from the
+        /// download queue.
         CheckDelete = "check_delete";
 
-        // -- Поиск по каталогу --
+        // -- Catalog search --
         //
-        // Отбор в списке (`Query`) и запрос к каталогу — разные вещи, и путать их
-        // нельзя: первый сужает уже найденное, второй идёт по сети и меняет то,
-        // что вообще нашлось.
-        /// Набранное в поле запроса.
+        // Filtering the list (`Query`) and querying the catalog are different
+        // things and must not be confused: the first narrows what is already
+        // found, the second goes over the network and changes what was found at
+        // all.
+        /// What was typed in the query field.
         SearchQuery(val String) = "search_query";
-        /// Чем сузить запрос. Каждое из трёх отправляет его заново: выбор сделан
-        /// одним нажатием, и спрашивать после него ещё и подтверждения не за что.
+        /// How to narrow the query. Each of the three resubmits it: the choice is
+        /// made with one press, and there is nothing to ask confirmation for
+        /// afterwards.
         SearchMission(val Mission) = "search_mission";
         SearchPeriod(val Period) = "search_period";
-        /// Края своего интервала — набранное в полях дат (см. `Period::Custom`).
+        /// The bounds of its own interval — typed into the date fields (see
+        /// `Period::Custom`).
         SearchFrom(val String) = "search_from";
         SearchTo(val String) = "search_to";
         SearchCloud(val Cloud) = "search_cloud";
-        /// Отправить запрос каталогу.
+        /// Send the query to the catalog.
         RunSearch = "run_search";
 
-        // -- Каталог --
-        /// Перейти в папку по ключу провайдера; пустой ключ — перечитать текущую.
+        // -- Catalog --
+        /// Go to a folder by provider key; an empty key rereads the current one.
         Enter(val String) = "enter";
         Up = "up";
-        /// Показать названную запись в каталоге: открыть папку, в которой она
-        /// лежит, встать на её страницу и подсветить её.
+        /// Show the named record in the catalog: open the folder it lies in, go
+        /// to its page, and highlight it.
         ///
-        /// Отдельно от [`ViewMsg::Enter`], потому что вопрос другой: тот называет
-        /// папку и ведёт в неё, этот называет запись и ведёт к ней. Каталог при
-        /// этом переиспользуется — новую вкладку заводит только тот, кому её
-        /// попросили завести (см. `handlers::nav::catalog`).
+        /// Separate from [`ViewMsg::Enter`] because the question is different:
+        /// that one names a folder and leads to it, this one names a record and
+        /// leads to it. The catalog is reused meanwhile — only whoever was asked
+        /// to create a tab creates one (see `handlers::nav::catalog`).
         InCatalog(val String) = "in_catalog";
 
-        // -- Просмотр снимка --
+        // -- Snapshot preview --
         //
-        // Открывают новую вкладку — в той же половине, где стоит строка: смотреть
-        // рядом со списком и есть то, ради чего экран делят.
-        /// Смотреть скачанное — по имени записи библиотеки.
+        // They open a new tab — in the same half where the row stands: viewing
+        // next to the list is exactly why the screen is split.
+        /// View what is downloaded — by the library record name.
         Preview(val String) = "preview";
-        /// Смотреть ещё не скачанное — по ключу провайдера.
+        /// View what is not yet downloaded — by provider key.
         PreviewRemote(val String) = "preview_remote";
-        /// Показать снимок, лежащий папкой: растр внутри выбирает провайдер
-        /// (см. `handlers::preview::on_view_product_pressed`).
+        /// Show a snapshot stored as a folder: the provider picks the raster
+        /// inside (see `handlers::preview::on_view_product_pressed`).
         PreviewProduct(val String) = "preview_product";
 
-        // -- Канва превью --
+        // -- Preview canvas --
         //
-        // Нагрузку области подставляет рендерер (как у глобуса); кнопки тулбара
-        // едут своими сообщениями.
-        /// Области под кадр досталось новое место — в пикселях её текстуры.
+        // The renderer supplies the area's payload (as on the globe); toolbar
+        // buttons ride as their own messages.
+        /// The area under the frame got a new size — in pixels of its texture.
         PreviewResized(sub ViewportSize) = "preview_resized";
-        /// Указатель над канвой, в тех же пикселях.
+        /// Pointer over the canvas, in the same pixels.
         PreviewPointer(sub PointerEvent) = "preview_pointer";
-        /// Вписать снимок в канву.
+        /// Fit the snapshot into the canvas.
         PreviewFit = "preview_fit";
-        /// Шаг масштаба вокруг центра: знак — направление.
+        /// A zoom step around the center: the sign is the direction.
         PreviewZoom(val f32) = "preview_zoom";
-        /// Раскрыть список величин файла под кадром или закрыть его.
+        /// Expand the variable list of the file under the frame or close it.
         PreviewVariables(val bool) = "preview_variables";
-        /// Показать другую величину файла — путь из списка под кадром.
+        /// Show another variable of the file — a path from the list under the frame.
         PreviewVariable(val String) = "preview_variable";
 
-        // -- Глобус --
+        // -- Globe --
         //
-        // Нагрузку у обоих подставляет рендерер, поэтому в разметке они объявлены
-        // конструкторами, а не готовыми значениями (см. `viewport`).
-        /// Области под шар досталось новое место — в пикселях её текстуры.
+        // The renderer supplies the payload for both, so in markup they are
+        // declared by constructors rather than ready values (see `viewport`).
+        /// The area under the globe got a new size — in pixels of its texture.
         GlobeResized(sub ViewportSize) = "globe_resized";
-        /// Указатель над областью, в тех же пикселях.
+        /// Pointer over the area, in the same pixels.
         GlobePointer(sub PointerEvent) = "globe_pointer";
-        /// Положить снимок на шар растром — или снять его оттуда. По ключу
-        /// провайдера; нагрузка своя — приходит не от области, а из строки
-        /// списка.
+        /// Put a snapshot on the globe as a raster — or take it off. By provider
+        /// key; its own payload — it comes not from the area but from a list row.
         ///
-        /// Переключателем, и тем же именем, что у контура (`outline_toggle`):
-        /// вопрос у них один — лежит ли снимок на шаре, — и разной механикой
-        /// они читались бы как два разных рода действия. Камеры это не
-        /// касается: наводит `outline_focus`.
+        /// As a toggle, and with the same name as the outline (`outline_toggle`):
+        /// their question is the same — whether the snapshot lies on the globe —
+        /// and with different mechanics they would read as two different kinds of
+        /// action. The camera is unaffected: `outline_focus` aims it.
         GlobeToggle(val String) = "globe_toggle";
     }
 }
@@ -485,11 +499,11 @@ impl UiMessage for Msg {
         (method.to_string(), value)
     }
 
-    /// Кого адресует сообщение: вкладку, панель или слой на шаре.
+    /// Whom the message addresses: a tab, a panel, or a layer on the globe.
     ///
-    /// Одинаковых виджетов на экране столько же, сколько вкладок и снимков, и
-    /// различить их по имени метода нельзя — а нагрузка у половины из них
-    /// занята рендерером (см. `Handler.key` в ui-service/types.proto).
+    /// There are as many identical widgets on screen as tabs and snapshots, and
+    /// they cannot be told apart by method name — while the payload of half of
+    /// them is taken by the renderer (see `Handler.key` in ui-service/types.proto).
     fn key(&self) -> String {
         self.named()
     }
@@ -499,24 +513,26 @@ impl UiMessage for Msg {
     }
 }
 
-// -- Как ездят нагрузка и адресат --
+// -- How payload and addressee travel --
 //
-// По разу на тип, а не на сообщение: строка ездит строкой одинаково у всех двух
-// десятков сообщений, которые её несут, и правило это принадлежит типу.
+// Once per type, not per message: a string rides as a string identically across
+// the two dozen messages that carry it, and the rule belongs to the type.
 
-/// Нагрузка: поле `Handler.value` туда и `UiEventResponse.payload` обратно.
+/// Payload: the `Handler.value` field going out, `UiEventResponse.payload`
+/// coming back.
 ///
-/// `read` отвечает `None`, когда нагрузка не годится, и разбор всего сообщения
-/// на этом обрывается. Проверять при этом вид нагрузки не нужно: у события
-/// другого вида строка пуста, и разбор пустой строки числом или ключом набора
-/// сам скажет, что читать нечего.
+/// `read` answers `None` when the payload is unfit, and parsing of the whole
+/// message stops there. The payload kind need not be checked: for an event of
+/// another kind the string is empty, and parsing an empty string as a number or
+/// a set key will itself say there is nothing to read.
 trait Value: Sized {
-    /// Что объявить в разметке.
+    /// What to declare in markup.
     fn declare(&self) -> String;
     fn read(event: &UiEventResponse) -> Option<Self>;
 }
 
-/// Адресат: поле `Handler.key`. Отдельно от нагрузки — см. заголовок файла.
+/// Addressee: the `Handler.key` field. Separate from the payload — see the file
+/// header.
 trait Addressee: Sized {
     fn name(&self) -> String;
     fn read(event: &UiEventResponse) -> Option<Self>;
@@ -537,8 +553,8 @@ impl Value for bool {
         self.to_string()
     }
 
-    /// Всё, что не «true», — «false»: третьего состояния у коробочки нет, и
-    /// незнакомое слово значит то же, что снятая отметка.
+    /// Everything that is not "true" is "false": a checkbox has no third state,
+    /// and an unknown word means the same as an unticked box.
     fn read(event: &UiEventResponse) -> Option<Self> {
         Some(event.value() == "true")
     }
@@ -548,9 +564,9 @@ messages!(@numbers usize, f32);
 messages!(@choices NewTab, Filter, Grouping, Sorting, Mission, Period, Cloud, Side, Shift);
 messages!(@substituted ViewportSize => size, PointerEvent => pointer, DropEvent => drop);
 
-/// Меню — набор, у которого «ничего не раскрыто» законное значение: пустым
-/// именем едет и «закрой», и незнакомое имя, а показывать по нему нечего
-/// (см. [`Menu::from_key`]). Поэтому чтение здесь не отказывает.
+/// Menu is a set where "nothing expanded" is a legal value: an empty name
+/// carries both "close" and an unknown name, and there is nothing to show for
+/// it (see [`Menu::from_key`]). So reading here never fails.
 impl Value for Option<Menu> {
     fn declare(&self) -> String {
         self.as_ref().map(Menu::key).unwrap_or_default()
@@ -576,235 +592,11 @@ impl Addressee for Option<String> {
         self.clone().unwrap_or_default()
     }
 
-    /// Пустое имя — «никого»: имени у слоя пустым не бывает, поэтому пустым
-    /// ключом едет «закрыть раскрытое».
+    /// An empty name means "nobody": a layer's name is never empty, so an empty
+    /// key carries "close what is open".
     fn read(event: &UiEventResponse) -> Option<Self> {
         Some(Some(event.key.clone()).filter(|key| !key.is_empty()))
     }
 }
 
 messages!(@ids ViewId, PaneId, SplitId);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::proto::ui_service::ui_event_response::Payload as Wire;
-
-    /// Ответ ровно той формы, в какой его собирает ui-service для обработчика,
-    /// чью нагрузку назвала сама разметка: имя метода, нагрузка и адресат —
-    /// каждое из своего поля (см. `UiEventResponse::declared`).
-    fn wire(message: &Msg) -> UiEventResponse {
-        let (method, value) = message.encode();
-        UiEventResponse { method, key: message.key(), payload: Some(Wire::Value(value)) }
-    }
-
-    fn id() -> ViewId {
-        "7".parse().expect("ViewId из строки")
-    }
-
-    fn pane() -> PaneId {
-        "3".parse().expect("PaneId из строки")
-    }
-
-    /// Каждый вариант обязан пережить полный круг: encode → шина → decode →
-    /// encode без изменений. Ровно тот класс расхождений сборки и разбора, ради
-    /// которого они порождаются одной таблицей.
-    #[test]
-    fn every_variant_survives_the_wire() {
-        let mut messages = vec![
-            Msg::TabSelect(id()),
-            Msg::TabClose(id()),
-            Msg::TabMenu(Some(pane())),
-            Msg::TabMenu(None),
-            Msg::TabOptions(Some(id())),
-            Msg::TabOptions(None),
-            Msg::TabCollapse,
-            Msg::Divided,
-            Msg::Download("продукт".into(), "снимок".into()),
-            Msg::Delete("запись".into()),
-            Msg::DeleteSnapshot("снимок".into()),
-            Msg::DownloadSnapshot("снимок".into()),
-            Msg::PauseSnapshot("снимок".into()),
-            Msg::Reveal("запись".into()),
-            Msg::GlobeClear,
-            Msg::OverlayHidden("продукт".into(), true),
-            Msg::OverlayHidden("продукт".into(), false),
-            Msg::OverlayRemove("продукт".into()),
-            Msg::OverlayShift("продукт".into(), Shift::Up),
-            Msg::OverlayShift("продукт".into(), Shift::Down),
-            Msg::OverlayHideAll(true),
-            Msg::OverlayMenu(Some("продукт".into())),
-            Msg::OverlayMenu(None),
-            Msg::OverlayVariables(Some("продукт".into())),
-            Msg::OverlayVariables(None),
-            Msg::OverlayVariable("продукт".into(), "/PRODUCT/qa_value".into()),
-            Msg::GlobeFile("продукт".into(), "продукт/F2_BT_in.nc".into()),
-            Msg::OutlineToggle("продукт".into()),
-            Msg::OutlineRemove("продукт".into()),
-            Msg::OutlineFocus("продукт".into()),
-            Msg::In(id(), ViewMsg::OpenMenu(None)),
-            Msg::In(id(), ViewMsg::OpenMenu(Some(Menu::Filter))),
-            Msg::In(id(), ViewMsg::OpenMenu(Some(Menu::Row("снимок".into())))),
-            Msg::In(id(), ViewMsg::Query("s2a".into())),
-            Msg::In(id(), ViewMsg::Page(3)),
-            Msg::In(id(), ViewMsg::Expand("снимок".into())),
-            Msg::In(id(), ViewMsg::Check("снимок".into())),
-            Msg::In(id(), ViewMsg::CheckShown(true)),
-            Msg::In(id(), ViewMsg::CheckShown(false)),
-            Msg::In(id(), ViewMsg::CheckClear),
-            Msg::In(id(), ViewMsg::CheckDownload),
-            Msg::In(id(), ViewMsg::CheckDelete),
-            Msg::In(id(), ViewMsg::InCatalog("eodata/Sentinel-2/S2B.SAFE".into())),
-            Msg::In(id(), ViewMsg::SearchQuery("msil2a".into())),
-            Msg::In(id(), ViewMsg::SearchFrom("2026-08-01".into())),
-            Msg::In(id(), ViewMsg::SearchTo("2026-08-13".into())),
-            Msg::In(id(), ViewMsg::RunSearch),
-            Msg::In(id(), ViewMsg::Enter("eodata/Sentinel-2/".into())),
-            Msg::In(id(), ViewMsg::Up),
-            Msg::In(id(), ViewMsg::Preview("запись".into())),
-            Msg::In(id(), ViewMsg::PreviewRemote("продукт".into())),
-            Msg::In(id(), ViewMsg::PreviewProduct("снимок.SAFE".into())),
-            Msg::In(id(), ViewMsg::PreviewFit),
-            Msg::In(id(), ViewMsg::PreviewZoom(1.0)),
-            Msg::In(id(), ViewMsg::PreviewVariables(true)),
-            Msg::In(id(), ViewMsg::PreviewVariables(false)),
-            Msg::In(id(), ViewMsg::PreviewVariable("/PRODUCT/qa_value".into())),
-            Msg::In(id(), ViewMsg::GlobeToggle("продукт".into())),
-        ];
-        messages.extend(NewTab::ALL.iter().map(|kind| Msg::NewTab(pane(), *kind)));
-        messages.extend(NewTab::KINDS.iter().map(|kind| Msg::In(id(), ViewMsg::Fill(*kind))));
-        messages.extend(Side::ALL.iter().map(|side| Msg::TabMove(id(), *side)));
-        messages.extend(Filter::ALL.iter().map(|choice| Msg::In(id(), ViewMsg::Filter(*choice))));
-        messages.extend(Grouping::ALL.iter().map(|choice| Msg::In(id(), ViewMsg::Group(*choice))));
-        messages.extend(Sorting::ALL.iter().map(|choice| Msg::In(id(), ViewMsg::Sort(*choice))));
-        messages.extend(
-            Mission::ALL.iter().map(|choice| Msg::In(id(), ViewMsg::SearchMission(*choice))),
-        );
-        messages
-            .extend(Period::ALL.iter().map(|choice| Msg::In(id(), ViewMsg::SearchPeriod(*choice))));
-        messages
-            .extend(Cloud::ALL.iter().map(|choice| Msg::In(id(), ViewMsg::SearchCloud(*choice))));
-
-        for message in messages {
-            let event = wire(&message);
-            let decoded =
-                Msg::decode(&event).unwrap_or_else(|| panic!("«{}» не разобралось", event.method));
-            // Нагрузка и адресат сверяются порознь: они и едут порознь, и
-            // сообщение, потерявшее адресата, нагрузкой этого не выдаёт.
-            assert_eq!(decoded.encode(), message.encode(), "нагрузка «{}»", event.method);
-            assert_eq!(decoded.key(), message.key(), "адресат «{}»", event.method);
-        }
-    }
-
-    /// Нагрузку области подставляет рендерер, а адресат приезжает отдельным
-    /// полем — иначе виджет, стоящий во второй половине экрана, назвать себя не
-    /// может: нагрузка у него занята.
-    #[test]
-    fn substituted_payloads_still_name_their_tab() {
-        let size = ViewportSize { width: 800, height: 600 };
-        let pointer = PointerEvent::default();
-        let cases: Vec<(&str, Wire)> = vec![
-            ("globe_resized", Wire::Size(size.clone())),
-            ("preview_resized", Wire::Size(size.clone())),
-            ("globe_pointer", Wire::Pointer(pointer.clone())),
-            ("preview_pointer", Wire::Pointer(pointer.clone())),
-        ];
-        for (name, payload) in cases {
-            let event = UiEventResponse {
-                method: name.to_string(),
-                key: "7".to_string(),
-                payload: Some(payload),
-            };
-            let Some(Msg::In(view, carried)) = Msg::decode(&event) else {
-                panic!("«{}» разобралось не тем", name)
-            };
-            assert_eq!(view, id(), "адресат «{}»", name);
-            match carried {
-                ViewMsg::GlobeResized(got) | ViewMsg::PreviewResized(got) => {
-                    assert_eq!(got, size, "размер «{}»", name)
-                }
-                ViewMsg::GlobePointer(got) | ViewMsg::PreviewPointer(got) => {
-                    assert_eq!(got, pointer, "указатель «{}»", name)
-                }
-                _ => panic!("«{}» разобралось не тем", name),
-            }
-        }
-    }
-
-    /// Ползунок называет свой слой, а нагрузку отдаёт числу.
-    #[test]
-    fn slider_names_its_layer_apart_from_its_value() {
-        let event = UiEventResponse {
-            method: "overlay_opacity".to_string(),
-            key: "eodata/Sentinel-2/S2B.SAFE".to_string(),
-            payload: Some(Wire::Value("0.62".to_string())),
-        };
-        match Msg::decode(&event) {
-            Some(Msg::OverlayOpacity(key, value)) => {
-                assert_eq!(key, "eodata/Sentinel-2/S2B.SAFE");
-                assert!((value - 0.62).abs() < 1e-6, "{}", value);
-            }
-            other => panic!("разобралось не тем: {:?}", other.map(|m| m.encode())),
-        }
-    }
-
-    /// Граница называет своё деление тем же полем, что ползунок — свой слой:
-    /// нагрузку у обоих занял рендерер, и сказать «чей сдвиг» больше нечем.
-    #[test]
-    fn divider_names_its_split_apart_from_its_delta() {
-        let event = UiEventResponse {
-            method: "divide".to_string(),
-            key: "4".to_string(),
-            payload: Some(Wire::Value("-12.5".to_string())),
-        };
-        match Msg::decode(&event) {
-            Some(Msg::Divide(split, delta)) => {
-                assert_eq!(split.to_string(), "4");
-                assert!((delta + 12.5).abs() < 1e-6, "{}", delta);
-            }
-            other => panic!("разобралось не тем: {:?}", other.map(|m| m.encode())),
-        }
-    }
-
-    /// Адресат едет своим полем, а не внутри нагрузки: имя продукта содержит и
-    /// точки, и слэши, и склеивать его с состоянием значило бы разбирать строку
-    /// на обеих сторонах.
-    #[test]
-    fn hidden_carries_state_and_layer_apart() {
-        let key = "eodata/Sentinel-1/S1A_IW_GRDH_1SDV_054821_06AC1F.SAFE";
-        for hidden in [true, false] {
-            let message = Msg::OverlayHidden(key.into(), hidden);
-            assert_eq!(message.encode().1, hidden.to_string(), "нагрузка — только состояние");
-            assert_eq!(message.key(), key, "адресат — только слой");
-            match Msg::decode(&wire(&message)) {
-                Some(Msg::OverlayHidden(decoded, state)) => {
-                    assert_eq!((decoded.as_str(), state), (key, hidden));
-                }
-                other => panic!("разобралось не тем: {:?}", other.map(|m| m.encode())),
-            }
-        }
-    }
-
-    /// Видовое сообщение без имени вкладки — не сообщение: адресовать его
-    /// некуда, и «активного вида» на этот вопрос больше нет.
-    #[test]
-    fn view_message_without_a_tab_is_none() {
-        let event = UiEventResponse {
-            method: "run_search".to_string(),
-            key: String::new(),
-            payload: Some(Wire::Value(String::new())),
-        };
-        assert!(Msg::decode(&event).is_none());
-    }
-
-    /// Незнакомое имя — `None`: warn в module.rs, а не паника и не чужой смысл.
-    #[test]
-    fn unknown_method_is_none() {
-        let event = UiEventResponse {
-            method: "неведомое".to_string(),
-            key: String::new(),
-            payload: Some(Wire::Value(String::new())),
-        };
-        assert!(Msg::decode(&event).is_none());
-    }
-}

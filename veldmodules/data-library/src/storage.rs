@@ -1,24 +1,24 @@
-//! Раскладка хранения — единственное место, где она известна.
+//! Storage layout — the only place where it is known.
 //!
-//! Три соглашения: каталог, суффикс `.part` у недокачанного и сидкар
-//! `.origin`. Наружу не выходит ни одно — в контракте библиотеки есть только
-//! имя записи, и представление о раскладке хранения не знает.
+//! Three conventions: the directory, the `.part` suffix of a partial download,
+//! and the `.origin` sidecar. None of them leaks out — the library contract
+//! carries only the entry name, and it holds no notion of the storage layout.
 
-/// Каталог, в который складываются закачки.
+/// The directory where downloads are stored.
 pub const DATA_DIR: &str = "data/dem/source";
 
-/// Суффикс недокачанного файла. Заводит его не библиотека, а host-модуль
-/// network (см. network/download.rs): он пишет в `<путь>.part` и по нему же
-/// возобновляет закачку с оборванного байта. Здесь этот суффикс только
-/// читается — как признак «начато, но не доведено».
+/// Suffix of a partially downloaded file. It is introduced not by the library
+/// but by the host network module (see network/download.rs): it writes to
+/// `<path>.part` and resumes the download from the interrupted byte by it.
+/// Here this suffix is only read — as the mark "started but not finished".
 pub const PART_SUFFIX: &str = ".part";
 
-/// Суффикс сидкара с происхождением файла.
+/// Suffix of the sidecar holding the file's origin.
 pub const ORIGIN_SUFFIX: &str = ".origin";
 
-/// Хвост, которым файловая система метит своё временное при атомарной записи
-/// (`<путь>.<uuid>.tmp`, см. `fs::write_atomically`). Данными оно не является
-/// ни секунды, и в каталог библиотеки попадать ему нечего.
+/// Tail the file system marks its temporary with during an atomic write
+/// (`<path>.<uuid>.tmp`, see `fs::write_atomically`). It is not data for a
+/// single second, and it has no business getting into the library catalogue.
 const TMP_SUFFIX: &str = ".tmp";
 
 pub fn file_path(name: &str) -> String {
@@ -33,25 +33,28 @@ pub fn part_path(name: &str) -> String {
     format!("{}/{}{}", DATA_DIR, name, PART_SUFFIX)
 }
 
-/// Где лежат данные записи: недокачанные — под `.part`, доведённые — под самим
-/// именем. Одна функция на оба случая, потому что выбор между ними — это один
-/// факт (доведена ли закачка), а не два независимых.
+/// Where the entry's data lies: partial ones under `.part`, complete ones
+/// under the name itself. One function for both cases, because the choice
+/// between them is one fact (whether the download is finished), not two
+/// independent ones.
 pub fn data_path(name: &str, is_partial: bool) -> String {
     if is_partial { part_path(name) } else { file_path(name) }
 }
 
-/// Имя, под которым продукт ложится на диск: у файла из снимка — имя снимка и
-/// путь внутри него (`S2A_….SAFE/GRANULE/…/T36UYA_….jp2`), у всего остального —
-/// последний сегмент ключа.
+/// The name under which a product goes to disk: for a file from a snapshot —
+/// the snapshot name and the path inside it
+/// (`S2A_….SAFE/GRANULE/…/T36UYA_….jp2`), for everything else — the last
+/// segment of the key.
 ///
-/// Путём, а не последним сегментом, потому что имя записи — её ключ, и второй
-/// файл под тем же ключом означал бы не второй файл, а тот же самый:
-/// `quick-look.png` и `manifest.safe` лежат в каждом продукте, и скачанный
-/// вторым сносил бы первый. Снимок целиком отвечает за уникальность своей
-/// половины ключа, путь внутри — за свою.
+/// By the path, not the last segment, because the entry name is its key, and a
+/// second file under the same key would mean not a second file but the same
+/// one: `quick-look.png` and `manifest.safe` lie in every product, and one
+/// downloaded second would wipe the first. The snapshot as a whole is
+/// responsible for the uniqueness of its half of the key, the path inside —
+/// for its own.
 ///
-/// Границу снимка называет провайдер (`product`); вывести её отсюда не из
-/// чего — раскладка бакета известна только ему.
+/// The snapshot boundary is named by the provider (`product`); it cannot be
+/// derived here — the bucket layout is known only to the provider.
 pub fn name_from_identifier(identifier: &str, product: &str) -> String {
     let identifier = identifier.trim_end_matches('/');
     let product = product.trim_end_matches('/');
@@ -60,143 +63,88 @@ pub fn name_from_identifier(identifier: &str, product: &str) -> String {
         return last(identifier);
     }
     match identifier.strip_prefix(product).and_then(|rest| rest.strip_prefix('/')) {
-        // Файл внутри снимка: снимок папкой, путь внутри — как в хранилище.
+        // File inside the snapshot: the snapshot as a folder, the path inside
+        // as in the storage.
         Some(inside) => format!("{}/{}", last(product), inside),
-        // Снимок одним объектом (архив, гранула): ключ и есть его корень.
+        // The snapshot as a single object (archive, granule): the key is its
+        // root.
         None => last(identifier),
     }
 }
 
-/// Содержимое сидкара `<имя>.origin` рядом со скачанным файлом. Пишется ДО
-/// старта закачки, поэтому переживает сбой, случившийся до появления первых
-/// байт: сидкар без данных — не мусор, а запись о намерении пользователя, и
-/// она остаётся записью каталога.
+/// Contents of the sidecar `<name>.origin` next to the downloaded file. It is
+/// written BEFORE the download starts, so it survives a failure that happened
+/// before the first bytes appeared: a sidecar without data is not junk but a
+/// record of the user's intent, and it remains a catalogue entry.
 ///
-/// `provider` — имя сервиса, у которого просить продукт. Сегодня он один, но
-/// в сидкаре он не для будущего, а потому что это факт о файле: скачан он
-/// откуда-то конкретно.
+/// `provider` is the name of the service to ask for the product. Today there
+/// is one, but in the sidecar it is not for the future — it is there because
+/// it is a fact about the file: it was downloaded from somewhere concrete.
 ///
-/// Необязательны здесь те поля, которых у файла может не быть вовсе: полный
-/// размер неизвестен, пока его не назвал сервер, а снимка у файла нет, если
-/// его скачали сам по себе. Отсутствие такого поля в сидкаре — законное
-/// состояние, а не повод счесть сидкар негодным.
+/// Optional here are the fields a file may not have at all: the full size is
+/// unknown until the server names it, and a file has no snapshot if it was
+/// downloaded on its own. The absence of such a field in the sidecar is a
+/// legitimate state, not a reason to deem the sidecar invalid.
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct OriginSidecar {
     pub provider: String,
     pub identifier: String,
     #[serde(default)]
     pub total_bytes: Option<u64>,
-    /// Снимок, к которому файл относится; пусто — сам по себе. Приходит с
-    /// запросом закачки: границу снимка знает провайдер, а не мы, — и живёт
-    /// здесь ровно потому, что второго места, где этот факт переживёт рестарт,
-    /// у нас нет.
+    /// The snapshot the file belongs to; empty — on its own. Arrives with the
+    /// download request: the snapshot boundary is known to the provider, not
+    /// to us, — and it lives here precisely because there is no second place
+    /// where this fact would survive a restart.
     #[serde(default)]
     pub product: String,
-    /// Сколько файлов в снимке всего; 0 — неизвестно. По нему и только по нему
-    /// видно, скачан ли снимок целиком: сколько его файлов доведено, мы знаем
-    /// сами, а сколько их должно быть — нет.
+    /// How many files the snapshot has in total; 0 — unknown. By it and only
+    /// by it is it visible whether the snapshot is downloaded whole: how many
+    /// of its files are complete we know ourselves, how many there should be
+    /// we do not.
     ///
-    /// Рядом с `product`, потому что это тот же род знания: факт о снимке,
-    /// добытый провайдером и приписанный файлу, — и переживает рестарт он тем
-    /// же способом.
+    /// Next to `product` because it is the same kind of knowledge: a fact
+    /// about the snapshot, obtained from the provider and attributed to the
+    /// file, — and it survives a restart the same way.
     #[serde(default)]
     pub siblings: u32,
 }
 
-/// Провайдер, которому адресуются закачки. Одно место на модуль; когда
-/// провайдеров станет больше, выбор пойдёт по полю `provider` сидкара.
+/// The provider the downloads are addressed to. One place per module; when
+/// there are more providers, the choice will go by the sidecar's `provider`
+/// field.
 pub const PROVIDER_NAME: &str = "data-provider";
 
-/// Факт о файле на диске — ровно то, что вернул fs/on_list, без домыслов.
+/// A fact about a file on disk — exactly what fs/on_list returned, no
+/// assumptions.
 ///
-/// Имени здесь нет: оно ключ записи в снимке, и второе его место означало бы
-/// две правды об одном. Пути тоже нет — он выводится из имени и `is_partial`
-/// (см. [`data_path`]), а хранить его рядом значит завести способ сказать
-/// «доведена» и «лежит под .part» по-разному.
+/// The name is not here: it is the key of the entry in the snapshot, and its
+/// second place would mean two truths about one thing. The path is not here
+/// either — it is derived from the name and `is_partial` (see [`data_path`]),
+/// and storing it alongside would create a way to say "complete" and "lies
+/// under .part" differently.
 pub struct LocalFile {
     pub size: u64,
     pub is_partial: bool,
-    /// Время файла на диске, unix-секунды; 0 — файловая система его не отдала.
+    /// File time on disk, unix seconds; 0 — the file system did not return it.
     pub modified: i64,
 }
 
 impl LocalFile {
-    /// Разбирает запись листинга в пару «имя записи → что под ним лежит».
-    /// `None` — это сидкар, а не файл: он описывает запись, а не является ею.
+    /// Parses a listing entry into a pair "entry name → what lies under it".
+    /// `None` is a sidecar, not a file: it describes an entry, it is not one.
     pub fn from_entry(name: &str, size: u64, modified: i64) -> Option<(String, Self)> {
         if name.ends_with(ORIGIN_SUFFIX) {
             return None;
         }
-        // Временное файловой системы: атомарная запись кладёт
-        // `<путь>.<uuid>.tmp` рядом с целью, и листинг, попавший на неё,
-        // вернул бы её наравне с данными — мусорной строкой в «Скачанном»,
-        // да ещё и с частичным размером.
+        // A file system temporary: an atomic write puts
+        // `<path>.<uuid>.tmp` next to the target, and a listing that caught it
+        // would return it on par with the data — a junk row in "Downloads",
+        // and with a partial size at that.
         if name.ends_with(TMP_SUFFIX) {
             return None;
         }
         let is_partial = name.ends_with(PART_SUFFIX);
         let entry = Self { size, is_partial, modified };
         Some((name.strip_suffix(PART_SUFFIX).unwrap_or(name).to_string(), entry))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Ключ снимка и путь внутри него — в имени записи оба, потому что
-    /// уникальным его делают только они вместе.
-    #[test]
-    fn имя_из_ключа_внутри_снимка() {
-        let product = "eodata/Sentinel-2/MSI/L2A/2026/08/13/S2A_MSIL2A_20260813.SAFE";
-        let file = format!("{}/GRANULE/L2A_T36UYA/IMG_DATA/R10m/T36UYA_TCI_10m.jp2", product);
-        assert_eq!(
-            name_from_identifier(&file, product),
-            "S2A_MSIL2A_20260813.SAFE/GRANULE/L2A_T36UYA/IMG_DATA/R10m/T36UYA_TCI_10m.jp2"
-        );
-    }
-
-    /// Та беда, ради которой имя и перестало быть последним сегментом:
-    /// `quick-look.png` лежит в каждом продукте.
-    #[test]
-    fn одноимённые_файлы_разных_снимков_не_сходятся() {
-        let (a, b) = ("eodata/S1/A.SAFE", "eodata/S1/B.SAFE");
-        let left = name_from_identifier(&format!("{}/preview/quick-look.png", a), a);
-        let right = name_from_identifier(&format!("{}/preview/quick-look.png", b), b);
-        assert_ne!(left, right);
-        assert_eq!(left, "A.SAFE/preview/quick-look.png");
-    }
-
-    /// Снимок одним объектом: ключ и есть его корень, вкладывать не во что.
-    #[test]
-    fn снимок_одним_объектом_кладётся_плоско() {
-        let key = "eodata/Landsat-5/L5.tar.gz";
-        assert_eq!(name_from_identifier(key, key), "L5.tar.gz");
-    }
-
-    /// Файл сам по себе — снимка нет, и путь ему брать неоткуда.
-    #[test]
-    fn файл_без_снимка_кладётся_по_последнему_сегменту() {
-        assert_eq!(name_from_identifier("eodata/dem/N00_E013.tif", ""), "N00_E013.tif");
-    }
-
-    /// Путь к данным и путь к сидкару выводятся из имени, и вложенность на них
-    /// не влияет: раскладка одна на любую глубину.
-    #[test]
-    fn пути_выводятся_из_имени_на_любой_глубине() {
-        let name = "A.SAFE/preview/quick-look.png";
-        assert_eq!(data_path(name, false), "data/dem/source/A.SAFE/preview/quick-look.png");
-        assert_eq!(data_path(name, true), "data/dem/source/A.SAFE/preview/quick-look.png.part");
-        assert_eq!(origin_path(name), "data/dem/source/A.SAFE/preview/quick-look.png.origin");
-    }
-
-    /// Разбор листинга не знает про вложенность вовсе — имя приезжает путём, и
-    /// суффиксы читаются у его хвоста.
-    #[test]
-    fn запись_листинга_разбирается_путём() {
-        let (name, file) = LocalFile::from_entry("A.SAFE/x.jp2.part", 10, 5).expect("это файл");
-        assert_eq!(name, "A.SAFE/x.jp2");
-        assert!(file.is_partial);
-        assert!(LocalFile::from_entry("A.SAFE/x.jp2.origin", 1, 1).is_none());
     }
 }

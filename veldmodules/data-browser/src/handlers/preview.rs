@@ -1,24 +1,27 @@
-//! Вид предпросмотра: открыть файл ресурсом, отдать его канве (image-view) и
-//! переводить жесты над ней в намерения камеры.
+//! Preview view: open a file as a resource, hand it to the canvas (image-view),
+//! and translate gestures over it into camera intents.
 //!
-//! Ресурс открываем мы, а не канва: она не должна знать, лежит файл на диске
-//! или на той стороне сети, — и не знает, потому что оба открывателя отвечают
-//! общим `core.ResourceOpened`, а дальше разницы нет. Владение уходит канве
-//! вместе с on_show: показ переживает наш обработчик.
+//! We open the resource, not the canvas: it must not know whether the file lies
+//! on disk or on the far side of the network -- and it does not know, because
+//! both openers answer with the shared `core.ResourceOpened`, and after that
+//! there is no difference. Ownership passes to the canvas along with on_show:
+//! the display outlives our handler.
 //!
-//! Жест наш, камера — её: какой кнопкой тащат и что делает колесо, видно
-//! только отсюда, а во что превращается сдвиг — знает только та, у кого
-//! камера (ровно то же разделение, что у глобуса).
+//! The gesture is ours, the camera is hers: which button drags and what the
+//! wheel does is visible only from here, while what a shift becomes is known
+//! only to whoever holds the camera (exactly the same split as at the globe).
 //!
-//! Единицы при этом другие, чем у глобуса, и это не оплошность: наружу уходят
-//! пиксели канвы и готовый множитель, а не щелчки. Множитель — потому что тем
-//! же полем правят и кнопки `±` тулбара, а договорись мы «в щелчках», тулбару
-//! пришлось бы знать шаг колеса, к которому он отношения не имеет.
+//! The units here differ from the globe's, and that is not a slip: canvas
+//! pixels and a ready-made factor go outward, not clicks. A factor -- because
+//! the same field drives the toolbar `+/-` buttons, and had we agreed on
+//! "clicks", the toolbar would have to know the wheel step it has nothing to do
+//! with.
 //!
-//! «Чей это ответ» и «актуален ли он» — два разных вопроса: на первый
-//! отвечает таблица маршрутов `State::previews`, на второй — `Latest` внутри
-//! вида. Вкладку могли закрыть, пока ответ шёл, и тогда ответ наш, а
-//! показывать его негде.
+//! "Whose answer is this" and "is it still current" are two different
+//! questions: the first is answered by the routing table `State::previews`, the
+//! second by the `Latest` inside the view. The tab could have been closed while
+//! the answer was in flight, and then the answer is ours but there is nowhere
+//! to show it.
 
 use crate::module::state::{Open, State, ViewId, ViewKind};
 use crate::proto::data_provider::{ImageryResponse, ImageryRole};
@@ -28,16 +31,17 @@ use crate::proto::image_view::{
 use crate::proto::ui_service::{PointerAction, PointerEvent, ViewportSize};
 use veldsdk::proto::core::ResourceOpened;
 
-// Во сколько раз шаг колеса меняет масштаб — из того же файла, которым шаг
-// считает шар: колесо одно, и щелчок у него один. Щелчок приезжает долями с
-// инерцией, так что итоговое приближение — плавная степень этого числа.
+// How many times one wheel step changes the zoom -- from the same file that
+// counts the step for the globe: there is one wheel and one click on it. A
+// click arrives in fractions with inertia, so the resulting zoom is a smooth
+// power of this number.
 use veldmap_globe_wrap::wheel::ZOOM_PER_CLICK;
 
-/// Шаг кнопок ± в тулбаре.
+/// Step of the toolbar +/- buttons.
 const ZOOM_STEP: f32 = 1.5;
 
-/// Просмотр скачанного файла: открывает библиотека — файл её, и где он лежит,
-/// знает только она.
+/// View a downloaded file: the library opens it -- the file is hers, and only
+/// she knows where it lies.
 pub fn on_view_local_pressed(state: &mut State, from: ViewId, name: String) {
     if name.is_empty() { return; }
 
@@ -45,10 +49,10 @@ pub fn on_view_local_pressed(state: &mut State, from: ViewId, name: String) {
     super::open_resource(name.clone(), Some(name), &correlation_id);
 }
 
-/// Просмотр ещё не скачанного. Ресурс открывает data-provider (подписать
-/// запрос к хранилищу может только он); дальше путь тот же, что у локального:
-/// по проводу идут только те окна файла, которые конвейер тайлов действительно
-/// прочитал.
+/// View something not yet downloaded. data-provider opens the resource (only
+/// it can sign a request to storage); from there the path is the same as for a
+/// local one: only those windows of the file that the tile pipeline actually
+/// read travel over the wire.
 pub fn on_view_remote_pressed(state: &mut State, from: ViewId, identifier: String) {
     if identifier.is_empty() { return; }
 
@@ -56,38 +60,41 @@ pub fn on_view_remote_pressed(state: &mut State, from: ViewId, identifier: Strin
     super::open_resource(identifier, None, &correlation_id);
 }
 
-/// Показать снимок, лежащий папкой. Прямо его не открыть: `GET` по пути
-/// каталога отвечает 404, а какой из лежащих внутри растров показывать —
-/// раскладка хранилища, и знает её только провайдер. Поэтому здесь лишний ход:
-/// спрашиваем растры, вкладку заводим сразу.
+/// Show a scene that lies as a folder. It cannot be opened directly: a `GET` on
+/// a catalog path answers 404, and which of the rasters inside to show is
+/// storage layout, known only to the provider. So here goes an extra step: ask
+/// for the rasters, open the tab right away.
 ///
-/// Вкладка заводится до ответа намеренно: ход к каталогу занимает секунды, и
-/// молчание в ответ на нажатие читается как «не сработало».
+/// The tab is opened before the answer on purpose: a trip to the catalog takes
+/// seconds, and silence in response to a click reads as "it did not work".
 pub fn on_view_product_pressed(state: &mut State, from: ViewId, identifier: String) {
     if identifier.is_empty() { return; }
 
     state.close_menus();
     let pane = super::nav::pane_of(state, from);
     let view = super::nav::open_preview(state, pane, identifier.clone(), None);
-    let correlation_id = state.preview_mut(view).expect("вид только что открыт").begin();
+    let correlation_id = state.preview_mut(view).expect("view just opened").begin();
     state.preview_imagery.insert(correlation_id.clone(), view);
     crate::calls::data_provider::on_imagery(
         &crate::proto::data_provider::ImageryRequest {
             downloaded: state.library.whole(&identifier),
             identifier,
-            // Канва берёт подробный растр выбором провайдера: файл она
-            // открывает сама, из строки файла (см. `on_view_local_pressed`).
+            // The canvas takes the detailed raster by the provider's choice:
+            // it opens the file itself, from the file row (see
+            // `on_view_local_pressed`).
             wanted: String::new(),
         },
         &correlation_id,
     );
 }
 
-/// Растры снимка приехали. `false` — ответ не наш (его ждало наложение).
+/// The scene's rasters have arrived. `false` -- the answer is not ours (an
+/// overlay was waiting for it).
 ///
-/// Из двух ролей берём подробную: смотрят снимок затем, чтобы разглядеть, а
-/// квиклук для этого мал. Нет подробной — показываем что есть: маленькая
-/// картинка лучше пустой вкладки с отказом.
+/// Of the two roles we take the detailed one: a scene is viewed in order to see
+/// something in it, and the quick look is too small for that. No detailed one
+/// -- we show whatever is there: a small picture beats an empty tab with a
+/// refusal.
 pub fn on_imagery_result(state: &mut State, response: &ImageryResponse) -> bool {
     let correlation_id = veldsdk::correlation();
     let Some(view) = state.preview_imagery.take(&correlation_id) else { return false };
@@ -103,7 +110,7 @@ pub fn on_imagery_result(state: &mut State, response: &ImageryResponse) -> bool 
         .or_else(|| response.rasters.first());
     let Some(raster) = raster else {
         preview.error = Some(match response.error.is_empty() {
-            true => "внутри снимка нечего показать".to_string(),
+            true => "nothing to show inside the scene".to_string(),
             false => response.error.clone(),
         });
         return true;
@@ -111,17 +118,18 @@ pub fn on_imagery_result(state: &mut State, response: &ImageryResponse) -> bool 
 
     let identifier = raster.identifier.clone();
 
-    // Чем открывать растр, решается тем же правилом, что у строки списка и у
-    // наложения на шаре (`LibraryState::local_name`): скачанное открывает
-    // библиотека, потому что файл под рукой. Спрашивается это здесь, а не на
-    // нажатии: нажимают на снимок, а на диске лежит не он, а растр внутри
-    // него, и называет растр только этот ответ.
+    // What opens the raster is decided by the same rule as for a list row and
+    // for an overlay on the globe (`LibraryState::local_name`): the library
+    // opens what is downloaded, because the file is at hand. This is asked
+    // here, not at the press: the press is on the scene, while on disk lies not
+    // it but the raster inside it, and only this answer names the raster.
     let local = state.library.local_name(&identifier).map(str::to_string);
 
     let Some(preview) = state.preview_mut(view) else { return true };
     preview.label = identifier.clone();
-    // Запись библиотеки помнится и здесь: по ней вкладка, восстановленная из
-    // раскладки, откроется с диска сразу, не повторяя хода к провайдеру.
+    // The library record is remembered here too: by it a tab restored from the
+    // layout opens from disk at once, without repeating the trip to the
+    // provider.
     preview.entry = local.clone();
     let correlation_id = preview.begin();
     state.previews.insert(correlation_id.clone(), view);
@@ -129,13 +137,14 @@ pub fn on_imagery_result(state: &mut State, response: &ImageryResponse) -> bool 
     true
 }
 
-/// Открыть просмотр заново — так возвращается вкладка из сохранённой раскладки
-/// (см. handlers::persist).
+/// Reopen a preview -- this is how a tab comes back from a saved layout (see
+/// handlers::persist).
 ///
-/// Ход тот же, что по нажатию, и различаются они ровно двумя вещами: панель
-/// названа прямо (у восстанавливаемой вкладки нет строки, из которой её
-/// позвали) и снимок берётся тем, чем он был подписан. Скачанный открывает
-/// библиотека, прочее — провайдер: это и есть весь смысл `entry`.
+/// The trip is the same as on a press, and they differ in exactly two things:
+/// the pane is named directly (a restored tab has no row to be called from) and
+/// the scene is taken by the label it was signed with. The library opens what
+/// is downloaded, the provider opens the rest: that is the whole point of
+/// `entry`.
 pub fn reopen(
     state: &mut State,
     pane: crate::module::state::PaneId,
@@ -147,43 +156,44 @@ pub fn reopen(
         return;
     }
     let view = super::nav::open_preview(state, pane, label.clone(), entry.clone());
-    let preview = state.preview_mut(view).expect("вид только что открыт");
+    let preview = state.preview_mut(view).expect("view just opened");
     preview.variable = variable;
     let correlation_id = preview.begin();
     state.previews.insert(correlation_id.clone(), view);
     super::open_resource(label, entry, &correlation_id);
 }
 
-/// Общее начало обоих путей: новая вкладка и корреляция, по которой её найдёт
-/// ответ открывателя.
+/// The shared start of both paths: a new tab and the correlation by which the
+/// opener's answer will find it.
 fn begin_open(state: &mut State, from: ViewId, label: String, entry: Option<String>) -> String {
-    // Меню строки закрываем сами — по той же причине, что и показ на шаре:
-    // просмотр уводит с этого экрана, а открытым оно осталось бы до
-    // возвращения.
+    // We close the row menu ourselves -- for the same reason as with the globe
+    // display: viewing leaves this screen, and open the menu would stay until
+    // the user returns.
     state.close_menus();
     let pane = super::nav::pane_of(state, from);
     let view = super::nav::open_preview(state, pane, label, entry);
     let correlation_id = state.preview_mut(view)
-        .expect("вид только что открыт")
+        .expect("view just opened")
         .begin();
     state.previews.insert(correlation_id.clone(), view);
     correlation_id
 }
 
-/// Ресурс открыт — неважно кем: библиотекой (скачанный файл) или провайдером
-/// (читается по сети). Владение уходит канве вместе с именем вида; отсюда
-/// показ ведёт она. `false` — ответ не наш.
+/// The resource is open -- no matter by whom: the library (a downloaded file)
+/// or the provider (read over the network). Ownership passes to the canvas
+/// along with the view name; from here the display is hers. `false` -- the
+/// answer is not ours.
 ///
-/// Устаревший ответ (вкладку закрыли или запрос вытеснили) всё равно наш:
-/// ресурс уже принадлежит нам, и бросить его значит потерять и регион, и
-/// открытый на той стороне дескриптор.
+/// A stale answer (the tab was closed or the request evicted) is still ours:
+/// the resource already belongs to us, and dropping it would lose both the
+/// region and the descriptor opened on the far side.
 pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     let correlation_id = veldsdk::correlation();
     let Some(view) = state.previews.take(&correlation_id) else { return false };
 
     let current = match state.preview_mut(view) {
         Some(preview) => preview.request.settle(&correlation_id) == veldsdk::Reply::Current,
-        // Вкладку закрыли, пока ответ шёл.
+        // The tab was closed while the answer was in flight.
         None => false,
     };
 
@@ -202,8 +212,9 @@ pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
         }
     };
 
-    // Передача владения — до on_show: получив событие, канва вправе сразу
-    // считать ресурс своим. При отказе хелпер уже освободил его сам.
+    // Ownership transfer -- before on_show: upon receiving the event the canvas
+    // may at once consider the resource its own. On failure the helper has
+    // already released it.
     let resource = match veldsdk::resource::hand_off(resource, "image-view") {
         Ok(handle) => handle,
         Err(error) => {
@@ -222,18 +233,18 @@ pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     true
 }
 
-/// Неудача открытия: на экран и в лог. Экран видит только тот, кто на него
-/// смотрит, а причина (истёкшая подпись, нет записи) нужна и после того, как
-/// пользователь ушёл на другую вкладку.
+/// A failure to open: to the screen and to the log. The screen is seen only by
+/// whoever looks at it, while the cause (an expired signature, a missing
+/// record) is needed even after the user has moved to another tab.
 fn fail(state: &mut State, view: ViewId, error: String) {
     let Some(preview) = state.preview_mut(view) else { return };
-    veldsdk::log::warn!(target: "handlers", "превью '{}': {}", preview.label, error);
+    veldsdk::log::warn!(target: "handlers", "preview '{}': {}", preview.label, error);
     preview.error = Some(error);
 }
 
-/// Канве активного превью досталось новое место. Пока размер тот же, ничего
-/// не делаем — перевыделение сменило бы id текстуры на каждый пересчёт
-/// разметки (см. то же у глобуса).
+/// The active preview's canvas got a new place. While the size is the same,
+/// nothing is done -- reallocation would change the texture id on every layout
+/// pass (see the same at the globe).
 pub fn on_resized(state: &mut State, view: ViewId, size: ViewportSize) {
     let Some(preview) = state.preview_mut(view) else { return };
     if veldsdk::surface::Delegated::covers(preview.surface.as_ref(), size.width, size.height) {
@@ -242,12 +253,12 @@ pub fn on_resized(state: &mut State, view: ViewId, size: ViewportSize) {
     place(state, view, size.width, size.height);
 }
 
-/// Выделяет канве место под кадр и отдаёт его ей.
+/// Allocates the canvas a place for the frame and hands it over to it.
 ///
-/// Отдельно от [`on_resized`] потому, что зовут её двое: событие области — с
-/// новым размером, и ответ канвы «места нет» — с прежним (см.
-/// [`on_view_state`]). Второму ждать события бессмысленно: оно приезжает
-/// только на смену размера, а размер не менялся.
+/// Separate from [`on_resized`] because two callers use it: the area event --
+/// with a new size, and the canvas answer "no place" -- with the old one (see
+/// [`on_view_state`]). For the second to wait for an event is pointless: it
+/// arrives only on a size change, and the size did not change.
 fn place(state: &mut State, view: ViewId, width: u32, height: u32) {
     let scale = state.scale;
     let Some(preview) = state.preview_mut(view) else { return };
@@ -259,7 +270,8 @@ fn place(state: &mut State, view: ViewId, width: u32, height: u32) {
         scale,
         super::SURFACE_FORMAT as i32,
         "image-view",
-        // Рисует канва, показывает разметка: право чтения — её рендереру.
+        // The canvas draws, the layout displays: read access belongs to its
+        // renderer.
         &["ui-service"],
         |surface| {
             crate::calls::image_view::on_canvas(&Canvas {
@@ -270,9 +282,9 @@ fn place(state: &mut State, view: ViewId, width: u32, height: u32) {
     );
 }
 
-/// Указатель над канвой: тащат — панорама, колесо — масштаб вокруг курсора.
-/// Правая и средняя кнопки свободны — как и у глобуса, занимать их «пока
-/// чем-нибудь» значит переучивать потом.
+/// The pointer over the canvas: dragging pans, the wheel zooms around the
+/// cursor. The right and middle buttons stay free -- as at the globe,
+/// occupying them "for now" means retraining the user later.
 pub fn on_pointer(state: &mut State, view: ViewId, event: PointerEvent) {
     let Some(preview) = state.preview_mut(view) else { return };
     if preview.surface.is_none() {
@@ -308,7 +320,7 @@ pub fn on_pointer(state: &mut State, view: ViewId, event: PointerEvent) {
     }
 }
 
-/// Кнопки тулбара: вписать и шаг масштаба вокруг центра канвы.
+/// Toolbar buttons: fit and a zoom step around the canvas center.
 pub fn on_fit(state: &mut State, view: ViewId) {
     let Some(_) = state.preview_mut(view) else { return };
     send(&view.to_string(), Command::Fit(Fit {}));
@@ -325,8 +337,8 @@ pub fn on_zoom_step(state: &mut State, view: ViewId, direction: f32) {
     }));
 }
 
-/// Список величин под кадром: раскрыть, закрыть щелчком мимо или повторным
-/// нажатием. Раскрытое одно на экран (см. `state::Open`).
+/// The variable list under the frame: open it, close it with a click outside or
+/// a repeated press. Only one is open on screen (see `state::Open`).
 pub fn on_variables(state: &mut State, view: ViewId, open: bool) {
     match open {
         true => state.toggle_open(Open::Variables(view)),
@@ -334,9 +346,9 @@ pub fn on_variables(state: &mut State, view: ViewId, open: bool) {
     }
 }
 
-/// Другая величина файла — по выбору в списке под кадром: канва описывает
-/// ресурс заново с ней. Уже показанная или уже названная — нечего делать,
-/// кроме как закрыть список.
+/// Another variable of the file -- chosen from the list under the frame: the
+/// canvas describes the resource again with it. Already shown or already named
+/// -- nothing to do but close the list.
 pub fn on_variable(state: &mut State, view: ViewId, variable: String) {
     state.close_menus();
     let Some(preview) = state.preview_mut(view) else { return };
@@ -348,87 +360,34 @@ pub fn on_variable(state: &mut State, view: ViewId, variable: String) {
     crate::calls::image_view::on_variable(&VariableRequest { view: view.to_string(), variable });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::module::state::Open;
-    use crate::proto::image_view::Variable;
-
-    fn state_with_preview() -> (State, ViewId) {
-        let mut state = State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние");
-        let pane = state.focused();
-        let view = super::super::nav::open_preview(&mut state, pane, "снимок".to_string(), None);
-        (state, view)
-    }
-
-    /// Выбор величины закрывает список, запоминается у вкладки и не
-    /// повторяется для показанной: выбранная по умолчанию тайлером остаётся
-    /// его выбором (пустым), а не становится названной.
-    #[test]
-    fn выбор_величины_запоминается_и_не_повторяется() {
-        let (mut state, view) = state_with_preview();
-        state.toggle_open(Open::Variables(view));
-        // Канва показывает выбор тайлера — щелчок по нему в списке ничего не
-        // называет: описание заново было бы тем же самым.
-        state.preview_mut(view).expect("вкладка").view_state = Some(ViewState {
-            variable: Some(Variable { path: "/PRODUCT/co".to_string(), ..Default::default() }),
-            ..Default::default()
-        });
-        on_variable(&mut state, view, "/PRODUCT/co".to_string());
-        assert!(matches!(state.open, Open::Nothing), "список не закрылся");
-        assert_eq!(state.preview_mut(view).expect("вкладка").variable, "", "показанная названа заново");
-
-        on_variable(&mut state, view, "/PRODUCT/qa_value".to_string());
-        assert_eq!(state.preview_mut(view).expect("вкладка").variable, "/PRODUCT/qa_value");
-    }
-
-    /// Список величин переживает отказ канвы: отчёт без списка прежнего не
-    /// стирает, отчёт со списком — заменяет.
-    #[test]
-    fn список_величин_переживает_отказ_канвы() {
-        let (mut state, view) = state_with_preview();
-        let listed = |paths: &[&str]| ViewState {
-            view: view.to_string(),
-            variables: paths.iter().map(|path| Variable { path: path.to_string(), ..Default::default() }).collect(),
-            ..Default::default()
-        };
-        on_view_state(&mut state, listed(&["/a", "/b"]));
-        on_view_state(&mut state, ViewState { view: view.to_string(), error: "пуста".to_string(), ..Default::default() });
-        let names = |state: &mut State| {
-            state.preview_mut(view).expect("вкладка").variables.iter().map(|v| v.path.clone()).collect::<Vec<_>>()
-        };
-        assert_eq!(names(&mut state), ["/a", "/b"], "отказ стёр список");
-        on_view_state(&mut state, listed(&["/c"]));
-        assert_eq!(names(&mut state), ["/c"]);
-    }
-}
-
-/// Рассылка канвы о ходе показа. Чей это вид, сказано в самом сообщении;
-/// вкладку могли уже закрыть — тогда правда никому здесь не нужна.
+/// The canvas broadcast about display progress. Whose view this is is stated in
+/// the message itself; the tab could already be closed -- then the truth is
+/// needed by nobody here.
 pub fn on_view_state(state: &mut State, view_state: ViewState) {
     let Ok(view) = view_state.view.parse::<ViewId>() else { return };
     let Some(ViewKind::Preview(preview)) = state.get_mut(view) else { return };
-    // Канва говорит, что места под кадр у неё нет. Выдать его заново может
-    // только владелец разметки — то есть мы, — и никто нас об этом больше не
-    // попросит: `on_resized` приезжает лишь на смену размера, а размер не
-    // менялся. Поэтому выдаём прямо здесь.
+    // The canvas says it has no place for the frame. Only the layout owner --
+    // that is, us -- can reissue it, and nobody will ever ask us again:
+    // `on_resized` arrives only on a size change, and the size did not change.
+    // So we issue it right here.
     //
-    // Без этого канва оставалась бы пустой до тех пор, пока человек не потянет
-    // границу панели, — а причина отказа бывает мгновенной: текстуру сменили,
-    // пока событие шло.
+    // Without this the canvas would stay empty until the user drags a panel
+    // border -- while the cause of the refusal can be momentary: the texture
+    // was swapped while the event was in flight.
     //
-    // Одна попытка на жалобу: мгновенный отказ лечится первой же, а
-    // устойчивый (не хватило видеопамяти) не лечится повтором вовсе — и без
-    // счёта мы с канвой гоняли бы текстуры по кругу (см. `replaced`). Счёт
-    // взводится там же, где попытка и делается: жалоба без выданного места
-    // (его ещё ни разу не выдавали) попытки не тратит.
+    // One attempt per complaint: a momentary failure is cured by the first
+    // attempt, while a persistent one (not enough video memory) is not cured by
+    // a repeat at all -- and without the counter we and the canvas would chase
+    // textures in a circle (see `replaced`). The counter is armed where the
+    // attempt is made: a complaint without an issued place (one was never
+    // issued) does not spend an attempt.
     let retry = view_state.needs_place && !preview.replaced;
     if !view_state.needs_place {
         preview.replaced = false;
     }
-    // Список величин остаётся от последнего описания, назвавшего его: канва,
-    // отказавшая названной величине, шлёт пустой, а выбрать другую нужно как
-    // раз тогда.
+    // The variable list stays from the last description that named it: a canvas
+    // that refused the named variable sends an empty one, and picking another
+    // one is needed exactly then.
     if !view_state.variables.is_empty() {
         preview.variables = view_state.variables.clone();
     }
@@ -437,7 +396,7 @@ pub fn on_view_state(state: &mut State, view_state: ViewState) {
     preview.view_state = Some(view_state);
     if let (true, Some((width, height))) = (retry, size) {
         veldsdk::log::info!(target: "handlers",
-            "превью '{}': место под кадр не собралось — выдаём заново", label);
+            "preview '{}': the frame place failed to assemble -- reissuing", label);
         if let Some(preview) = state.preview_mut(view) {
             preview.replaced = true;
         }

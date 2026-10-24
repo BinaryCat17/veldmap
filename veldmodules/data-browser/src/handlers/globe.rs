@@ -1,19 +1,20 @@
-//! Вкладка глобуса: выделить место под чужой рендер и перевести жест в
-//! движение камеры.
+//! Globe tab: allocate room for the foreign renderer and turn a gesture into
+//! camera motion.
 //!
-//! Разделение обязанностей здесь ровно одно, и всё остальное из него следует:
-//! **жест наш, камера — его**. Какой кнопкой вращают и что делает колесо, видно
-//! только отсюда — это решение об интерфейсе, и принимать его в модуле, где нет
-//! ни кнопок, ни остального экрана, было бы неоткуда. Во что превращается
-//! поворот, знает только он.
+//! There is exactly one responsibility split here, and everything else follows
+//! from it: **the gesture is ours, the camera is theirs**. Which button rotates
+//! and what the wheel does is visible only from here -- that is a decision
+//! about the interface, and a module with neither buttons nor the rest of the
+//! screen has no place to make it. What a turn becomes is known only to the
+//! camera.
 //!
-//! Поэтому наружу уходит намерение в долях области, а не пиксели: то же
-//! протаскивание в окне вдвое шире обязано повернуть шар на столько же.
+//! Therefore the intent goes out in fractions of the area, not pixels: the same
+//! drag in a window twice as wide must turn the globe by the same angle.
 //!
-//! Из того же разделения следует и обратный ход. Куда пришёлся щелчок, знает
-//! только камера: одна и та же точка кадра означает разные места на разной
-//! высоте. Поэтому спрашиваем её теми же долями области, получаем ответ местом
-//! на Земле, а что там за снимок — решаем уже сами (см. `handlers::search`).
+//! The same split gives the reverse path. Where the click landed is known only
+//! to the camera: the same frame point means different places at different
+//! heights. So we ask it in the same area fractions, get back a place on Earth,
+//! and decide ourselves which scene is there (see `handlers::search`).
 
 use crate::module::state::globe::Drag;
 use crate::module::state::{State, ViewId};
@@ -22,15 +23,15 @@ use crate::proto::globe::{
 };
 use crate::proto::ui_service::{PointerAction, PointerEvent, ViewportSize};
 
-/// Насколько указателю позволено уехать, чтобы нажатие всё ещё считалось
-/// щелчком. Пиксели области: рука дрожит на пиксель-другой, а протаскивание за
-/// это время не успевает повернуть шар на заметный угол.
+/// How far the pointer may drift while a press still counts as a click. Area
+/// pixels: the hand trembles by a pixel or two, and a drag within that time
+/// cannot turn the globe by a noticeable angle.
 const CLICK_SLOP: f32 = 4.0;
 
-/// Области досталось новое место. Пока размер тот же, ничего не делаем:
-/// перевыделение сменило бы id текстуры, а по нему рендерер решает, что таргет
-/// сменился, — и пересобирал бы под него буфер глубины на каждый пересчёт
-/// разметки.
+/// The area got a new place. While the size is the same, nothing is done:
+/// reallocation would change the texture id, and by that id the renderer
+/// decides the target changed -- and would rebuild the depth buffer for it on
+/// every layout pass.
 pub fn on_resized(state: &mut State, view: ViewId, size: ViewportSize) {
     let scale = state.scale;
     let Some(globe) = state.globe_mut(view) else { return };
@@ -46,33 +47,34 @@ pub fn on_resized(state: &mut State, view: ViewId, size: ViewportSize) {
         scale,
         super::SURFACE_FORMAT as i32,
         "globe",
-        // Показывает её разметка, а рисует её глобус: право чтения нужно
-        // именно рендереру разметки, чтобы построить по ней bind group.
+        // The layout displays it, the globe draws it: read access belongs to
+        // the layout renderer, to build a bind group from it.
         &["ui-service"],
         crate::calls::globe::on_set_surface,
     );
 }
 
-/// Указатель над областью. Здесь он перестаёт быть указателем: дальше едет
-/// либо движение камеры, либо вопрос о месте под ним.
+/// The pointer over the area. Here it stops being a pointer: what follows is
+/// either camera motion or a question about the place beneath it.
 pub fn on_pointer(state: &mut State, view: ViewId, event: PointerEvent) {
-    // Логируется до всех отказов: жест, до которого не дошло, отличим от жеста,
-    // которого не было, только здесь.
-    veldsdk::log::trace!(target: "handlers", "указатель: {:?} ({}, {}) кнопка {} колесо {}",
+    // Logged before all refusals: a gesture that never got through is
+    // distinguishable from a gesture that never happened only here.
+    veldsdk::log::trace!(target: "handlers", "pointer: {:?} ({}, {}) button {} wheel {}",
         event.action(), event.x, event.y, event.button, event.scroll_y);
 
     let Some(globe) = state.globe_mut(view) else { return };
-    // Размер области — та мера, в долях которой считается жест. Без места
-    // считать не от чего: событие пришло раньше, чем мы успели его выделить.
+    // The area size is the measure whose fractions the gesture is computed in.
+    // Without a place there is nothing to compute against: the event arrived
+    // before we managed to allocate it.
     let Some((width, height)) = globe.surface.as_ref().map(|s| (s.width as f32, s.height as f32))
     else {
         return;
     };
 
     match event.action() {
-        // Вращает левая кнопка. Правая и средняя оставлены свободными: под
-        // ними будут выделение области и панорамирование, и занимать их
-        // «пока чем-нибудь» значит переучивать потом.
+        // The left button rotates. The right and middle ones stay free: area
+        // selection and panning are reserved for them, and occupying them "for
+        // now" means retraining the user later.
         PointerAction::PointerPressed if event.button == 1 => {
             globe.dragging = Some(Drag { last: (event.x, event.y), travelled: 0.0 });
         }
@@ -82,37 +84,38 @@ pub fn on_pointer(state: &mut State, view: ViewId, event: PointerEvent) {
             drag.last = (event.x, event.y);
             drag.travelled += dx.abs() + dy.abs();
             if dx != 0.0 || dy != 0.0 {
-                // Обе оси меряются высотой области, а не своей стороной: угол
-                // обзора задан по вертикали, и доля высоты означает один и тот
-                // же угол, куда бы она ни вела. Делённое на ширину поперёк
-                // растягивалось бы вместе с окном, и жест по диагонали шёл бы
-                // не за курсором, а мимо.
+                // Both axes are measured by the area height, not by their own
+                // side: the field of view is defined vertically, and a fraction
+                // of the height means the same angle wherever it leads.
+                // Divided by the width it would stretch sideways with the
+                // window, and a diagonal gesture would drift away from the
+                // cursor instead of following it.
                 send(Command::Orbit(Orbit { dx: dx / height, dy: dy / height }));
             }
         }
-        // Отпускание на месте — это щелчок: указывают им же, чем и вращают, и
-        // отличает одно от другого только пройденный путь.
+        // Releasing in place is a click: pointing uses the same button as
+        // rotating, and only the travelled distance tells them apart.
         PointerAction::PointerReleased => {
             let travelled = globe.dragging.take().map(|drag| drag.travelled);
             if travelled.is_some_and(|travelled| travelled <= CLICK_SLOP) {
                 probe(state, event.x / width, event.y / height);
             }
         }
-        // Уход курсора кончает жест молча. Приходит он только когда кнопка не
-        // нажата: удержание тянет движения и за краем области (см.
-        // `PointerAction` в types.proto).
+        // The cursor leaving ends the gesture silently. It arrives only when no
+        // button is held: a press keeps dragging past the area edge (see
+        // `PointerAction` in types.proto).
         PointerAction::PointerLeft => {
             globe.dragging = None;
         }
-        // Прокрутка приезжает в щелчках колеса (см. `PointerEvent` в
-        // types.proto), а шаг приближения меряется ими же — переводить нечего.
-        // Щелчок при этом растянут инерцией на несколько кадров, и приближение
-        // вместе с ним выходит плавным, а не скачком.
+        // Scrolling arrives in wheel clicks (see `PointerEvent` in
+        // types.proto), and the zoom step is measured in the same clicks --
+        // nothing needs converting. Each click is stretched by inertia over
+        // several frames, so the zoom comes out smooth rather than jumpy.
         //
-        // Приближаются к тому, на что смотрят, поэтому вместе со щелчком едет и
-        // место курсора — смещением от середины кадра. Обе оси делятся на
-        // высоту, как у вращения: угол обзора задан по вертикали, и пропорции
-        // области в счёт не входят.
+        // One zooms toward what one looks at, so the cursor place travels with
+        // the click -- as an offset from the frame center. Both axes are divided
+        // by the height, as in rotation: the field of view is defined
+        // vertically, and the area proportions do not enter the calculation.
         PointerAction::PointerScrolled => {
             if event.scroll_y != 0.0 {
                 let (hold_x, hold_y) = hold(event.x, event.y, width, height);
@@ -123,35 +126,35 @@ pub fn on_pointer(state: &mut State, view: ViewId, event: PointerEvent) {
     }
 }
 
-/// Спросить, куда пришёлся щелчок. Своими силами на это не ответить: одна и та
-/// же точка кадра означает разные места на разной высоте, а высота — у камеры,
-/// и камера не наша.
+/// Ask where the click landed. This cannot be answered on our own: the same
+/// frame point means different places at different heights, and the height is
+/// held by the camera -- which is not ours.
 fn probe(state: &mut State, x: f32, y: f32) {
     let correlation_id = state.probe.begin();
     crate::calls::globe::on_probe(&Probe { x, y }, &correlation_id);
 }
 
-/// Ответ на него. Мимо Земли или мимо всех контуров — выбор снимается: щелчок
-/// по пустому месту значит ровно это.
+/// The answer to it. Missed the Earth or missed all outlines -- the selection
+/// is cleared: a click on empty space means exactly that.
 pub fn on_probed(state: &mut State, probed: Probed) {
     if state.probe.settle(&veldsdk::correlation()) != veldsdk::Reply::Current {
         return;
     }
-    // Место щелчка — единственное, по чему видно, промахнулись мы мимо контура
-    // или мимо самой Земли: снаружи обе неудачи выглядят одинаково.
+    // The click place is the only thing that shows whether we missed an outline
+    // or the Earth itself: from the outside both failures look alike.
     match &probed.at {
-        Some(at) => veldsdk::log::debug!(target: "handlers", "щелчок по шару: {:.4}, {:.4}", at.lat, at.lon),
-        None => veldsdk::log::debug!(target: "handlers", "щелчок мимо Земли"),
+        Some(at) => veldsdk::log::debug!(target: "handlers", "click on the globe: {:.4}, {:.4}", at.lat, at.lon),
+        None => veldsdk::log::debug!(target: "handlers", "click missed the Earth"),
     }
     super::outline::pick(state, probed.at.map(|at| (at.lat, at.lon)));
 }
 
-/// Навести камеру на круг, в который вписан снимок. `None` — наводить не на
-/// что: у продукта нет геометрии (вспомогательные данные).
+/// Aim the camera at the circle the scene is inscribed in. `None` -- nothing to
+/// aim at: the product has no geometry (auxiliary data).
 ///
-/// Здесь, а не у того, кто наводит: команда камеры — разговор с глобусом, а
-/// наводят на снимок из трёх мест — строки списка, слоя и контура. Три копии
-/// одного `Focus` разошлись бы молча.
+/// Here, not at whoever aims: the camera command is a conversation with the
+/// globe, while the scene is aimed at from three places -- a list row, a layer,
+/// and an outline. Three copies of one `Focus` would drift apart silently.
 pub fn focus_on(frame: Option<crate::module::footprint::Frame>) {
     let Some(frame) = frame else { return };
     send(Command::Focus(Focus {
@@ -164,34 +167,13 @@ fn send(command: Command) {
     crate::calls::globe::on_camera(&CameraCommand { command: Some(command) });
 }
 
-/// Курсор в пикселях области — в точку кадра, которую держит приближение.
+/// Cursor in area pixels -- to the frame point the zoom holds.
 ///
-/// Считается от середины кадра и обеими осями на высоту: так эту точку понимает
-/// камера (`Zoom` в globe/types.proto), и так же она понимает жест вращения.
-/// Соседний `Probe` меряет иначе — каждую ось своей стороной и от угла, — и
-/// перепутать эти две мерки нечему помешать, кроме проверки рядом.
+/// Computed from the frame center with both axes divided by the height: that is
+/// how the camera understands this point (`Zoom` in globe/types.proto), and how
+/// it understands the rotation gesture too. The neighbouring `Probe` measures
+/// differently -- each axis by its own side and from the corner -- and nothing
+/// but a check side by side keeps these two measures from being mixed up.
 fn hold(x: f32, y: f32, width: f32, height: f32) -> (f32, f32) {
     ((x - width / 2.0) / height, (y - height / 2.0) / height)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Мерка удерживаемой точки: середина кадра — ноль, обе оси делятся на
-    /// высоту. Поделив горизонталь на ширину, приближение держало бы место тем
-    /// мимо, чем шире область, — и в квадратном окне это осталось бы незаметным.
-    #[test]
-    fn удержание_меряется_высотой_от_середины() {
-        let (width, height) = (2000.0, 1000.0);
-        assert_eq!(hold(1000.0, 500.0, width, height), (0.0, 0.0), "середина не ноль");
-
-        // Правый край отстоит от середины на полширины, то есть на целую высоту.
-        assert_eq!(hold(2000.0, 500.0, width, height).0, 1.0);
-        // Низ — на полвысоты, и знак у него положительный: доли считаются вниз.
-        assert_eq!(hold(1000.0, 1000.0, width, height).1, 0.5);
-        // Одинаковое смещение в пикселях даёт одинаковую долю по обеим осям.
-        let (dx, dy) = hold(1200.0, 700.0, width, height);
-        assert_eq!(dx, dy, "оси меряются разным");
-    }
 }

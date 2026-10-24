@@ -1,8 +1,8 @@
-//! components/list_screen.rs — экран со списком целиком.
+//! components/list_screen.rs — a whole list screen.
 //!
-//! Три вида отличаются заголовком, наличием пути и тем, откуда взялись строки.
-//! Всё остальное — отбор, колонки, кнопки, страницы — у них общее, и живёт
-//! здесь: разойтись им тогда негде.
+//! The three kinds differ in the heading, in having a path, and in where the
+//! rows come from. Everything else — filtering, columns, buttons, pages — is
+//! shared and lives here: they have nowhere else to diverge.
 
 use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{
@@ -14,48 +14,50 @@ use crate::module::state::{Batch, ViewId};
 use crate::module::state::listing::{ListingState, Menu};
 use crate::module::{theme, Msg, ViewMsg};
 
-/// Чем экран подписан и что показывает.
+/// What the screen is signed with and what it shows.
 pub struct Screen<'a> {
     pub title: &'a str,
-    /// Строка под заголовком: сколько всего и откуда.
+    /// Line under the heading: how many in total and where from.
     pub subtitle: String,
-    /// Путь текущей папки; пусто — пути у вида нет. Он же признак «показана
-    /// одна папка»: строки такого вида все лежат в ней, и это меняет не только
-    /// заголовок, но и то, какие рычаги к списку имеют смысл.
+    /// Path of the current folder; empty — the view has no path. It is also the
+    /// sign of "one folder is shown": all rows of such a view lie in it, and
+    /// this changes not only the heading but also which levers make sense for
+    /// the list.
     pub path: Option<&'a str>,
-    /// Что показать вместо таблицы, когда строк нет: у пустого поиска и у
-    /// пустой папки причины разные.
+    /// What to show instead of the table when there are no rows: an empty
+    /// search and an empty folder have different reasons.
     pub empty: &'a str,
-    /// Рычаги, которые есть только у этого вида, — над общей полосой отбора.
-    /// Общее у трёх видов то, как они показывают строки; откуда строки берутся,
-    /// у каждого своё, и спрашивают они об этом по-разному.
+    /// Levers that only this view has — above the shared filter bar. Shared by
+    /// the three kinds is how they show rows; where the rows come from is
+    /// different for each, and they ask about it in different ways.
     pub controls: Option<Element<Msg>>,
     pub rows: Vec<Row>,
-    /// Ключ снимка, выбранного щелчком по шару; пусто — не выбран ни один.
-    /// Один на все списки: выбирают на шаре, а видно это должно быть везде, где
-    /// этот снимок стоит строкой (см. `table::Context::picked`).
+    /// Key of the scene selected by a click on the globe; empty — none is
+    /// selected. One for all lists: the choice happens on the globe, but it
+    /// must be visible everywhere this scene stands as a row (see
+    /// `table::Context::picked`).
     pub picked: &'a str,
-    /// Есть ли что делать пакетным кнопкам (`handlers::library::batch`).
-    /// Этим и решается, показывать ли их.
+    /// Whether there is anything for the batch buttons to do
+    /// (`handlers::library::batch`). This is what decides whether to show them.
     pub batch: Batch,
-    /// Раскрытое меню этого списка (см. `table::Context::menu`).
+    /// The expanded menu of this list (see `table::Context::menu`).
     pub menu: Option<&'a Menu>,
-    /// Строка, к которой привёл переход в эту вкладку; пусто — переход был не
-    /// сюда (см. `state::Highlight`).
+    /// The row the navigation to this tab led to; empty — the navigation was
+    /// not here (see `state::Highlight`).
     pub target: &'a str,
 }
 
-/// Сколько знаков подзаголовка помещается в строку заголовка. Числом, а не
-/// шириной: подзаголовок стои́т между названием и кнопками, и ширина у него
-/// та, что осталась от обоих, — а обрезать его должен клиент, потому что
-/// коробка срезала бы вместо него кнопки.
+/// How many subtitle characters fit in the heading line. By count, not by
+/// width: the subtitle stands between the title and the buttons, and its width
+/// is whatever is left of both — and the client must truncate it, because the
+/// box would clip the buttons instead.
 const SUBTITLE_CHARS: usize = 72;
 
-/// Заголовок экрана: название, подпись под ним и кнопки справа.
+/// The screen heading: the title, the caption under it, and the buttons on the
+/// right.
 ///
-/// Роль, а не сборка на месте: заголовок стоит над каждым списком, и
-/// написанный по разу на экран он расходится кеглем подписи, выключкой и
-/// высотой — что и случилось, пока их было два.
+/// A role, not an on-site assembly: the heading stands above every list, and
+/// written once per screen it diverges in caption size, weight, and height.
 pub fn heading(title: &str, subtitle: String, trailing: Vec<Element<Msg>>) -> Element<Msg> {
     let mut line = row![
         text::<Msg>(title.to_string())
@@ -63,16 +65,17 @@ pub fn heading(title: &str, subtitle: String, trailing: Vec<Element<Msg>>) -> El
             .color(theme::INK)
             .weight(FontWeight::WeightBold)
             .single_line(),
-        // Ужимается, хотя приезжает сюда счёт: строка стои́т перед распоркой и
-        // всякая непредвиденно длинная выдавливает за край кнопки заголовка
-        // («Снять отметки»), а коробка их потом срезает — то есть делает
-        // ненажимаемыми. Причина отказа сюда не приезжает вовсе: ей место
-        // посреди пустого списка, где она помещается целиком.
+        // Shrinks even though a count arrives here: the line stands before the
+        // spacer and any unexpectedly long text pushes the heading buttons
+        // ("Clear marks") past the edge, and the box then clips them — making
+        // them unclickable. The refusal reason never arrives here at all: it
+        // belongs in the middle of an empty list, where it fits whole.
         text::<Msg>(format::ellipsize(&subtitle, SUBTITLE_CHARS))
             .size(theme::TEXT_BODY)
             .color(theme::INK_DIM)
             .single_line(),
-        // Кнопки прижимаются вправо; без них распорка ничего не меняет.
+        // The buttons are pushed to the right; without them the spacer changes
+        // nothing.
         container(veld_ui_service_wrap::space::<Msg>(Length::Fill, Length::Fixed(0.0)))
             .width(Length::Fill),
     ];
@@ -92,16 +95,17 @@ pub fn heading(title: &str, subtitle: String, trailing: Vec<Element<Msg>>) -> El
     .into()
 }
 
-/// Куда прокрутить список, чтобы строка перехода оказалась на виду. `None` —
-/// вести не к чему либо строки на этой странице нет.
+/// Where to scroll the list so the navigation target row ends up in view.
+/// `None` — nothing to lead to, or the row is not on this page.
 ///
-/// Считается в строках, а не в пикселях от рендерера: шаг строки — наш
-/// (`theme::ROW_PITCH`), и мерить его умеем только мы. Пара строк оставляется
-/// сверху: строка, прижатая к верхнему краю, читается как начало списка, а не
-/// как место, к которому привели.
+/// Counted in rows, not in renderer pixels: the row pitch is ours
+/// (`theme::ROW_PITCH`), and only we can measure it. A couple of rows is left
+/// above: a row pressed against the top edge reads as the start of the list,
+/// not as the place one was led to.
 ///
-/// Номер просьбы едет вместе со смещением: по одному смещению рендереру не
-/// отличить «просят снова» от «просят то же самое» (см. `ListingState::aim`).
+/// The request number rides along with the offset: by offset alone the
+/// renderer cannot tell "asked again" from "asking for the same" (see
+/// `ListingState::aim`).
 fn aim(arranged: &arrange::Arranged<'_>, listing: &ListingState, target: &str) -> Option<ScrollTo> {
     if target.is_empty() {
         return None;
@@ -116,12 +120,12 @@ fn aim(arranged: &arrange::Arranged<'_>, listing: &ListingState, target: &str) -
     })
 }
 
-/// Экран списка целиком.
+/// The whole list screen.
 ///
-/// `width` — ширина ПАНЕЛИ в логических точках, а не окна: по ней считается,
-/// какие колонки помещаются и сколько знаков имени влезает в свою колонку.
-/// Окно шире, и посчитанное по нему схлопнуло бы имя в ноль (см.
-/// `State::pane_width` и [`table::fit`]).
+/// `width` is the width of the PANE in logical points, not of the window: it
+/// decides which columns fit and how many name characters fit into the name
+/// column. The window is wider, and computing by it would collapse the name to
+/// zero (see `State::pane_width` and [`table::fit`]).
 pub fn view(
     view: ViewId,
     screen: Screen<'_>,
@@ -129,47 +133,50 @@ pub fn view(
     width: f32,
 ) -> Element<Msg> {
     let arranged = arrange::arrange(&screen.rows, listing);
-    // Что поместится в отведённую ширину, решает сама таблица: половина
-    // экрана вдвое уже окна, а колонки от этого не худеют (см. table::fit).
+    // What fits into the allotted width is decided by the table itself: half
+    // the screen is twice narrower than the window, and the columns do not get
+    // thinner because of that (see table::fit).
     //
-    // Необязательные колонки нужны, только если есть что раскрывать и что
-    // отмечать, — и считаются они по нарисованному, а не по верхнему ярусу:
-    // снимки в каталоге лежат под папкой дня, то есть появляются только в
-    // раскрытой строке. Считай мы по верхнему ярусу — колонка отметки ушла бы
-    // целиком, и очертить лениво раскрытый снимок стало бы нечем, хотя он на
-    // экране (см. `Arranged::marks`).
+    // Optional columns are needed only if there is something to expand and
+    // something to mark — and they are counted by what is drawn, not by the
+    // top tier: scenes in the catalogue lie under the day folder, that is,
+    // they appear only in an expanded row. Counted by the top tier, the mark
+    // column would be gone entirely, and there would be nothing to outline a
+    // lazily expanded scene with, even though it is on screen (see
+    // `Arranged::marks`).
     let optional = table::Optional {
         twisty: arranged.shown().any(Row::expandable),
         checkable: arranged.marks().next().is_some(),
     };
     let table::Fit { columns, name: name_width, compact } = table::fit(width, optional);
 
-    // Что выбрано и что с этим можно сделать. Про шар здесь не сказано ничего:
-    // контур и показ — не выбор, у них свои значки в строке и свой список
-    // («На просмотре»).
+    // What is selected and what can be done with it. Nothing about the globe
+    // here: outline and display are not selection, they have their own icons
+    // in the row and their own list ("Under viewing").
     let mut trailing: Vec<Element<Msg>> = Vec::new();
     if !listing.selected.is_empty() {
         trailing.push(
-            text::<Msg>(format!("{} выбрано", listing.selected.len()))
+            text::<Msg>(format!("{} selected", listing.selected.len()))
                 .size(theme::TEXT_LABEL)
                 .color(theme::ACCENT_TEXT)
                 .single_line()
                 .into(),
         );
-        // Значками, а не подписями: панель делят пополам как раз затем, чтобы
-        // рядом стоял шар, и три подписи подряд в оставшуюся половину не
-        // помещаются — правый край срезает их вместе с действием. Что значок
-        // делает, говорит подсказка, теми же словами.
+        // With icons, not with labels: the pane is split in half precisely so
+        // that the globe stands next to it, and three labels in a row do not
+        // fit into the remaining half — the right edge clips them along with
+        // the action. What an icon does is told by the tooltip, in the same
+        // words.
         let mut act = |glyph: &'static str, tone: theme::IconTone, hint: &str, msg: ViewMsg| {
             trailing.push(table::icon_button(glyph, tone, hint, Msg::In(view, msg)));
         };
-        // Кнопка стои́т, только когда ей есть что сделать: выбрать можно и то,
-        // чего нет на диске, и то, что уже целиком скачано.
+        // The button stands only when it has something to do: one can select
+        // both what is not on disk and what is already fully downloaded.
         if screen.batch.fetchable {
             act(
                 theme::glyph::DOWNLOAD,
                 theme::IconTone::Rest,
-                "Скачать выбранное",
+                "Download selected",
                 ViewMsg::CheckDownload,
             );
         }
@@ -177,25 +184,25 @@ pub fn view(
             act(
                 theme::glyph::TRASH,
                 theme::IconTone::Danger,
-                "Удалить выбранное",
+                "Delete selected",
                 ViewMsg::CheckDelete,
             );
         }
         act(
             theme::glyph::BOX,
             theme::IconTone::Rest,
-            "Снять выбор",
+            "Clear selection",
             ViewMsg::CheckClear,
         );
     }
     let heading = heading(screen.title, screen.subtitle, trailing);
 
-    // Пустой список и список, из которого всё убрал отбор, — разные вещи:
-    // «ничего не скачано» под выбранным фильтром было бы неправдой.
+    // An empty list and a list emptied by the filter are different things:
+    // "nothing downloaded" under the chosen filter would be untrue.
     let nothing = if screen.rows.is_empty() {
         screen.empty
     } else {
-        "Под отбор ничего не подошло"
+        "Nothing matched the filter"
     };
 
     let body: Element<Msg> = if arranged.lines.is_empty() {
@@ -222,8 +229,8 @@ pub fn view(
         ))
             .direction(ScrollDirection::ScrollVertical)
             .scrollbar(theme::scrollbar())
-            // Имя — своё у каждой вкладки: наводка адресуется им, а списков на
-            // экране бывает два.
+            // The name is own to every tab: the tooltip is addressed by it,
+            // and there can be two lists on screen.
             .name(format!("rows:{}", view))
             .scroll_to(aim(&arranged, listing, screen.target))
             .width(Length::Fill)
@@ -238,10 +245,11 @@ pub fn view(
     if let Some(own) = screen.controls {
         screen_rows.push(own);
     }
-    // Складывать по папкам есть смысл там, где строки собраны отовсюду.
-    // Наличие пути ровно это и означает: вид с путём показывает содержимое
-    // одной папки, все его строки лежат в ней, и заголовок над ними был бы
-    // ровно один. Второго признака под это заводить не нужно — этот уже есть.
+    // Grouping by folders makes sense where rows are gathered from everywhere.
+    // Having a path means exactly that: a view with a path shows the contents
+    // of one folder, all its rows lie in it, and there would be exactly one
+    // heading above them. No second sign is needed for this — this one is
+    // already there.
     screen_rows.push(controls::toolbar(
         view, listing, screen.menu, &arranged.counts, screen.path.is_none(), width));
     screen_rows.push(table::header(view, &columns, arranged.all_marked(listing), compact));

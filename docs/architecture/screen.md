@@ -273,14 +273,14 @@ the bus. The browser stores the figures without interpreting them (`Progress`
 in `state::overlay`); an overlay missing from a report means "the globe does
 not know it yet", not "done", and its figures stay.
 
-It is shown in one place: the ЗАГРУЗКА column of the scene's row — a caption
+It is shown in one place: the LOADING column of the scene's row — a caption
 and a bar under it (`table::progress_cell`). The scene's row in whichever
 list it stands, and not the file rows under it (`load_of`). The column is one
 for two kinds of work, because the question is one — "is something going on,
 and how much is left" — and a download to disk outranks a network show in it:
 the disk changes what lies on the machine, a show is derived and repeatable.
 **Numbers belong to this column**: while it is shown, the neighbouring
-СОСТОЯНИЕ column answers with a word — "downloading", "interrupted" — two
+STATUS column answers with a word — "downloading", "interrupted" — two
 cells with the same fraction do not say twice as much; when the column is
 gone, the numbers return there (`status_look`).
 

@@ -1,57 +1,60 @@
-//! Вид предпросмотра. Показывает ровно один снимок: второй — это вторая
-//! вкладка со своим состоянием, а не подмена содержимого здесь.
+//! Preview view. Shows exactly one scene: a second one is a second tab with its
+//! own state, not a swap of the content here.
 //!
-//! Сам снимок живёт не тут: ресурс открывается библиотекой или провайдером и
-//! владением уходит канве (image-view) вместе с on_show — дальше тайлы,
-//! камеру и кадр ведёт она. Здесь остаётся то, что нужно разметке: место под
-//! канву, ход открытия и последняя присланная правда о показе.
+//! The scene itself does not live here: the resource is opened by the library
+//! or the provider and ownership passes to the canvas (image-view) along with
+//! on_show -- from there the canvas manages the tiles, the camera, and the
+//! frame. What stays here is what the layout needs: the place for the canvas,
+//! the progress of opening, and the last truth delivered about the display.
 
 use crate::proto::image_view::ViewState;
 
-/// Захват указателя над канвой: тащат — панорамируют.
+/// Pointer capture over the canvas: dragging pans.
 pub struct Drag {
     pub last: (f32, f32),
 }
 
 #[derive(Default)]
 pub struct PreviewState {
-    /// Чем снимок подписан — на вкладке, в тулбаре и в логе. Только подпись:
-    /// адресовать по ней ничего нельзя.
+    /// How the scene is labeled -- on the tab, in the toolbar, and in the log.
+    /// Only a label: nothing can be addressed by it.
     pub label: String,
-    /// Запись библиотеки, если снимок открыт из скачанного: размер и время
-    /// на панели свойств есть только у него.
+    /// The library record, if the scene is opened from a downloaded file: only
+    /// it has a size and a time on the properties panel.
     pub entry: Option<String>,
-    /// Место под кадр канвы — наша текстура, делегированная image-view тем же
-    /// обрядом, что место глобуса.
+    /// The place for the canvas frame -- our texture, delegated to image-view by
+    /// the same procedure as the globe place.
     pub surface: Option<veldsdk::surface::Delegated>,
-    /// Ход открытия ресурса (data-library или data-provider). Показ начинается
-    /// его успехом; дальше правда о происходящем приходит рассылкой канвы.
+    /// The progress of opening the resource (data-library or data-provider).
+    /// The display starts with its success; after that the truth about what is
+    /// happening arrives via the canvas broadcast.
     pub request: veldsdk::Latest,
-    /// Отказ открытия — единственная ошибка, которую видим мы, а не канва.
+    /// A failure to open -- the only error we see, not the canvas.
     pub error: Option<String>,
-    /// Последнее состояние показа от image-view: масштаб, размеры источника,
-    /// прогресс производства, его ошибка. Своей копии этой правды не ведём.
+    /// The last display state from image-view: zoom, source size, production
+    /// progress, its error. We keep no copy of this truth of our own.
     pub view_state: Option<ViewState>,
-    /// Величина, названная смотрящим (`ShowRequest.variable`); пусто — выбор
-    /// тайлера. Своё, а не канвы: канва говорит, что показано, а это — что
-    /// просили, и после отказа величины они расходятся.
+    /// The variable named by the viewer (`ShowRequest.variable`); empty -- the
+    /// tiler's choice. Ours, not the canvas's: the canvas says what is shown,
+    /// this says what was asked for, and after a variable refusal they diverge.
     pub variable: String,
-    /// Величины файла, какие канва назвала последним разом (`ViewState.variables`).
-    /// Хранится: канва, отказавшая названной величине, списка не шлёт, а
-    /// выбрать другую нужно как раз тогда.
+    /// The file's variables as named by the canvas last time
+    /// (`ViewState.variables`). Kept: a canvas that refused the named variable
+    /// sends no list, and picking another one is needed exactly then.
     pub variables: Vec<crate::proto::image_view::Variable>,
-    /// Место под кадр уже выдавали заново по жалобе канвы. Одна попытка на
-    /// жалобу: отказ бывает мгновенным (текстуру сменили, пока событие шло) —
-    /// такой лечится с первого раза, — а устойчивый (не хватает видеопамяти)
-    /// повтором не лечится вовсе, и без этого счёта канва с хозяином разметки
-    /// гоняли бы текстуры по кругу. Снимается, как только канва скажет, что
-    /// место у неё есть.
+    /// The frame place has already been reissued on a canvas complaint. One
+    /// attempt per complaint: a failure can be momentary (the texture was
+    /// swapped while the event was in flight) -- that one is cured on the first
+    /// try -- while a persistent one (not enough video memory) is not cured by
+    /// a repeat at all, and without this counter the canvas and the layout
+    /// owner would chase textures in a circle. Cleared as soon as the canvas
+    /// says it has the place.
     pub replaced: bool,
     pub dragging: Option<Drag>,
 }
 
 impl PreviewState {
-    /// Ошибка показа, чья бы она ни была: открытия или конвейера тайлов.
+    /// The display failure, whoever owns it: opening or the tile pipeline.
     pub fn failure(&self) -> Option<&str> {
         if let Some(error) = &self.error {
             return Some(error);
@@ -62,15 +65,15 @@ impl PreviewState {
             .filter(|error| !error.is_empty())
     }
 
-    /// Заводит новый запрос открытия: он становится актуальным, прежний — нет.
+    /// Starts a new open request: it becomes current, the previous one does not.
     pub fn begin(&mut self) -> String {
         self.request.begin()
     }
 
-    /// Названная величина, которую канва и показывает; пусто — выбор тайлера
-    /// либо названная, которой канва отказала. Ею вкладка записывается на
-    /// диск: записанная отвергнутая открывалась бы после перезапуска тем же
-    /// отказом, и списка под ним у свежей вкладки ещё нет.
+    /// The named variable that the canvas is actually showing; empty -- the
+    /// tiler's choice or a named one the canvas refused. The tab is recorded to
+    /// disk with it: a recorded refused one would reopen with the same refusal
+    /// after a restart, and a fresh tab has no list under it yet.
     pub fn confirmed_variable(&self) -> String {
         let shown = self.view_state.as_ref().and_then(|state| state.variable.as_ref());
         match shown {

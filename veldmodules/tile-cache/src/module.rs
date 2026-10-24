@@ -1,18 +1,18 @@
-//! tile-cache: дисковый кэш тайлов пирамид.
+//! tile-cache: on-disk pyramid tile cache.
 //!
-//! Владеет всей раскладкой data/tiles — каталогами-источниками, файлами
-//! тайлов, маркером свежести — и наружу отдаёт только тайлы текстурами да
-//! список промахов. Ключи непрозрачны: их выводит из содержимого источника
-//! производитель (image-tiler), кэш не читает источников вовсе.
+//! Owns the whole data/tiles layout — source directories, tile files, the
+//! freshness marker — and hands out only tiles as textures plus the list of
+//! misses. Keys are opaque: the producer (image-tiler) derives them from the
+//! source contents; the cache never reads the sources at all.
 //!
-//! Весь межсобытийный учёт модуля — ожидания fs (Correlator'ы ниже), поэтому
-//! отменяемых входов у него нет и не появится: приговор отменяемой операции
-//! валит инстанс с любым идущим обработчиком, а вместе с ним — чужие
-//! ожидания (см. schema.yaml).
+//! All of the module's between-event bookkeeping is fs waits (the Correlators
+//! below), so it has no cancellable inputs and never will: the verdict of a
+//! cancellable operation kills the instance with any running handler and,
+//! with it, other parties' waits (see schema.yaml).
 //!
-//! module.rs — фасад: State, init и развилки топиков. Логика — в query.rs
-//! (обслуживание запросов), store.rs (пополнение и записи), evict.rs
-//! (бюджет), layout.rs (раскладка).
+//! module.rs is the facade: State, init, and topic dispatch. The logic lives
+//! in query.rs (serving queries), store.rs (filling and writes), evict.rs
+//! (budget), and layout.rs (layout).
 
 pub mod evict;
 pub mod layout;
@@ -28,29 +28,29 @@ fn default_cache_limit_mb() -> u64 {
 
 #[derive(serde::Deserialize, Clone)]
 pub struct Config {
-    /// Бюджет кэша на диске, мегабайты. Умолчание — 4 ГиБ.
+    /// On-disk cache budget, megabytes. Default is 4 GiB.
     #[serde(default = "default_cache_limit_mb")]
     pub cache_limit_mb: u64,
 }
 
 pub struct State {
     pub limit_bytes: u64,
-    /// Запросы в обслуживании: корреляция запроса → учёт его чтений.
+    /// Queries in flight: query correlation to tracking of its reads.
     pub queries: HashMap<String, query::Query>,
-    /// Отданные fs чтения тайлов, ещё не отвеченные.
+    /// Tile reads handed to fs, not yet answered.
     pub pending_reads: veldsdk::Correlator<query::TileRead>,
-    /// Уехавшие в fs записи: владение CPU-регионами до подтверждения.
+    /// Writes sent to fs: CPU-region ownership held until confirmation.
     pub pending_writes: veldsdk::Correlator<store::PendingWrite>,
-    /// Листинги обхода вытеснения.
+    /// Listings of the eviction sweep.
     pub pending_lists: veldsdk::Correlator<evict::ListPurpose>,
-    /// Удаления жертв вытеснения; контекст — путь, для лога.
+    /// Deletions of eviction victims; the context is the path, for logging.
     pub pending_deletes: veldsdk::Correlator<String>,
-    /// Идущий обход вытеснения; второго параллельно не бывает.
+    /// The eviction sweep in progress; a second one never runs in parallel.
     pub sweep: Option<evict::Sweep>,
     pub stores_since_sweep: u32,
     pub swept_once: bool,
-    /// Источники, тронутые в этой сессии: маркер свежести переписывается по
-    /// разу — свежесть меряется днями, а не миллисекундами.
+    /// Sources touched in this session: the freshness marker is rewritten once
+    /// per source — freshness is measured in days, not milliseconds.
     pub touched: HashSet<String>,
 }
 

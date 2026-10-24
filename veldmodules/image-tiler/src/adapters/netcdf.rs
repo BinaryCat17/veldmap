@@ -1,13 +1,14 @@
-//! NetCDF-4 (он же HDF5): измеренная величина → растр.
+//! NetCDF-4 (also HDF5): a measured variable → a raster.
 //!
-//! Файл — набор именованных величин, и показать его значит выбрать ту, что
-//! есть измерение (правила CF, см. [`preferred`]), узнать, где её отсчёты
-//! лежат на Земле, и растянуть значения в яркость. Читается он по требованию
-//! ресурсом хоста ([`Resource`]): HDF5 адресуется абсолютными смещениями.
-//! Величина — источник драйвера сетки чанков (`grid.rs`): сетка её — окна
-//! строк во всю ширину ([`rows_of`]), и что уровню достаётся, окно или
-//! проход, решает таблица уровней по этой сетке. Выбор величины и растяг —
-//! по выборке окон ([`describe`]); плоскость целиком нигде не держится.
+//! A file is a set of named variables, and showing it means picking the one
+//! that is a measurement (CF rules, see [`preferred`]), finding where its
+//! samples lie on Earth, and stretching the values into brightness. It is read
+//! on demand through the host resource ([`Resource`]): HDF5 is addressed by
+//! absolute offsets. The variable feeds the chunk grid driver (`grid.rs`): its
+//! grid is row windows across the full width ([`rows_of`]), and what a level
+//! gets — a window or a pass — is decided by the level table over that grid.
+//! Variable selection and the stretch follow a sample of windows ([`describe`]);
+//! the whole plane is never held.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -27,41 +28,45 @@ use super::grid::{self, Chunked, Grid};
 use super::radiometry::{self, percentile_stretch, Mapping, Pixel, Samples, STRETCH_SAMPLES};
 use super::{placed, Info, Kind, Tie};
 
-/// Сигнатура HDF5 — с неё начинается всякий NetCDF-4. Классический NetCDF-3
-/// (`CDF\x01`) сюда не относится: это другой формат, и его здесь нет.
+/// The HDF5 signature — every NetCDF-4 starts with it. Classic NetCDF-3
+/// (`CDF\x01`) does not belong here: it is a different format and is not
+/// supported here.
 pub const MAGIC: &[u8] = b"\x89HDF\r\n\x1a\x0a";
 
-/// Сигнатуры классического NetCDF-3 — того, чего здесь нет.
+/// Signatures of classic NetCDF-3 — the format that is not supported here.
 ///
-/// Названы затем, что отказ иначе выходит враньём: имя файла у этих двоих
-/// одно (`.nc`), путь в наложение один, и общий отказ по заголовку перечисляет
-/// NetCDF среди открываемых — то есть отвечает «это не изображение» над файлом
-/// формата, который сам же и назвал читаемым. Опознать их стои́т четырёх байт.
+/// They are named so that the refusal does not end up a lie: both formats share
+/// one file name (`.nc`) and one overlay path, and a generic header refusal
+/// lists NetCDF among the opened ones — that is, it would answer "this is not
+/// an image" over a file of a format it itself called readable. Recognizing
+/// them costs four bytes.
 pub const CLASSIC: [&[u8]; 2] = [b"CDF\x01", b"CDF\x02"];
 
-/// Сколько памяти отдано кэшу метаданных ридера.
+/// How much memory is given to the reader's metadata cache.
 ///
-/// Заголовки HDF5 читаются россыпью мелких кусков — суперблок, заголовки
-/// объектов, узлы B-деревьев, кучи, — и каждое такое чтение у нас стои́т вызова
-/// хоста. Кэш их и снимает; восемь мегабайт крейт называет разумной величиной
-/// для потокового чтения. Сырые чанки в него не идут — ридер их туда нарочно
-/// не кладёт, иначе кэш метаданных держал бы данные.
+/// HDF5 headers are read as scattered small pieces — the superblock, object
+/// headers, B-tree nodes, heaps — and every such read here costs a host call.
+/// The cache removes that cost; the crate calls eight megabytes a reasonable
+/// figure for streaming reads. Raw chunks do not go into it — the reader
+/// deliberately keeps them out, otherwise the metadata cache would hold the
+/// data.
 const METADATA_CACHE: usize = 8 * 1024 * 1024;
 
-/// Сколько окон строк читает выборка разбора — столько же чанков вразброс
-/// берут растягу TIFF и JPEG 2000 (`tiff::mapping`, `jp2::Chunks::mapping`).
+/// How many row windows the probe sample reads — the TIFF and JPEG 2000
+/// stretches take the same number of scattered chunks (`tiff::mapping`,
+/// `jp2::Chunks::mapping`).
 const SAMPLE_WINDOWS: u32 = 4;
 
-/// Ресурс хоста как источник байт для HDF5.
+/// The host resource as a byte source for HDF5.
 ///
-/// Ридеру от файла нужны ровно два ответа — длина и байты с абсолютного
-/// смещения, — и ресурс даёт оба. Этим и живёт всё чтение по требованию:
-/// открытие стои́т заголовков, а не файла.
+/// The reader needs exactly two answers from a file — its length and bytes at
+/// an absolute offset — and the resource gives both. That is what all on-demand
+/// reading lives on: opening costs the headers, not the file.
 ///
-/// `reached` — дальняя достигнутая позиция чтения, та же мерка, что у
-/// `Metered` (`adapters::Metered`): из неё растёт прогресс прохода. Атомиком,
-/// а не `Rc<Cell>`: `Source` обязан быть `Send + Sync`, хоть инстанс и
-/// однопоточный.
+/// `reached` — the farthest read position reached, the same measure as
+/// `Metered` (`adapters::Metered`): pass progress grows from it. An atomic
+/// rather than `Rc<Cell>`: `Source` must be `Send + Sync`, even though the
+/// instance is single-threaded.
 struct Resource {
     id: u64,
     len: u64,
@@ -76,8 +81,9 @@ impl hdf5_pure::Source for Resource {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
         let got = veldsdk::abi::resource_read(self.id, offset, buf.len() as u64)
             .map_err(|why| FormatError::Source(why.to_string()))?;
-        // Короткий ответ — не «прочли сколько было», а конец файла посреди
-        // структуры: ридер спрашивает ровно столько, сколько обязано лежать.
+        // A short answer is not "read as much as there was", but the end of
+        // the file in the middle of a structure: the reader asks for exactly
+        // what must lie there.
         if got.len() != buf.len() {
             return Err(FormatError::UnexpectedEof {
                 expected: buf.len(),
@@ -90,7 +96,7 @@ impl hdf5_pure::Source for Resource {
     }
 }
 
-/// Файл поверх ресурса, читаемый по требованию; `reached` — куда дошло чтение.
+/// A file over the resource, read on demand; `reached` — how far reading got.
 fn opened(resource_id: u64, len: u64, reached: Arc<AtomicU64>) -> Result<File, String> {
     let properties =
         FileAccessProperties::new().with_metadata_cache(MetadataCacheConfig::new(METADATA_CACHE));
@@ -98,36 +104,38 @@ fn opened(resource_id: u64, len: u64, reached: Arc<AtomicU64>) -> Result<File, S
         .map_err(|why| format!("NetCDF: {}", why))
 }
 
-/// Строки координатной решётки по требованию — регионом в одну строку.
+/// Rows of the coordinate lattice on demand — as a one-row region.
 ///
-/// Узлы привязки стоят на немногих строках ([`nodes`]), и читать ради них
-/// плоскость целиком незачем: у полукилометровой сетки SLSTR это 2400 строк
-/// по 3000 отсчётов на широту и столько же на долготу, а узлам нужны тридцать
-/// восемь строк. Строка читается регионом по оси строк плоскости ([`Item`]
-/// знает её форму и оси), разворачивается из упаковки и остаётся здесь на
-/// случай повторного вопроса: отступ решётки ([`footing`]) и сборка спрашивают
-/// одни и те же узлы дважды, а отступ по грязному краю — и соседние. Стоит
-/// это прочитанных строк: обычно десятки, у сплошь грязной решётки — до
-/// плоскости.
+/// Tie nodes stand on few rows ([`nodes`]), and there is no point reading the
+/// whole plane for them: on the half-kilometre SLSTR grid that is 2400 rows of
+/// 3000 samples for latitude and as many for longitude, while the nodes need
+/// thirty-eight rows. A row is read as a region along the plane's rows axis
+/// ([`Item`] knows its shape and axes), unpacked from its packing and kept here
+/// in case of a repeated question: the lattice footing ([`footing`]) and the
+/// assembly ask for the same nodes twice, and a footing on a ragged edge asks
+/// for the neighbours too. It costs read rows: usually dozens, for a wholly
+/// ragged lattice — up to the plane.
 struct Rows<'a> {
     item: &'a Item,
-    /// Набор открыт один раз на все строки: кэш чанков крейта живёт в наборе,
-    /// а строка — срез чанков под ней, и открытый на каждую строку набор
-    /// распаковывал бы их заново. Пусто — не открылся, о чём сказано в журнале.
+    /// The dataset is opened once for all rows: the crate's chunk cache lives
+    /// in the dataset, and a row is a slice of the chunks beneath it, so a
+    /// dataset opened per row would unpack them again. Empty — it failed to
+    /// open, as recorded in the log.
     dataset: Option<Dataset>,
-    /// Прочитанные строки и те, что не прочитались (`None`): отступ решётки
-    /// спрашивает грязный край снова и снова, и неудача не должна стоить
-    /// повторного похода.
+    /// Rows that were read and those that failed (`None`): the lattice footing
+    /// asks about the ragged edge again and again, and a failure must not cost
+    /// a repeated trip.
     read: RefCell<HashMap<u32, Option<Rc<Vec<f32>>>>>,
-    /// Хоть одна строка не прочиталась — привязка не вышла из-за чтения, а не
-    /// из-за узлов, и сказать об этом надо тем словом.
+    /// Any row failed to read — the binding failed because of reading, not
+    /// because of the nodes, and it must be reported in those words.
     failed: Cell<bool>,
 }
 
-/// Потолок кэша чанков у решётки координат. Кэш держит строку чанков через всю
-/// плоскость — то, что делят соседние строки узлов; у полукилометровой сетки
-/// SLSTR это два чанка по 1,6 МБ. Решётка с чанками крупнее потолка читается
-/// верно, но медленно: каждая строка узлов распаковывает свои чанки снова.
+/// Chunk cache ceiling for the coordinate lattice. The cache holds a row of
+/// chunks across the whole plane — what neighbouring node rows share; on the
+/// half-kilometre SLSTR grid that is two chunks of 1.6 MB. A lattice with
+/// chunks larger than the ceiling still reads correctly, but slowly: every node
+/// row unpacks its own chunks again.
 const ROW_CACHE_CAP: usize = 64 * 1024 * 1024;
 
 impl<'a> Rows<'a> {
@@ -141,15 +149,16 @@ impl<'a> Rows<'a> {
         match file.dataset(&item.path) {
             Ok(dataset) => rows.dataset = Some(rows.cached(file, dataset)),
             Err(why) => {
-                veldsdk::log::warn!(target: "decode", "NetCDF: решётка '{}' не открылась: {}", item.path, why);
+                veldsdk::log::warn!(target: "decode", "NetCDF: lattice '{}' failed to open: {}", item.path, why);
                 rows.failed.set(true);
             }
         }
         rows
     }
 
-    /// Тот же набор с кэшем чанков под одну строку чанков через плоскость;
-    /// непрерывный набор кэша не просит и остаётся как есть.
+    /// The same dataset with the chunk cache sized for one row of chunks
+    /// across the plane; a contiguous dataset asks for no cache and stays as it
+    /// is.
     fn cached(&self, file: &File, dataset: Dataset) -> Dataset {
         let Some(chunk) = dataset.chunk_shape().ok().flatten() else { return dataset };
         let element = dataset.element_size().unwrap_or(8);
@@ -167,7 +176,7 @@ impl<'a> Rows<'a> {
             .unwrap_or(dataset)
     }
 
-    /// Строка `row` плоскости целиком, прочитанная или из памяти.
+    /// Row `row` of the plane in full, read or from memory.
     fn row(&self, row: u32) -> Option<Rc<Vec<f32>>> {
         if let Some(known) = self.read.borrow().get(&row) {
             return known.clone();
@@ -181,9 +190,10 @@ impl<'a> Rows<'a> {
             match dataset.read_f32_region(&start, &count) {
                 Ok(values) => Some(Rc::new(unpacked(self.item, values))),
                 Err(why) => {
-                    // Первая неудача — в журнал; остальные лягут в кэш молча.
+                    // The first failure goes to the log; the rest land in the
+                    // cache silently.
                     if !self.failed.replace(true) {
-                        veldsdk::log::warn!(target: "decode", "NetCDF: строка {} '{}' не прочиталась: {}", row, self.item.path, why);
+                        veldsdk::log::warn!(target: "decode", "NetCDF: row {} of '{}' failed to read: {}", row, self.item.path, why);
                     }
                     None
                 }
@@ -193,85 +203,88 @@ impl<'a> Rows<'a> {
         values
     }
 
-    /// Отсчёт в строке `row` и столбце `column`; `None` — за краем или не
-    /// прочитался.
+    /// The sample in row `row` and column `column`; `None` — beyond the edge or
+    /// not read.
     fn value(&self, row: u32, column: u32) -> Option<f64> {
         self.row(row)?.get(column as usize).map(|value| f64::from(*value))
     }
 
-    /// Хоть одна строка не прочиталась или набор не открылся.
+    /// Any row failed to read or the dataset failed to open.
     fn failed(&self) -> bool {
         self.failed.get()
     }
 
-    /// Сколько строк прочитано — для журнала.
+    /// How many rows were read — for the log.
     fn read_rows(&self) -> usize {
         self.read.borrow().values().filter(|row| row.is_some()).count()
     }
 }
 
-/// Отказ привязки словами о чтении: строки координат не прочитались, и узлы
-/// тут не при чём — снимок ляжет догадкой из-за нас, а не из-за файла.
+/// A binding refusal in words about reading: the coordinate rows failed to
+/// read, and the nodes are not at fault — the snapshot would land as our guess
+/// rather than the file's.
 fn unread(lat: &Item, lon: &Item) -> String {
-    format!("координаты '{}' и '{}' не прочитались", lat.path, lon.path)
+    format!("coordinates '{}' and '{}' failed to read", lat.path, lon.path)
 }
 
-/// Наименьшая сторона решётки опорных точек. Столько же, сколько несёт гранула
-/// Sentinel-1; короткой стороне этого и довольно, а длинной мало — см.
+/// The smallest side of the tie-point lattice. As much as a Sentinel-1 granule
+/// carries; it is enough for the short side, too few for the long one — see
 /// [`count`].
 const TIE_GRID: u32 = 21;
 
-/// Отсчётов между узлами решётки. Мерка ошибки привязки: линейная интерполяция
-/// внутри ячейки срезает изгиб трека, и срезает тем сильнее, чем ячейка длиннее.
-/// У опорной сетки OLCI в пятнадцать тысяч строк узел на каждые 64 отсчёта
-/// оставляет медианную ошибку в 73 метра против 2386 у решётки в 21 узел.
-/// Вдвое чаще брать незачем: на той же сетке шаг 32 упирается в потолок
-/// ([`TIE_CAP`]) и покупает четыре метра из семидесяти трёх.
+/// Samples between lattice nodes. A measure of the binding error: linear
+/// interpolation inside a cell cuts off the track's curvature, and cuts more
+/// the longer the cell is. On the fifteen-thousand-row OLCI tie grid, a node
+/// every 64 samples leaves a median error of 73 metres against 2386 for a
+/// 21-node lattice. Twice as often buys nothing: on the same grid a step of 32
+/// hits the ceiling ([`TIE_CAP`]) and buys four metres out of seventy-three.
 const NODE_STEP: u32 = 64;
 
-/// Наибольшая сторона решётки. Узлы едут потребителю списком и там же ложатся в
-/// память, так что решётка не бесплатна: 256 на ось — это 65 тысяч точек и два с
-/// половиной мегабайта на описание.
+/// The largest side of the lattice. Nodes travel to the consumer as a list and
+/// land in memory there, so the lattice is not free: 256 per axis is 65
+/// thousand points and two and a half megabytes of description.
 const TIE_CAP: u32 = 256;
 
-/// Сколько всего может лежать в файле — предел обхода, а не ожидание. Обходятся
-/// заголовки всех величин, и у файла с тысячами их обход стоил бы дороже
-/// показа.
+/// How much can lie in a file in total — a traversal limit, not an expectation.
+/// The headers of all variables are traversed, and for a file with thousands of
+/// them the traversal would cost more than the display.
 const MAX_DATASETS: usize = 512;
 const MAX_DEPTH: usize = 8;
 
-/// Раскладка показываемой величины — то, что разбор оставляет производству.
+/// The layout of the displayed variable — what the probe leaves to production.
 ///
-/// Файл не держится: открыть его стои́т заголовков, а держать — кэша метаданных
-/// на каждый разбор в memo. Отсчёты не держатся тем более: читаются они окнами
-/// по заказу, как чанки TIFF, — и растяг поэтому посчитан здесь же, по выборке
-/// разбора, чтобы соседние тайлы не разошлись швами (`Mapping`).
+/// The file is not held: opening it costs the headers, and holding it costs the
+/// metadata cache for every probe in memo. Samples are not held either: they
+/// are read in windows on demand, like TIFF chunks — and the stretch is
+/// therefore computed here as well, from the probe's sample, so that
+/// neighbouring tiles do not split at the seams (`Mapping`).
 pub struct Layout {
-    /// Сетка окон строк — то, чем живёт драйвер (см. [`rows_of`]).
+    /// The grid of row windows — what the driver lives on (see [`rows_of`]).
     pub grid: Grid,
-    /// Форма величины в файле и оси её плоскости в этой форме — (строки,
-    /// столбцы): окно строк читается регионом по оси строк, на каком бы месте
-    /// файл её ни держал, а единичные оси берутся нулём (см. [`read_rows`]).
+    /// The variable's shape in the file and its plane axes in that shape —
+    /// (rows, columns): a row window is read as a region along the rows axis,
+    /// wherever in the file it is kept, and unit axes are taken as zero (see
+    /// [`read_rows`]).
     shape: Vec<u64>,
     axes: (usize, usize),
-    /// Путь показываемой величины внутри файла.
+    /// The path of the displayed variable inside the file.
     path: String,
-    /// Тип отсчёта, как он записан в файле: им выбирается лестница чтения
-    /// (см. [`read_rows`]).
+    /// The sample type as recorded in the file: it selects the read ladder
+    /// (see [`read_rows`]).
     dtype: DType,
-    /// Чем в ней помечено «нет данных» (`_FillValue`).
+    /// What marks "no data" in it (`_FillValue`).
     fill: Option<f32>,
-    /// Как величина называется в файле по-человечески — для журнала.
+    /// What the variable is called in the file in human words — for the log.
     said: String,
-    /// Растяг показа — один на файл.
+    /// The display stretch — one per file.
     mapping: Mapping,
 }
 
 impl Layout {
-    /// Раскладка величины `width`×`height` с окном в `rows` строк (не выше
-    /// самой величины) и отсчётом типа `dtype`; растяг — тождество, имени и
-    /// метки нет. Тестам таблицы и чтения нужна сетка, а не файл; разбор
-    /// дописывает своё сам ([`probed`]).
+    /// Layout of a `width`×`height` variable with a window of `rows` rows (no
+    /// taller than the variable itself) and a `dtype` sample; the stretch is the
+    /// identity, with no name or label. A grid is enough here, without a file;
+    /// the probe fills in its own ([`probed`]).
     pub fn of(width: u32, height: u32, rows: u32, dtype: DType) -> Self {
         let rows = rows.clamp(1, height.max(1));
         Self {
@@ -286,14 +299,14 @@ impl Layout {
         }
     }
 
-    /// Строк в окне — высота чанка сетки.
+    /// Rows in the window — the height of the grid chunk.
     fn rows(&self) -> u32 {
         self.grid.chunk.1
     }
 
-    /// Окно строк с `top` в `rows` строк как регион файла: по оси строк — окно,
-    /// не длиннее величины, по оси столбцов — вся ширина, по остальным осям —
-    /// нулевой отсчёт.
+    /// The row window starting at `top`, `rows` rows, as a file region: along
+    /// the rows axis — the window, no longer than the variable; along the
+    /// columns axis — the full width; along the other axes — a zero sample.
     fn region(&self, top: u64, rows: u32) -> (Vec<u64>, Vec<u64>) {
         let (rows_axis, columns_axis) = self.axes;
         let mut start = vec![0u64; self.shape.len()];
@@ -304,27 +317,28 @@ impl Layout {
         (start, count)
     }
 
-    /// Путь показываемой величины внутри файла.
+    /// The path of the displayed variable inside the file.
     pub fn path(&self) -> &str {
         &self.path
     }
 }
 
-/// Строк в окне величины высотой `height`, у которой чанк файла по оси строк
-/// — `chunk_rows` (`None` — раскладка непрерывная).
+/// Rows in the window of a variable `height` rows tall whose file chunk along
+/// the rows axis is `chunk_rows` (`None` — a contiguous layout).
 ///
-/// Окно режется по оси строк плоскости, где бы файл её ни держал: единичные
-/// оси (время у Sentinel-5P, `[1, scanline, ground_pixel]`) на окно не влияют.
-/// Величина, записанная одним чанком во всю высоту (SYNERGY), ложится окном в
-/// `height` строк: что меньше плоскости всё равно не прочесть — чанк
-/// распаковывается целиком, — и таблица уровней тогда честно говорит, что
-/// уровень стои́т плоскости.
+/// The window is cut along the plane's rows axis, wherever the file keeps it:
+/// unit axes (time in Sentinel-5P, `[1, scanline, ground_pixel]`) do not affect
+/// the window. A variable written as one chunk of the full height (SYNERGY)
+/// gets a window of `height` rows: less than the plane cannot be read anyway —
+/// the chunk is unpacked whole — and the level table then honestly says the
+/// level costs the plane.
 ///
-/// Иначе окно — связка чанков файла по строкам: наибольшее кратное их высоты
-/// не больше [`TILE`], а сам чанк, если он выше тайла. Мельче чанка окно не
-/// бывает (окно в половину чанка стои́т целого), крупнее тайла не нужно —
-/// тайлу уровня хватает двух соседних. У непрерывной раскладки чанков нет, и
-/// окно ей — тайл.
+/// Otherwise the window is a run of the file's chunks along the rows: the
+/// largest multiple of their height not exceeding [`TILE`], or the chunk itself
+/// if it is taller than a tile. A window is never smaller than a chunk (a
+/// half-chunk window costs a whole one), and no larger than a tile is needed —
+/// a level tile is satisfied by two neighbours. A contiguous layout has no
+/// chunks, and its window is the tile.
 fn rows_of(height: u32, chunk_rows: Option<u64>) -> u32 {
     let chunk = match chunk_rows {
         None => return TILE.min(height),
@@ -336,17 +350,18 @@ fn rows_of(height: u32, chunk_rows: Option<u64>) -> u32 {
     (chunk * (TILE / chunk)).min(height)
 }
 
-/// Байт памяти на отсчёт в свежем чанке — до развёртки в RGBA, которую
-/// драйвер прибавляет сам (`Grid::chunk_bytes`).
+/// Bytes of memory per sample in a fresh chunk — before the RGBA expansion that
+/// the driver adds itself (`Grid::chunk_bytes`).
 ///
-/// Считается по двум фазам чтения крейта, и берётся большая. **Сборка окна**
-/// (`read_raw_region`): само окно, сжатый кусок файла и распакованный из него
-/// чанк живут разом — у одночанковой величины оба ростом с окно, и сжатый
-/// несжимаемых данных не меньше распакованного. **Развёртка** собранного:
-/// сырое окно и его копия — типизированная того же размера у отсчётов,
-/// которые показ разбирает сам (`Samples`), f32 у остальных; байтовым копия
-/// не нужна, сырое окно и есть они. Неузнанный тип считается восьмибайтовым:
-/// ошибиться в эту сторону значит отказать, в другую — упасть.
+/// It is computed over the two read phases of the crate and the larger is
+/// taken. **Window assembly** (`read_raw_region`): the window itself, the
+/// compressed file piece and the chunk unpacked from it all live at once — for
+/// a single-chunk variable both grow with the window, and compressed
+/// incompressible data is no smaller than the unpacked one. **Expansion** of
+/// the assembled: the raw window and its copy — typed of the same size for the
+/// samples the display parses itself (`Samples`), f32 for the rest; byte-sized
+/// ones need no copy, the raw window is that. An unrecognized type counts as
+/// eight bytes: erring this way means refusing, the other way — crashing.
 fn depth_of(dtype: &DType) -> u32 {
     let element = width_of(dtype).unwrap_or(8);
     let assembled = 3 * element;
@@ -358,14 +373,15 @@ fn depth_of(dtype: &DType) -> u32 {
     assembled.max(unpacked)
 }
 
-/// Окно строк величины типизированными отсчётами — одной лестницей на выборку
-/// разбора и на чанки драйвера.
+/// A row window of the variable as typed samples — one ladder for the probe's
+/// sample and for the driver's chunks.
 ///
-/// Окно читается регионом файла ([`Layout::region`]): по оси строк плоскости,
-/// сколько бы осей файл ни держал перед ней. Байты, 16-битные целые и f32
-/// показ разбирает сам (`Samples`); остальные разворачиваются в f32 — своей
-/// развёртки у них нет, а файла с ними в каталоге не встречалось. Копия эта
-/// посчитана в [`depth_of`].
+/// The window is read as a file region ([`Layout::region`]): along the plane's
+/// rows axis, however many axes the file keeps before it. Bytes, 16-bit
+/// integers and f32 the display parses itself (`Samples`); the rest are
+/// expanded into f32 — there is no expansion of their own for them, and no file
+/// with them has been seen in the catalogue. That copy is counted in
+/// [`depth_of`].
 fn read_rows<T>(
     dataset: &Dataset,
     layout: &Layout,
@@ -375,7 +391,7 @@ fn read_rows<T>(
 ) -> Result<T, String> {
     let (start, count) = layout.region(top, rows);
     let failed = |e: hdf5_pure::Error| {
-        format!("NetCDF: строки {}…{}: {}", top, top + count[layout.axes.0], e)
+        format!("NetCDF: rows {}…{}: {}", top, top + count[layout.axes.0], e)
     };
     Ok(match layout.dtype {
         DType::U8 => with(&Samples::U8(&dataset.read_u8_region(&start, &count).map_err(failed)?)),
@@ -385,17 +401,17 @@ fn read_rows<T>(
     })
 }
 
-/// Заголовки, выбор величины и её раскладка — без плоскости.
+/// Headers, variable selection and its layout — without the plane.
 ///
-/// Длина файла сюда не входит ни одним потолком, и это не упущение: читается
-/// он по требованию, и гигабайты, до которых дело не дошло, не стоят ни
-/// памяти, ни провода. Стои́т описание выборки выбранной величины — и по одной
-/// на каждую отвергнутую до неё (см. [`sampled`]).
+/// The file length enters no ceiling here, and that is not an omission: it is
+/// read on demand, and gigabytes never reached cost neither memory nor wire.
+/// What costs is the sample description of the chosen variable — and one for
+/// each rejected before it (see [`sampled`]).
 ///
-/// `wanted` — величина, названная заказчиком (путь из списка кандидатов);
-/// пусто — выбор по порядку [`preferred`]. Названная проверяется той же
-/// выборкой, что и выбранная: пустая над этим местом — отказ словами, а не
-/// прозрачный кадр, однотонная показывается.
+/// `wanted` — the variable named by the caller (a path from the candidate
+/// list); empty — selection by the [`preferred`] order. The named one is
+/// checked with the same sample as the chosen one: empty over this place is a
+/// refusal in words, not a transparent frame; a flat one is shown.
 pub fn describe(resource_id: u64, len: u64, wanted: &str) -> Result<Info, String> {
     let file = opened(resource_id, len, Arc::default())?;
 
@@ -406,33 +422,35 @@ pub fn describe(resource_id: u64, len: u64, wanted: &str) -> Result<Info, String
     }
     if !wanted.is_empty() {
         let Some(chosen) = order.iter().copied().find(|item| item.path == wanted) else {
-            return Err(format!("NetCDF: величины '{}' среди {} годных нет", wanted, order.len()));
+            return Err(format!("NetCDF: variable '{}' is not among the {} fit ones", wanted, order.len()));
         };
         let (height, width) = chosen.plane.ok_or_else(|| explain(&surveyed))?;
         let (layout, values) = probed(&file, chosen, width, height)?;
         return match spread(&values, chosen.fill) {
-            Spread::Empty => Err(format!("NetCDF: '{}' пуста в выборке — над этим местом не измерялась", wanted)),
+            Spread::Empty => Err(format!("NetCDF: '{}' is empty in the sample — it was not measured over this place", wanted)),
             Spread::Flat => {
-                // Ровное поле встанет в середину шкалы — и без слова о том
-                // спрашивало бы «почему серое?».
-                veldsdk::log::info!(target: "decode", "NetCDF: названная '{}' однотонна в выборке — ровным полем", wanted);
+                // A flat field lands in the middle of the scale — and without
+                // a word about it the question would be "why is it grey?".
+                veldsdk::log::info!(target: "decode", "NetCDF: the named '{}' is flat in the sample — shown as a flat field", wanted);
                 told(&file, &surveyed, chosen, layout, &order, &[])
             }
             Spread::Varying => told(&file, &surveyed, chosen, layout, &order, &[]),
         };
     }
 
-    // Пустая величина — не ответ, и узнаётся это только по отсчётам. Гранула
-    // Sentinel-3 несёт величины, снятые не над всякой поверхностью («только
-    // над океаном»), и над сушей такая лежит сплошным `_FillValue`:
-    // показанная, она даёт прозрачный кадр без единого слова о том, почему на
-    // шаре ничего нет. Однотонная — ответ последней очереди: показать её можно
-    // (ровное поле встаёт в середину шкалы), но всякая соседка с перепадом
-    // говорит больше. Запоминается она вместе с раскладкой: выборка у неё уже
-    // прочитана, и второй раз за ней не ходят.
+    // An empty variable is not an answer, and only the samples reveal it. A
+    // Sentinel-3 granule carries variables measured not over every surface
+    // ("over the ocean only"), and over land such a one lies as solid
+    // `_FillValue`: shown, it gives a transparent frame without a single word
+    // about why there is nothing on the globe. A flat one is the last-resort
+    // answer: it can be shown (a flat field lands in the middle of the scale),
+    // but any neighbour with variation says more. It is remembered together
+    // with its layout: its sample has already been read, and nobody goes for it
+    // a second time.
     //
-    // Причина пропуска называется, а не глотается: ответом иначе стало бы
-    // «двумерных величин в файле нет», хотя выше установлено, что они есть.
+    // The reason for a skip is named, not swallowed: otherwise the answer would
+    // become "the file has no two-dimensional variables", although it is
+    // established above that it has.
     let mut skipped: Vec<String> = Vec::new();
     let mut flat: Option<(&Item, Layout)> = None;
     for chosen in &order {
@@ -446,9 +464,9 @@ pub fn describe(resource_id: u64, len: u64, wanted: &str) -> Result<Info, String
         };
         match spread(&values, chosen.fill) {
             Spread::Varying => return told(&file, &surveyed, chosen, layout, &order, &skipped),
-            Spread::Empty => skipped.push(format!("'{}' пуста в выборке", chosen.path)),
+            Spread::Empty => skipped.push(format!("'{}' is empty in the sample", chosen.path)),
             Spread::Flat => {
-                skipped.push(format!("'{}' однотонна в выборке", chosen.path));
+                skipped.push(format!("'{}' is flat in the sample", chosen.path));
                 flat.get_or_insert((chosen, layout));
             }
         }
@@ -457,11 +475,11 @@ pub fn describe(resource_id: u64, len: u64, wanted: &str) -> Result<Info, String
         Some((chosen, layout)) => told(&file, &surveyed, chosen, layout, &order, &skipped),
         None => Err(match skipped.is_empty() {
             true => explain(&surveyed),
-            // Причины у пропущенных разные — пустая, однотонная, не
-            // прочиталась, — и общая фраза обязана покрыть все: названная
-            // одной из них, она врала бы про остальные.
+            // The skipped ones have different reasons — empty, flat, not read
+            // — and the common phrase must cover them all: naming one of them,
+            // it would lie about the rest.
             false => format!(
-                "NetCDF: ни одна из {} годных величин не подошла: {}",
+                "NetCDF: none of the {} fit variables suited: {}",
                 skipped.len(),
                 listed(&skipped)
             ),
@@ -469,8 +487,8 @@ pub fn describe(resource_id: u64, len: u64, wanted: &str) -> Result<Info, String
     }
 }
 
-/// Раскладка величины и выборка её отсчётов — то, по чему решают, она ли это,
-/// и с чем она уйдёт в производство.
+/// The variable's layout and a sample of its samples — what decides whether it
+/// is the one, and what it goes to production with.
 fn probed(file: &File, item: &Item, width: u32, height: u32) -> Result<(Layout, Vec<f32>), String> {
     let failed = |e: hdf5_pure::Error| format!("NetCDF: {}: {}", item.path, e);
     let dataset = file.dataset(&item.path).map_err(failed)?;
@@ -478,13 +496,14 @@ fn probed(file: &File, item: &Item, width: u32, height: u32) -> Result<(Layout, 
     let mut layout = Layout::of(width, height, rows_of(height, item.chunk_rows), dtype);
     layout.shape = item.shape.clone();
     layout.axes = item.axes;
-    // Окно допускается до чтения, той же меркой, что у свежего чанка драйвера
-    // (`Grid::chunk_bytes`): у величины с окном ростом с плоскость выборка и
-    // есть плоскость, и перебор лимита кончился бы трапом, а не отказом.
+    // The window is admitted before reading, by the same measure as a fresh
+    // driver chunk (`Grid::chunk_bytes`): for a variable whose window grows
+    // with the plane the sample is the plane, and exceeding the limit would end
+    // in a trap, not a refusal.
     Peak::new()
-        .with("свежий чанк", layout.grid.chunk_bytes(layout.grid.chunk))
+        .with("fresh chunk", layout.grid.chunk_bytes(layout.grid.chunk))
         .admit()
-        .map_err(|why| format!("NetCDF: '{}' окном {} строк: {}", item.path, layout.rows(), why))?;
+        .map_err(|why| format!("NetCDF: '{}' with a window of {} rows: {}", item.path, layout.rows(), why))?;
     let values = sampled(&dataset, &layout, width, height)?;
     layout.path = item.path.clone();
     layout.fill = item.fill;
@@ -493,27 +512,28 @@ fn probed(file: &File, item: &Item, width: u32, height: u32) -> Result<(Layout, 
     Ok((layout, values))
 }
 
-/// Выборка отсчётов величины — из окон вразброс по её высоте.
+/// A sample of the variable's samples — from windows scattered over its height.
 ///
-/// Окон до [`SAMPLE_WINDOWS`], первое и последнее — у краёв: край полосы
-/// съёмки не измерен вовсе, и годность величины по краям видна хуже всего.
-/// Внутри окна отсчёты берутся шагом, взаимно простым с шириной
-/// ([`sampling_step`]), и шаг разложен на все окна разом, чтобы выборка не
-/// переросла [`STRETCH_SAMPLES`]. Метки «нет данных» в выборке остаются:
-/// пустоту и однотонность по ним и узнают (см. [`spread`]).
+/// Up to [`SAMPLE_WINDOWS`] windows, the first and last at the edges: the edge
+/// of the imaging swath is not measured at all, and a variable's fitness is
+/// worst seen at the edges. Inside a window the samples are taken with a step
+/// coprime with the width ([`sampling_step`]), and the step is shared across
+/// all windows at once so the sample does not outgrow [`STRETCH_SAMPLES`].
+/// "No data" marks stay in the sample: emptiness and flatness are recognized
+/// by them (see [`spread`]).
 ///
-/// Стои́т это окон, а не плоскости. Величина, у которой окон не больше, чем
-/// берёт выборка — окно-плоскость (см. [`rows_of`]) или три чанка по пять
-/// тысяч строк у OLCI, — читается ею целиком, по окну за раз: выборка
-/// бережёт память окна, а не байты, и первые тайлы прочтут то же ещё раз.
-/// Выборка — это выборка: величина с данными только вне её окон пройдёт как
-/// пустая, и следующий кандидат честнее ложного показа не будет; так лежит
-/// цена того, что плоскость не читается.
+/// It costs windows, not the plane. A variable with no more windows than the
+/// sample takes — a window-plane (see [`rows_of`]) or three chunks of five
+/// thousand rows at OLCI — is read whole by it, one window at a time: the
+/// sample saves window memory, not bytes, and the first tiles will read the
+/// same again. A sample is a sample: a variable with data only outside its
+/// windows passes as empty, and the next candidate is no less honest than a
+/// false display; that is the price of not reading the plane.
 fn sampled(dataset: &Dataset, layout: &Layout, width: u32, height: u32) -> Result<Vec<f32>, String> {
     let rows = layout.rows();
     let windows = height.div_ceil(rows).max(1);
-    // Окна расставлены равномерно от первого до последнего; у величины в
-    // меньшее число окон повторы схлопываются.
+    // Windows are spread evenly from the first to the last; for a variable with
+    // fewer windows the repeats collapse.
     let mut picks: Vec<u32> = (0..SAMPLE_WINDOWS)
         .map(|at| (u64::from(at) * u64::from(windows - 1) / u64::from(SAMPLE_WINDOWS - 1)) as u32)
         .collect();
@@ -530,21 +550,23 @@ fn sampled(dataset: &Dataset, layout: &Layout, width: u32, height: u32) -> Resul
     Ok(values)
 }
 
-/// Привязка из отдельного файла координат — там, где растр её не несёт.
+/// A binding from a separate coordinates file — where the raster does not carry
+/// one.
 ///
-/// Так упакован Sentinel-3: измерение лежит в одном `.nc`, а широта с долготой
-/// — в соседнем, и какой это файл, говорит провайдер (раскладку продукта знает
-/// только он). Здесь остаётся прочитать записанное: пара плоскостей `latitude`
-/// и `longitude` одной формы — по единицам, тем же правилом, что и внутри
-/// растра (см. [`northing`]).
+/// That is how Sentinel-3 packs: the measurement lies in one `.nc`, and the
+/// latitude and longitude in a neighbour, and which file it is the provider
+/// says (only it knows the product layout). Here it remains to read what is
+/// written: a pair of `latitude` and `longitude` planes of one shape — by
+/// units, by the same rule as inside the raster (see [`northing`]).
 ///
-/// Координатная сетка бывает разрежена: у OLCI опорная сетка вшестнадцатеро
-/// у́же снимка по столбцам, у SLSTR решётка `tx` вдобавок шире его с обеих
-/// сторон. Чем сетка связана с растром, спрашивается у файла — см.
-/// [`seating`]; не сказал — привязки не выйдет.
+/// The coordinate lattice can be sparse: at OLCI the tie grid is sixteen times
+/// narrower than the image across the columns, at SLSTR the `tx` lattice is
+/// additionally wider than it on both sides. How the lattice is tied to the
+/// raster is asked of the file — see [`seating`]; if it does not say, no
+/// binding comes out.
 ///
-/// Отказ — это «привязки не вышло», а не «растр плох»: снимок ляжет тем, что
-/// сказал о нём каталог.
+/// The refusal is "no binding came out", not "the raster is bad": the snapshot
+/// lands as the catalogue described it.
 pub fn geolocation(
     resource_id: u64,
     len: u64,
@@ -553,18 +575,19 @@ pub fn geolocation(
     height: u32,
 ) -> Result<Vec<Tie>, String> {
     if width < 2 || height < 2 {
-        return Err(format!("растр {}×{} мельче узла привязки", width, height));
+        return Err(format!("raster {}×{} is smaller than a tie node", width, height));
     }
     let file = opened(resource_id, len, Arc::default())?;
     let items = survey(&file)?;
 
-    // Плоскость координат в файле не одна: рядом с широтой лежит высота, а у
-    // SLSTR — ещё и координаты соседних сеток. Берётся самая подробная пара
-    // одной формы: узлов у решётки два десятка, и чем гуще сетка, тем ближе
-    // они к тому месту, о котором спрашивают.
-    // Единственность обязательна — то же правило, что и внутри растра
-    // (см. [`swath`]): две широты одной формы это уже вопрос «которая», а
-    // ответа на него у файла нет.
+    // The coordinate plane in the file is not alone: next to the latitude lies
+    // the height, and at SLSTR — also the coordinates of neighbouring lattices.
+    // The most detailed pair of one shape is taken: the lattice has a couple of
+    // dozen nodes, and the denser the grid, the closer they are to the place
+    // asked about.
+    // Uniqueness is mandatory — the same rule as inside the raster (see
+    // [`swath`]): two latitudes of one shape is already a question of "which",
+    // and the file has no answer to it.
     let pair = |pick: fn(&Item) -> bool, plane: (u32, u32)| -> Option<&Item> {
         let mut found = items.iter().filter(|item| item.plane == Some(plane) && pick(item));
         let one = found.next()?;
@@ -583,24 +606,25 @@ pub fn geolocation(
         .find_map(|plane| Some((plane, pair(northing, plane)?, pair(easting, plane)?)));
     let Some(((geo_h, geo_w), lat, lon)) = found else {
         return Err(format!(
-            "в файле нет пары широта—долгота одной формы: {}",
+            "the file has no latitude–longitude pair of one shape: {}",
             listed(&items.iter().map(|item| item.path.clone()).collect::<Vec<String>>())
         ));
     };
     if geo_w < 2 || geo_h < 2 {
-        return Err(format!("координатная сетка {}×{} — не сетка", geo_w, geo_h));
+        return Err(format!("coordinate grid {}×{} is not a grid", geo_w, geo_h));
     }
-    // Сетка гуще растра — значит она не от него: у поотсчётного файла она
-    // ровно его размера, у опорного реже. Растянуть по такой значит уложить
-    // снимок мимо себя, и молча.
+    // A grid denser than the raster means it is not its own: a per-sample file
+    // has one exactly its size, a tie grid — sparser. Stretching over such a
+    // one would lay the image away from itself, silently.
     if geo_w > width || geo_h > height {
         return Err(format!(
-            "координатная сетка {}×{} гуще растра {}×{} — это координаты не его",
+            "coordinate grid {}×{} is denser than raster {}×{} — these are not its coordinates",
             geo_w, geo_h, width, height
         ));
     }
-    // Решётки читаются строками узлов, а не плоскостью (см. [`Rows`]): потолка
-    // на их размер здесь нет, есть цена строк, которые спросила решётка.
+    // Lattices are read as rows of nodes, not as a plane (see [`Rows`]): there
+    // is no ceiling on their size here, only the cost of the rows the lattice
+    // asked for.
     let (north, east) = (Rows::new(&file, lat), Rows::new(&file, lon));
 
     let attrs = globals(&file);
@@ -616,20 +640,20 @@ pub fn geolocation(
         });
     }
     veldsdk::log::debug!(target: "decode",
-        "NetCDF привязка из соседнего файла: сетка {}×{} ('{}' и '{}'), шаг {:.2}×{:.2} пикселя от {:+.1}×{:+.1}, узлов {}, строк прочитано {}",
+        "NetCDF binding from a neighbour file: grid {}×{} ('{}' and '{}'), step {:.2}×{:.2} pixels from {:+.1}×{:+.1}, {} nodes, {} rows read",
         geo_w, geo_h, lat.path, lon.path,
         seat.step.0, seat.step.1, seat.origin.0, seat.origin.1, ties.len(), north.read_rows() + east.read_rows());
     Ok(ties)
 }
 
-/// Есть ли на что смотреть в отсчётах величины.
+/// Whether there is anything to look at in the variable's samples.
 #[derive(PartialEq, Debug)]
 enum Spread {
-    /// Ни одного годного отсчёта: над этим местом величина не измерялась.
+    /// Not a single fit sample: the variable was not measured over this place.
     Empty,
-    /// Годные есть, но все до одного равны: показать можно, узнать нечего.
+    /// Fit ones exist, but all are equal: it can be shown, nothing to tell.
     Flat,
-    /// Есть перепад — это изображение.
+    /// There is a change — that is an image.
     Varying,
 }
 
@@ -648,7 +672,8 @@ fn spread(values: &[f32], fill: Option<f32>) -> Spread {
     }
 }
 
-/// Собрать описание выбранной величины и сказать в журнале, чем выбор кончился.
+/// Assemble the description of the chosen variable and say in the log how the
+/// choice ended.
 fn told(
     file: &File,
     surveyed: &[Item],
@@ -659,11 +684,11 @@ fn told(
 ) -> Result<Info, String> {
     let (height, width) = chosen.plane.ok_or_else(|| explain(surveyed))?;
     veldsdk::log::debug!(target: "decode",
-        "NetCDF: показывается '{}' ({}, единицы '{}') — {}×{}, окно {} строк, {} из {} величин годятся{}",
+        "NetCDF: showing '{}' ({}, units '{}') — {}×{}, window of {} rows, {} of {} variables fit{}",
         chosen.path, chosen.said, chosen.units, width, height, layout.rows(), order.len(), surveyed.len(),
         match skipped.is_empty() {
             true => String::new(),
-            false => format!("; пропущено: {} ({})", skipped.len(), listed(skipped)),
+            false => format!("; skipped: {} ({})", skipped.len(), listed(skipped)),
         });
 
     let (ties, binding_trouble) = ties(file, surveyed, chosen);
@@ -672,44 +697,47 @@ fn told(
         height,
         kind: Kind::Netcdf(layout),
         ties,
-        // Координаты NetCDF записаны в градусах и решёткой: проекции здесь не
-        // бывает вовсе.
+        // NetCDF coordinates are written in degrees and as a lattice: there is
+        // never a projection here.
         placement: None,
         frame: frame(&globals(file)),
         binding_trouble,
-        // Выбор назван смотрящему: которая из десятков величин файла легла на
-        // экран, иначе не узнать — строка журнала выше ему не видна.
+        // The choice is named to the viewer: which of the file's dozens of
+        // variables landed on screen — otherwise it cannot be known, the log
+        // line above is not visible to them.
         variable: Some(named(chosen)),
-        // И все, из кого выбирают, в том же порядке: смотрящему видно, что ещё
-        // лежит в файле, и любую он вправе назвать (`describe` с `wanted`).
+        // And all the candidates, in the same order: the viewer sees what else
+        // lies in the file, and any of them may be named (`describe` with
+        // `wanted`).
         variables: order.iter().map(|item| named(item)).collect(),
     })
 }
 
-/// Величина словами файла — то, что о ней сообщается смотрящему.
+/// The variable in the file's words — what is reported about it to the viewer.
 fn named(item: &Item) -> super::Variable {
     super::Variable { path: item.path.clone(), said: item.said.clone(), units: item.units.clone() }
 }
 
-/// Перечисление для одной строки журнала: первые три и «и ещё N».
-/// Полный список бывает в полсотни имён, а в подписи слоя ему места нет.
+/// An enumeration for one log line: the first three and "and N more".
+/// The full list can be fifty names, and a layer caption has no room for it.
 fn listed(names: &[String]) -> String {
     let head = names.iter().take(3).cloned().collect::<Vec<String>>().join(", ");
     match names.len() > 3 {
-        true => format!("{} и ещё {}", head, names.len() - 3),
+        true => format!("{} and {} more", head, names.len() - 3),
         false => head,
     }
 }
 
-/// Чанки величины за трейтом драйвера: окно строк из файла, развёрнутое
-/// растягом разбора.
+/// The variable's chunks behind the driver's trait: a row window from the file,
+/// expanded by the probe's stretch.
 struct Chunks<'a> {
     dataset: Dataset,
     layout: &'a Layout,
     width: u32,
     height: u32,
-    /// Куда дошло чтение файла — и счётчик прогресса, куда это переливается
-    /// после каждого чанка: ридер крейта в `Rc` не заглянет (см. [`Resource`]).
+    /// How far the file reading got — and the progress counter this is poured
+    /// into after every chunk: the crate reader will not peek into `Rc` (see
+    /// [`Resource`]).
     reached: Arc<AtomicU64>,
     bytes: &'a Rc<Cell<u64>>,
 }
@@ -735,9 +763,9 @@ impl Chunked for Chunks<'_> {
         let rows = self.layout.rows();
         let top = index.saturating_mul(rows);
         if top >= self.height {
-            return Err(format!("NetCDF: окна {} нет: строк {}", index, self.height));
+            return Err(format!("NetCDF: window {} does not exist: {} rows", index, self.height));
         }
-        // Нижнее окно короче: строк у величины столько, сколько есть.
+        // The bottom window is shorter: the variable has as many rows as it has.
         let dh = rows.min(self.height - top);
         let pixels = (self.width as usize) * (dh as usize);
         let mapping = self.layout.mapping;
@@ -746,7 +774,7 @@ impl Chunked for Chunks<'_> {
         })?;
         if rgba.len() != pixels * 4 {
             return Err(format!(
-                "NetCDF: у '{}' в окне {} {} отсчётов вместо {}×{}",
+                "NetCDF: '{}' in window {} has {} samples instead of {}×{}",
                 self.layout.path, index, rgba.len() / 4, self.width, dh
             ));
         }
@@ -755,7 +783,7 @@ impl Chunked for Chunks<'_> {
     }
 }
 
-/// Точечное чтение тайлов уровня — драйвером по окнам строк.
+/// Point reading of level tiles — by the driver over row windows.
 pub fn produce_direct(
     resource_id: u64,
     len: u64,
@@ -768,11 +796,11 @@ pub fn produce_direct(
 ) -> Result<(), String> {
     let mut chunks = Chunks::open(resource_id, len, bytes, info, layout)?;
     veldsdk::log::debug!(target: "decode",
-        "NetCDF окном: '{}' ({}), уровень {}, окно {} строк", layout.path, layout.said, level, layout.rows());
+        "NetCDF by window: '{}' ({}), level {}, window of {} rows", layout.path, layout.said, level, layout.rows());
     grid::direct(&mut chunks, &layout.grid, (info.width, info.height), level, wants, emit)
 }
 
-/// Проход по величине сверху вниз — драйвером по окнам строк.
+/// A pass over the variable top to bottom — by the driver over row windows.
 pub fn produce_pass(
     resource_id: u64,
     len: u64,
@@ -783,17 +811,18 @@ pub fn produce_pass(
 ) -> Result<(), String> {
     let mut chunks = Chunks::open(resource_id, len, bytes, info, layout)?;
     veldsdk::log::debug!(target: "decode",
-        "NetCDF проход: '{}' ({}), {}×{}, окно {} строк",
+        "NetCDF pass: '{}' ({}), {}×{}, window of {} rows",
         layout.path, layout.said, info.width, info.height, layout.rows());
     grid::pass(&mut chunks, &layout.grid, (info.width, info.height), emit)
 }
 
-/// Разупакованные координаты: `значение · scale_factor + add_offset`.
+/// Unpacked coordinates: `value · scale_factor + add_offset`.
 ///
-/// Показываемой величине эти коэффициенты не нужны (см. [`mapping`]), а
-/// координатам нужны обязательно: широта у Sentinel-3 записана целыми с шагом
-/// в миллионную долю градуса, и без разупаковки это не градусы, а десятки
-/// миллионов — то есть не привязка, а её отсутствие.
+/// The displayed variable does not need these coefficients (see [`mapping`]),
+/// while the coordinates must have them: the Sentinel-3 latitude is written as
+/// integers with a step of a millionth of a degree, and without unpacking these
+/// are not degrees but tens of millions — that is, not a binding but its
+/// absence.
 fn unpacked(item: &Item, values: Vec<f32>) -> Vec<f32> {
     let (scale, offset) = item.packing;
     if scale == 1.0 && offset == 0.0 {
@@ -802,17 +831,17 @@ fn unpacked(item: &Item, values: Vec<f32>) -> Vec<f32> {
     values.into_iter().map(|value| (f64::from(value) * scale + offset) as f32).collect()
 }
 
-/// Шаг выборки растяга по развёрнутым в строку отсчётам.
+/// The stretch sampling step over the samples laid out in a row.
 ///
-/// Взаимно простой с шириной: отсчёты лежат построчно, и шаг, у которого с
-/// шириной есть общий делитель, каждую строку попадает в одни и те же столбцы.
-/// Полоса съёмки этим и опасна — у неё край полосы не измерен вовсе, и выборка
-/// из одних краевых столбцов дала бы растяг по «нет данных», то есть кадр,
-/// растянутый мимо своих значений. Шаг увеличивается, а не уменьшается:
-/// выборка от этого только реже потолка, а реже — это дешевле.
+/// Coprime with the width: the samples lie row by row, and a step sharing a
+/// divisor with the width lands every row in the same columns. The imaging
+/// swath is dangerous in exactly this — its edge is not measured at all, and a
+/// sample of edge columns alone would stretch over "no data", that is, a frame
+/// stretched past its own values. The step grows, never shrinks: the sample
+/// only gets sparser from it, and sparser is cheaper.
 fn sampling_step(len: usize, width: usize) -> usize {
     let mut stride = (len / STRETCH_SAMPLES).max(1);
-    // Ширина ноль или один — разводить не с чем: столбец всего один.
+    // A width of zero or one leaves nothing to separate from: just one column.
     if width < 2 {
         return stride;
     }
@@ -822,105 +851,113 @@ fn sampling_step(len: usize, width: usize) -> usize {
         }
         a
     };
-    // Шаг не длиннее самой плоскости: иначе выборка окажется пустой.
+    // The step is no longer than the plane itself: otherwise the sample would
+    // come out empty.
     while gcd(stride, width) != 1 && stride < len {
         stride += 1;
     }
     stride
 }
 
-/// Растяг показа по выборке величины: те же перцентили, что у широких
-/// TIFF-сэмплов. «Нет данных» в выборку не идёт — иначе метка −9999 утянула бы
-/// нижний край и весь снимок вышел бы белым.
+/// The display stretch over the variable sample: the same percentiles as the
+/// wide TIFF samples. "No data" does not enter the sample — otherwise the
+/// −9999 mark would drag the lower edge and the whole snapshot would come out
+/// white.
 ///
-/// Коэффициенты `scale_factor` и `add_offset` не применяются намеренно:
-/// преобразование это линейное и возрастающее, а растяг считается по
-/// перцентилям тех же значений — в яркость оно не вносит ничего, зато «нет
-/// данных» сравнивается с сырым значением, как оно и записано. Координатам
-/// они, наоборот, нужны — см. [`unpacked`].
+/// The `scale_factor` and `add_offset` coefficients are deliberately not
+/// applied: the transform is linear and increasing, and the stretch is computed
+/// over percentiles of the same values — it brings nothing to brightness, while
+/// "no data" is compared against the raw value, exactly as recorded. The
+/// coordinates, on the contrary, need them — see [`unpacked`].
 fn mapping(path: &str, values: &[f32], fill: Option<f32>) -> Mapping {
     let mut sample: Vec<f32> =
         values.iter().copied().filter(|value| radiometry::is_data(*value, fill)).collect();
     let stretch = percentile_stretch(&mut sample);
 
-    // Числа, по которым кадр вышел таким, а не другим. Без них «белый
-    // прямоугольник» на шаре объясняется только догадками: не видно ни того,
-    // сколько отсчётов оказалось «нет данных», ни того, во что растянулись
-    // остальные.
+    // The numbers by which the frame came out this way and not another. Without
+    // them a "white rectangle" on the globe can only be explained by guesses:
+    // neither how many samples turned out "no data" nor what the rest stretched
+    // into is visible.
     veldsdk::log::debug!(target: "decode",
-        "NetCDF растяг: '{}' — годных {} из {} в выборке, «нет данных» {:?}, растяг {:?}",
+        "NetCDF stretch: '{}' — {} fit of {} in the sample, 'no data' {:?}, stretch {:?}",
         path, sample.len(), values.len(), fill, stretch);
 
     match stretch {
         Some((lo, hi)) => Mapping::stretched(lo, hi, fill),
-        // Ни одного годного значения — растягивать не по чему, и выдумывать
-        // предел нельзя: любой назначенный белит всё, что выше него. Значения
-        // принимаются за байты — то же правило, что у TIFF. Выбранной величине
-        // сюда не попасть: пустую по той же выборке отсеял [`spread`].
+        // Not a single fit value — there is nothing to stretch, and a limit
+        // cannot be invented: any assigned one whitens everything above it. The
+        // values are taken as bytes — the same rule as TIFF. The chosen
+        // variable cannot end up here: an empty one is filtered out by
+        // [`spread`] on the same sample.
         None => Mapping::identity(fill),
     }
 }
 
-// ── Что показывать ─────────────────────────────────────────────
+// ── What to show ─────────────────────────────────────────────
 
-/// Величина файла вместе со всем, что о ней надо знать, чтобы решить, она ли
-/// это. Собирается один раз обходом — заголовки читаются заново дороже, чем
-/// хранятся.
+/// The file's variable together with everything that needs to be known about it
+/// to decide whether it is the one. Collected once by a traversal — headers are
+/// more expensive to re-read than to keep.
 struct Item {
     path: String,
-    /// Группа, в которой величина лежит: в ней же ищутся её координаты.
+    /// The group the variable lies in: its coordinates are looked for there too.
     group: String,
-    /// Сколько групп до корня. Подробности расчёта лежат глубже самой
-    /// величины — см. [`preferred`].
+    /// How many groups to the root. Details of the ordering lie deeper than the
+    /// variable itself — see [`preferred`].
     depth: usize,
-    /// Форма без единичных осей: `Some((строк, столбцов))` только у плоскости.
+    /// The shape without unit axes: `Some((rows, columns))` only for a plane.
     plane: Option<(u32, u32)>,
-    /// Длина, если это одномерный ряд, — по ней узнаётся ось сетки.
+    /// The length, if this is a one-dimensional series — by it a grid axis is
+    /// recognized.
     line: Option<u32>,
-    /// Величина с плавающей точкой.
+    /// The variable is floating-point.
     real: bool,
-    /// Измеряется в угловых градусах — см. [`angular`].
+    /// Measured in angular degrees — see [`angular`].
     angular: bool,
-    /// Годится в показываемые — см. [`preferred`].
+    /// Fit to be shown — see [`preferred`].
     candidate: bool,
     fill: Option<f32>,
-    /// Упаковка величины: `scale_factor` и `add_offset`, как их записал файл.
-    /// Единица и ноль — величина записана как есть.
+    /// The variable's packing: `scale_factor` and `add_offset` as the file
+    /// wrote them. One and zero — the variable is recorded as is.
     ///
-    /// Показу они не нужны (см. [`mapping`]), а координатам нужны обязательно:
-    /// широта пакуется целыми с шагом в миллионную долю градуса, и без
-    /// разупаковки это не градусы, а десятки миллионов.
+    /// The display does not need them (see [`mapping`]), while the coordinates
+    /// must have them: latitude is packed as integers with a step of a
+    /// millionth of a degree, and without unpacking these are not degrees but
+    /// tens of millions.
     packing: (f64, f64),
-    /// `long_name` или `standard_name`, если файл их назвал.
+    /// `long_name` or `standard_name`, if the file named them.
     said: String,
-    /// Что записано в `units`, как записано: смотрящему единицы показываются
-    /// теми же буквами («K»), а сравнения с CF ведутся в нижнем регистре.
+    /// What is written in `units`, as written: the units are shown to the
+    /// viewer in the same letters ("K"), while CF comparisons are done in lower
+    /// case.
     units: String,
-    /// Имена из `coordinates`, разрешённые в пути файла.
+    /// Names from `coordinates`, resolved to file paths.
     coordinates: Vec<String>,
-    /// Имена из `ancillary_variables`, разрешённые в пути файла.
+    /// Names from `ancillary_variables`, resolved to file paths.
     ancillary: Vec<String>,
-    /// Форма величины в файле и оси плоскости в ней (строки, столбцы) — по
-    /// ним окно строк становится регионом (см. [`Layout::region`]).
+    /// The variable's shape in the file and its plane axes in it (rows,
+    /// columns) — by them a row window becomes a region (see
+    /// [`Layout::region`]).
     shape: Vec<u64>,
     axes: (usize, usize),
-    /// Высота чанка файла по оси строк плоскости; `None` — раскладка не
-    /// чанкованная.
+    /// The height of the file chunk along the plane's rows axis; `None` — the
+    /// layout is not chunked.
     chunk_rows: Option<u64>,
 }
 
-/// Обход файла: все величины с их заголовками.
+/// Traversal of the file: all variables with their headers.
 fn survey(file: &File) -> Result<Vec<Item>, String> {
     let mut items = Vec::new();
     walk(file, "", 0, &mut items)?;
     if items.is_empty() {
-        return Err("NetCDF: в файле нет ни одной величины".to_string());
+        return Err("NetCDF: the file holds no variables at all".to_string());
     }
 
-    // Исключаемое видно только целиком: величина попадает под исключение не
-    // своим заголовком, а тем, что на неё сослалась другая. Координаты — это
-    // «где», а не «что»; вспомогательные (`ancillary_variables`) — точность,
-    // качество, время наблюдения: они описывают измерение, а не являются им.
+    // What is excluded is visible only as a whole: a variable falls under the
+    // exclusion not by its own header, but by another one referring to it.
+    // Coordinates are "where", not "what"; auxiliary ones
+    // (`ancillary_variables`) — accuracy, quality, observation time: they
+    // describe the measurement, they are not it.
     let mut named: HashSet<&str> = HashSet::new();
     for item in &items {
         named.extend(item.coordinates.iter().map(String::as_str));
@@ -928,11 +965,11 @@ fn survey(file: &File) -> Result<Vec<Item>, String> {
     }
     let named: HashSet<String> = named.into_iter().map(str::to_string).collect();
     for item in &mut items {
-        // «Где» и «когда» — не «что», даже когда на них никто не сослался:
-        // полоса съёмки Sentinel-5P держит широту с долготой плоскостями рядом
-        // с измерениями, а гранула Sentinel-3 — ещё и время съёмки поотсчётно.
-        // Без этого правила показывалась бы лестница градусов или лестница
-        // микросекунд, и обе — поперёк полосы.
+        // "Where" and "when" are not "what", even when nothing refers to
+        // them: the Sentinel-5P swath holds latitude and longitude as planes
+        // next to the measurements, and the Sentinel-3 granule also holds the
+        // imaging time per sample. Without this rule a ladder of degrees or a
+        // ladder of microseconds would be shown, both across the swath.
         let bearings = northing(item) || easting(item) || timing(item);
         item.candidate = item.plane.is_some() && !bearings && !named.contains(&item.path);
     }
@@ -970,16 +1007,17 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
     let numeric = width_of(&dtype).is_some();
     let attrs = dataset.attrs().unwrap_or_default();
 
-    // Ось координатной сетки — это ряд, а не плоскость; величина — плоскость.
-    // Единичные оси отбрасываются: время у гранулы Sentinel-5P записано осью
-    // длины один, и без этого всякая её величина была бы трёхмерной.
+    // A coordinate grid axis is a series, not a plane; a variable is a plane.
+    // Unit axes are dropped: the time in a Sentinel-5P granule is written as an
+    // axis of length one, and without this every its variable would be
+    // three-dimensional.
     let wide: Vec<usize> =
         shape.iter().enumerate().filter(|(_, side)| **side > 1).map(|(at, _)| at).collect();
     let sides: Vec<u64> = wide.iter().map(|&at| shape[at]).collect();
-    // Оси плоскости в форме файла — две неединичные. Регион читается только у
-    // плоскости (`describe` берёт величину с `plane`), а плоскость — это ровно
-    // две таких оси; координатной оси и величине иного ранга пара не нужна и
-    // ставится любая.
+    // The plane axes in the file's shape are the two non-unit ones. A region is
+    // read only for a plane (`describe` takes a variable with `plane`), and a
+    // plane is exactly two such axes; a coordinate axis and a variable of
+    // another rank need no pair and get any.
     let axes = match wide.as_slice() {
         [rows, columns] => (*rows, *columns),
         _ => (0, shape.len().saturating_sub(1)),
@@ -993,9 +1031,9 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
         _ => None,
     };
 
-    // Величина с `flag_values` — это код состояния, а не измерение: сплошная
-    // лесенка из «море», «облако», «не обработано». Растянуть её в яркость
-    // можно, и получится обман.
+    // A variable with `flag_values` is a state code, not a measurement: a solid
+    // ladder of "sea", "cloud", "not processed". It can be stretched into
+    // brightness, and the result would be a deception.
     let coded = attrs.contains_key("flag_values") || attrs.contains_key("flag_masks");
 
     let said = match text(&attrs, "long_name") {
@@ -1008,8 +1046,8 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
         .map(|name| resolve(group, &name))
         .collect();
 
-    // Чанк файла — наименьшее, что читается, и мерится он по оси строк
-    // плоскости ([`rows_of`]).
+    // The file chunk is the smallest thing that is read, and it is measured
+    // along the plane's rows axis ([`rows_of`]).
     let chunk_rows =
         dataset.chunk_shape().ok().flatten().and_then(|chunk| chunk.get(axes.0).copied());
 
@@ -1037,38 +1075,41 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
     })
 }
 
-/// Какую из годных величин показывать.
+/// Which of the fit variables to show.
 ///
-/// Порядок вопросов — от «что это за файл» к «что в нём главное». Ближе к
-/// корню: подробности расчёта лежат в подгруппах (`SUPPORT_DATA`,
-/// `DETAILED_RESULTS`), а сам продукт — снаружи. С плавающей точкой прежде
-/// целой: целое в CF — это счётчик, код или индекс, а измерение почти всегда
-/// дробное. Дальше по алфавиту, и это не выбор, а определённость: файл больше
-/// ничего о старшинстве не говорит, а показывать всякий раз другое — хуже, чем
-/// показывать всегда одно.
+/// The order of questions runs from "what kind of file is this" to "what is the
+/// main thing in it". Closer to the root: the details of the calculation lie in
+/// subgroups (`SUPPORT_DATA`, `DETAILED_RESULTS`), while the product itself is
+/// outside. Floating-point before integer: in CF an integer is a counter, a
+/// code or an index, and a measurement is almost always fractional. Then by
+/// the alphabet, and that is not a choice but determinacy: the file says
+/// nothing more about seniority, and showing something different every time is
+/// worse than always showing one thing.
 ///
-/// Список, а не один ответ: годность величины видна только по её отсчётам, а
-/// они читаются (см. [`describe`]). Пустая в этой грануле величина — не
-/// измерение этой гранулы, и следующий по порядку кандидат честнее её.
+/// A list, not a single answer: a variable's fitness is visible only by its
+/// samples, and those are read (see [`describe`]). A variable empty in this
+/// granule is not a measurement of this granule, and the next candidate in
+/// order is more honest than it.
 fn preferred(items: &[Item]) -> Vec<&Item> {
-    // Привязываемость спрашивается раз на величину, а не на каждое сравнение:
-    // ответ на неё стои́т обхода всех заголовков файла, а сортировка спросила бы
-    // его столько раз, сколько сравнивает.
+    // Placeability is asked once per variable, not at every comparison: the
+    // answer costs a traversal of all the file's headers, and a sort would ask
+    // it as many times as it compares.
     let mut order: Vec<(bool, &Item)> = items
         .iter()
         .filter(|item| item.candidate)
         .map(|item| (placeable(items, item), item))
         .collect();
     order.sort_by(|(left_placed, left), (right_placed, right)| {
-        // Место старше всего остального, и это не удобство: величина, которой
-        // негде лечь, не изображение этой гранулы, чем бы она ни была измерена.
-        // Спрошенная последней, она побеждает по любому из прочих доводов и
-        // уводит показ в то, что вообще не про Землю: у гранулы Sentinel-5P
-        // уровня 1B так побеждала таблица длин волн прибора — не угловая,
-        // дробная, на той же глубине, что и углы наблюдения.
+        // Place outranks everything else, and that is not a convenience: a
+        // variable with nowhere to lie is not an image of this granule,
+        // whatever it measured. Asked last, it would win over any of the other
+        // arguments and take the display to something not about the Earth at
+        // all: in a Sentinel-5P level 1B granule the instrument wavelength
+        // table won this way — not angular, fractional, at the same depth as
+        // the viewing angles.
         //
-        // Отбором, а не отсевом: файл, не сказавший о месте ничего, показать
-        // всё равно надо — он ляжет по контуру каталога, как и лежал.
+        // By selection, not rejection: a file that said nothing about place
+        // still has to be shown — it lies by the catalogue contour, as it did.
         right_placed
             .cmp(left_placed)
             .then(left.depth.cmp(&right.depth))
@@ -1079,38 +1120,42 @@ fn preferred(items: &[Item]) -> Vec<&Item> {
     order.into_iter().map(|(_, item)| item).collect()
 }
 
-/// Почему показывать нечего — теми же словами, какими решали.
+/// Why there is nothing to show — in the same words the decision was made in.
 fn explain(items: &[Item]) -> String {
     let planes = items.iter().filter(|item| item.plane.is_some()).count();
     match planes {
         0 => format!(
-            "NetCDF: среди {} величин файла нет ни одной двумерной — \
-             это измерения, а не изображение",
+            "NetCDF: among the {} variables of the file there is not a single \
+             two-dimensional one — these are measurements, not an image",
             items.len()
         ),
         _ => format!(
-            "NetCDF: все {} двумерных величин файла — координаты, коды состояния \
-             или точности: измерять по ним нечего",
+            "NetCDF: all {} two-dimensional variables of the file are \
+             coordinates, state codes or accuracies: there is nothing to \
+             measure by them",
             planes
         ),
     }
 }
 
-// ── Где это лежит на Земле ─────────────────────────────────────
+// ── Where this lies on Earth ─────────────────────────────────────
 
-/// Решётка опорных точек показываемой величины.
+/// Tie-point lattice of the displayed variable.
 ///
-/// Двумя путями, и оба — CF. Полоса съёмки несёт широту и долготу поотсчётно, и
-/// величина называет их сама (`coordinates`). Регулярная сетка вместо этого
-/// несёт две оси — ряды широт и долгот, — и узнаются они по единицам измерения
-/// и длине: ось строк ровно такой длины, сколько в растре строк.
+/// Two ways, and both are CF. The imaging swath carries latitude and longitude
+/// per sample, and the variable names them itself (`coordinates`). A regular
+/// grid instead carries two axes — rows of latitudes and longitudes — and they
+/// are recognized by units and length: the rows axis is exactly as long as the
+/// raster has rows.
 ///
-/// Пусто — привязки в файле не нашлось; снимок ляжет по контуру каталога.
+/// Empty — no binding was found in the file; the snapshot lies by the
+/// catalogue contour.
 ///
-/// Вторым уезжает оговорка ([`Info::binding_trouble`]) — и уезжает она ровно
-/// там, где координаты нашлись, а решётки из них не вышло. Пустота без неё
-/// значит «в файле их нет вовсе», и это разные ответы: по первому слой ложится
-/// догадкой из-за нас, по второму — из-за файла.
+/// Second goes the caveat ([`Info::binding_trouble`]) — and it goes exactly
+/// where the coordinates were found but no lattice came out of them. Emptiness
+/// without it means "the file has none at all", and these are different
+/// answers: by the first the layer lies as our guess, by the second — the
+/// file's.
 fn ties(file: &File, items: &[Item], chosen: &Item) -> (Vec<Tie>, Option<String>) {
     let (height, width) = match chosen.plane {
         Some(plane) => plane,
@@ -1121,12 +1166,13 @@ fn ties(file: &File, items: &[Item], chosen: &Item) -> (Vec<Tie>, Option<String>
     }
     let (rows, columns) = ((0, height - 1), (0, width - 1));
 
-    // Отказ здесь произносится вслух, потому что молчащий не отличить от
-    // «координат в файле нет»: у гранулы со сложным контуром и то и другое
-    // кончается снятым слоем, а причины у них разные.
-    // Причина уезжает и в лог, и полем. Одно другого не заменяет: полем её
-    // доносит потребитель и решает по своему слою, показывать ли, а
-    // разбирающему она нужна всегда.
+    // The refusal here is spoken aloud, because a silent one is
+    // indistinguishable from "the file has no coordinates": for a granule with
+    // a complex contour both end with the layer taken down, and their reasons
+    // are different.
+    // The reason goes both to the log and as a field. One does not replace the
+    // other: the consumer carries the field and decides for its own layer
+    // whether to show, while the parser always needs it.
     let said = |why: String| {
         veldsdk::log::warn!(target: "decode", "NetCDF: {}", why);
         Some(why)
@@ -1136,8 +1182,8 @@ fn ties(file: &File, items: &[Item], chosen: &Item) -> (Vec<Tie>, Option<String>
         false => (ties, None),
     };
     if let Some((lat, lon)) = swath_pair(items, chosen) {
-        // Поотсчётные координаты читаются строками узлов (см. [`Rows`]):
-        // полоса съёмки стои́т своих строк узлов, а не плоскости.
+        // Per-sample coordinates are read as rows of nodes (see [`Rows`]): the
+        // imaging swath costs its rows of nodes, not the plane.
         let (north, east) = (Rows::new(file, lat), Rows::new(file, lon));
         let at = |row: u32, column: u32| -> Option<(f64, f64)> {
             Some((north.value(row, column)?, east.value(row, column)?))
@@ -1149,63 +1195,67 @@ fn ties(file: &File, items: &[Item], chosen: &Item) -> (Vec<Tie>, Option<String>
         return told(ties);
     }
     if let Some((lat, lon)) = grid(items, chosen, file) {
-        // Оси одномерные, и негодность у них разделима: негодная широта уносит
-        // всю строку узлов, негодная долгота — весь столбец. Отступ чинит тут
-        // только концы осей, а ось CF с пропуском в середине — сломанный файл.
+        // The axes are one-dimensional, and their badness is separable: a bad
+        // latitude takes out a whole row of nodes, a bad longitude — a whole
+        // column. The footing here fixes only the ends of the axes, and a CF
+        // axis with a gap in the middle is a broken file.
         let at = |row: u32, column: u32| -> Option<(f64, f64)> {
             Some((*lat.get(row as usize)?, *lon.get(column as usize)?))
         };
         return told(lattice(rows, columns, Seating::SAME, at));
     }
-    // Координат не нашлось вовсе — и это тоже ответ, а не молчание: у величины,
-    // снятой не над Землёй (калибровочная таблица прибора, спектральная ось),
-    // их не бывает, и «привязки нет» без имени величины разбирать не по чему.
+    // No coordinates were found at all — and that is an answer too, not
+    // silence: for a variable not measured over the Earth (an instrument
+    // calibration table, a spectral axis) there are none, and "no binding"
+    // without the variable name cannot be dissected.
     (
         Vec::new(),
         said(format!(
-            "координат для '{}' не нашлось: ни поотсчётных в её группе, ни осей длиной {} и {}",
+            "no coordinates for '{}': neither per-sample in its group nor axes of length {} and {}",
             chosen.path, height, width
         )),
     )
 }
 
-/// Узлы нашлись, а решётки из них не вышло. Текст один на оба места, где это
-/// случается, — у своей сетки и у соседнего файла: вопрос у смотрящего один, и
-/// две формулировки читались бы как две разные беды.
+/// The nodes were found, but no lattice came out of them. One text for both
+/// places where this happens — at one's own grid and at the neighbour file:
+/// the viewer has one question, and two wordings would read as two different
+/// troubles.
 fn nodes_unfit(width: u32, height: u32) -> String {
-    format!("узлы сетки {}×{} не годятся в привязку", width, height)
+    format!("grid nodes {}×{} do not fit a binding", width, height)
 }
 
-/// Отсчёт прибора, в котором записана решётка файла: с какого её узла файл
-/// начинается и сколько метров в ячейке.
+/// Instrument frame the file's lattice is recorded in: which of its nodes the
+/// file starts from and how many metres are in a cell.
 ///
-/// Sentinel-3 объявляет это глобальными атрибутами: `track_offset` и
-/// `start_offset` — номера узлов общей решётки съёмки, попавшие в первый
-/// столбец и в первую строку файла, `resolution` — метры поперёк трека и вдоль
-/// него. Растр и его поотсчётные координаты стоят в одном отсчёте, а опорная
-/// сетка — в своём, и без этих чисел одно с другим не сходится (см.
-/// [`seating`]).
+/// Sentinel-3 declares this in global attributes: `track_offset` and
+/// `start_offset` are the node numbers of the common imaging lattice that fell
+/// into the first column and the first row of the file, `resolution` is metres
+/// across the track and along it. The raster and its per-sample coordinates
+/// stand in one frame, while the tie grid stands in its own, and without these
+/// numbers the two do not match (see [`seating`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Frame {
-    /// `track_offset` — столбец файла, в котором стои́т надир, то есть начало
-    /// отсчёта поперёк трека. Поперечная координата столбца `j` — это
-    /// `(j − track_offset) · across`.
+    /// `track_offset` — the file column holding the nadir, that is the start of
+    /// the sample across the track. The across-track coordinate of column `j`
+    /// is `(j − track_offset) · across`.
     pub across_at: f64,
-    /// `start_offset` — номер первой строки файла в сквозном счёте витка.
-    /// Отсчитывается он **от начала витка, а не от начала файла**, и потому
-    /// входит в координату с обратным знаком: продольная координата строки `i`
-    /// — это `(start_offset + i) · along`. Одинаковые с виду, два смещения
-    /// сложенные по одному правилу расходятся на целую ячейку — у
-    /// полукилометровой сетки SLSTR это километр вдоль трека.
+    /// `start_offset` — the number of the file's first row in the continuous
+    /// orbit count. It is counted **from the start of the orbit, not from the
+    /// start of the file**, and therefore enters the coordinate with the
+    /// opposite sign: the along-track coordinate of row `i` is
+    /// `(start_offset + i) · along`. Looking alike, the two offsets combined by
+    /// one rule drift a whole cell apart — on the half-kilometre SLSTR grid that
+    /// is a kilometre along the track.
     pub along_at: f64,
-    /// Метры в ячейке поперёк трека.
+    /// Metres in a cell across the track.
     pub across: f64,
-    /// Метры в ячейке вдоль трека.
+    /// Metres in a cell along the track.
     pub along: f64,
 }
 
-/// Посадка координатной сетки на растр: сколько пикселей приходится на узел и
-/// на каком пикселе стои́т нулевой узел.
+/// Seating of the coordinate lattice on the raster: how many pixels per node
+/// and at which pixel the zero node stands.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Seating {
     step: (f64, f64),
@@ -1213,18 +1263,18 @@ struct Seating {
 }
 
 impl Seating {
-    /// Отсчёт в отсчёт: узел и есть пиксель.
+    /// Sample for sample: the node is the pixel.
     const SAME: Seating = Seating { step: (1.0, 1.0), origin: (0.0, 0.0) };
 }
 
-/// Глобальные атрибуты файла — те, что записаны у корневой группы. Ими
-/// Sentinel-3 говорит о решётке, на которой лежит всё содержимое.
+/// The file's global attributes — the ones recorded at the root group. With
+/// them Sentinel-3 speaks about the lattice everything in it lies on.
 fn globals(file: &File) -> HashMap<String, AttrValue> {
     file.root().attrs().unwrap_or_default()
 }
 
-/// Отсчёт прибора из глобальных атрибутов. `None` — упаковка о нём не
-/// говорит, и выводить его не из чего.
+/// Instrument frame from global attributes. `None` — the packing says nothing
+/// about it, and there is nothing to derive it from.
 fn frame(attrs: &HashMap<String, AttrValue>) -> Option<Frame> {
     let (across, along) = resolution(&text(attrs, "resolution"))?;
     Some(Frame {
@@ -1235,19 +1285,21 @@ fn frame(attrs: &HashMap<String, AttrValue>) -> Option<Frame> {
     })
 }
 
-/// Подвыборка опорной сетки — второй словарь, которым продукт называет ту же
-/// связь: сколько пикселей растра приходится на узел поперёк трека и вдоль.
+/// Tie grid subsampling — the second vocabulary the product names the same
+/// relation with: how many raster pixels per node across the track and along.
 fn subsampling(attrs: &HashMap<String, AttrValue>) -> Option<(f64, f64)> {
     let read = |name: &str| Some(f64::from(number(attrs.get(name)?)?));
     Some((read("ac_subsampling_factor")?, read("al_subsampling_factor")?))
 }
 
-/// `resolution` записан строкой: `[ 16000 1000 ]` — поперёк трека и вдоль него.
+/// `resolution` is written as a string: `[ 16000 1000 ]` — across the track and
+/// along it.
 ///
-/// Число вынимается целиком и обязано разобраться целиком: дробное, показанное
-/// степенью, со знаком — всё это законные записи числа, а `1.2.3` не число
-/// вовсе. Резать строку по цифрам нельзя: `1.5` распалось бы на единицу и
-/// пятёрку, и обе прошли бы дальше как правдоподобные разрешения.
+/// The number is taken whole and must parse whole: fractional, written with an
+/// exponent, signed — all of these are legitimate number records, while
+/// `1.2.3` is not a number at all. The string must not be cut by digits: `1.5`
+/// would fall apart into one and five, and both would pass on as plausible
+/// resolutions.
 fn resolution(said: &str) -> Option<(f64, f64)> {
     let mut numbers = said
         .split(|sign: char| !matches!(sign, '0'..='9' | '.' | '-' | '+' | 'e' | 'E'))
@@ -1258,16 +1310,17 @@ fn resolution(said: &str) -> Option<(f64, f64)> {
     (sane(across) && sane(along)).then_some((across, along))
 }
 
-/// Накрывает ли посаженная сетка растр — с точностью до ячейки.
+/// Whether the seated lattice covers the raster — to within a cell.
 ///
-/// Прочитанное тоже надо сверить с тем, что видно: атрибут бывает не про эту
-/// пару файлов. У OLCI, например, `resolution` одинаков и у поотсчётного, и у
-/// опорного файла — он свойство продукта, — и отношение разрешений дало бы
-/// шестнадцатикратно разрежённой сетке шаг единица. Такая сетка накрыла бы
-/// шестнадцатую долю снимка, и здесь это видно.
+/// What is read must also be checked against what is visible: the attribute can
+/// belong to not this pair of files. At OLCI, for example, `resolution` is the
+/// same in the per-sample and the tie file — it is a product property — and the
+/// ratio of resolutions would give a sixteen-times sparser lattice a step of
+/// one. Such a lattice would cover a sixteenth of the image, and here that is
+/// visible.
 ///
-/// Допуск — ячейка: край сетки не обязан приходиться ровно на край растра, но
-/// не дотянуться до него больше чем на шаг он не может.
+/// The tolerance is a cell: the lattice edge need not land exactly on the
+/// raster edge, but it cannot fall short of it by more than a step.
 fn covers(seat: Seating, (width, height): (u32, u32), (geo_w, geo_h): (u32, u32)) -> bool {
     let axis = |step: f64, origin: f64, nodes: u32, side: u32| {
         let last = origin + step * f64::from(nodes - 1);
@@ -1276,31 +1329,33 @@ fn covers(seat: Seating, (width, height): (u32, u32), (geo_w, geo_h): (u32, u32)
     axis(seat.step.0, seat.origin.0, geo_w, width) && axis(seat.step.1, seat.origin.1, geo_h, height)
 }
 
-/// Как сетка `geo_w`×`geo_h` садится на растр `width`×`height`.
+/// How the lattice `geo_w`×`geo_h` sits on the raster `width`×`height`.
 ///
-/// Порядок ответов — от прочитанного к выведенному, и он обязателен.
+/// The order of answers runs from read to derived, and it is binding.
 ///
-/// **Отсчёт прибора, названный обоими файлами**, отвечает первым: шаг —
-/// отношение разрешений, начало — смещение растра минус смещение сетки, взятое
-/// тем же шагом. Так говорит о себе SLSTR, и только так его опорная решётка
-/// `tx` садится куда следует: она шире снимка с обеих сторон, и начало уезжает
-/// то на 26 столбцов влево (сетка `in`), то на 52 (полукилометровая `an`), то
-/// на 574 (косой обзор `fo`).
+/// **The instrument frame named by both files** answers first: the step is the
+/// ratio of resolutions, the origin is the raster offset minus the lattice
+/// offset, taken at the same step. That is how SLSTR speaks of itself, and only
+/// so does its tie lattice `tx` sit where it should: it is wider than the image
+/// on both sides, and the origin drifts 26 columns to the left (the `in`
+/// lattice), then 52 (the half-kilometre `an`), then 574 (the oblique view
+/// `fo`).
 ///
-/// **Сетка размером с растр** садится отсчёт в отсчёт. Это вывод, а не
-/// прочитанное, и потому вторым ответом: отсчёт прибора, если он назван, знает
-/// точнее.
+/// **A lattice the size of the raster** sits sample for sample. That is a
+/// derivation, not something read, and therefore the second answer: the
+/// instrument frame, if it is named, knows better.
 ///
-/// **Подвыборка** — последней, и обязана сойтись с размерами.
-/// `ac_subsampling_factor` описывает опорную сетку *продукта*, а не тот файл, в
-/// котором записан: у OLCI его несёт и поотсчётный `geo_coordinates.nc`.
-/// Спрошенная раньше размеров, она растянула бы поотсчётную сетку в
-/// шестнадцать раз.
+/// **Subsampling** — last, and it must match the sizes.
+/// `ac_subsampling_factor` describes the tie lattice of the *product*, not the
+/// file it is recorded in: at OLCI the per-sample `geo_coordinates.nc` carries
+/// it too. Asked before the sizes, it would stretch the per-sample lattice
+/// sixteen times.
 ///
-/// **Ничего не сказано — отказ.** Посадка, выведенная из одних размеров, молчит
-/// ровно там, где ошибается: крайний узел решётки `tx` приходится на столбец
-/// 2038 растра шириной 1500, и такой вывод растянул бы снимок поперёк трека в
-/// 1,38 раза. По контуру каталога он ляжет хотя бы примерно верно.
+/// **Nothing said — refusal.** A seating derived from sizes alone is silent
+/// exactly where it errs: the outermost node of the `tx` lattice lands on
+/// column 2038 of a raster 1500 wide, and such a derivation would stretch the
+/// image across the track by 1.38 times. By the catalogue contour it lies at
+/// least roughly right.
 fn seating(
     raster: Option<Frame>,
     grid: Option<Frame>,
@@ -1312,8 +1367,8 @@ fn seating(
         let step = (grid.across / raster.across, grid.along / raster.along);
         let seat = Seating {
             step,
-            // Знаки разные, и это не описка: см. [`Frame::across_at`] и
-            // [`Frame::along_at`].
+            // The signs differ, and that is not a typo: see [`Frame::across_at`]
+            // and [`Frame::along_at`].
             origin: (
                 raster.across_at - step.0 * grid.across_at,
                 step.1 * grid.along_at - raster.along_at,
@@ -1321,7 +1376,7 @@ fn seating(
         };
         return covers(seat, (width, height), (geo_w, geo_h)).then_some(seat).ok_or_else(|| {
             format!(
-                "сетка {}×{}, посаженная шагом {:.2}×{:.2} от {:+.1}×{:+.1}, не накрывает растр {}×{}",
+                "lattice {}×{}, seated at step {:.2}×{:.2} from {:+.1}×{:+.1}, does not cover raster {}×{}",
                 geo_w, geo_h, seat.step.0, seat.step.1, seat.origin.0, seat.origin.1, width, height
             )
         });
@@ -1330,9 +1385,9 @@ fn seating(
         return Ok(Seating::SAME);
     }
     if let Some((across, along)) = subsampled {
-        // Сойтись с размерами обязано с точностью до пикселя: разошедшееся
-        // здесь значит, что подвыборка не про эту пару, и посадка вышла бы
-        // такой же молчаливой, как выведенная из размеров.
+        // It must match the sizes to within a pixel: a mismatch here means the
+        // subsampling is not about this pair, and the seating would come out as
+        // silent as one derived from sizes.
         let spans = |step: f64, nodes: u32, side: u32| {
             step > 0.0 && (f64::from(nodes - 1) * step - f64::from(side - 1)).abs() < 1.0
         };
@@ -1340,37 +1395,41 @@ fn seating(
             return Ok(Seating { step: (across, along), origin: (0.0, 0.0) });
         }
         return Err(format!(
-            "подвыборка {}×{} не сходится с сеткой {}×{} на растре {}×{}",
+            "subsampling {}×{} does not match lattice {}×{} over raster {}×{}",
             across, along, geo_w, geo_h, width, height
         ));
     }
     Err(format!(
-        "сетка {}×{} реже растра {}×{}, а чем она с ним связана, файл не говорит",
+        "lattice {}×{} is sparser than raster {}×{}, and the file says nothing about how it relates to it",
         geo_w, geo_h, width, height
     ))
 }
 
-/// Отрезок отсчётов, на котором стои́т решётка: первый и последний, включительно.
+/// The stretch of samples the lattice stands on: the first and the last, inclusive.
 type Span = (u32, u32);
 
-/// Узлов на стороне: по одному на каждые [`NODE_STEP`] отсчётов, но не меньше
-/// [`TIE_GRID`], не больше [`TIE_CAP`] и не больше самих отсчётов.
+/// Nodes per side: one for every [`NODE_STEP`] samples, but not fewer than
+/// [`TIE_GRID`], not more than [`TIE_CAP`] and not more than the samples
+/// themselves.
 ///
-/// По стороне, а не одним числом на обе: гранула вытянута вдоль витка, и одна
-/// константа значит у неё десятки отсчётов между узлами поперёк трека и сотни
-/// вдоль. Пол нужен коротким сторонам — у сетки в две сотни отсчётов шаг дал бы
-/// четыре узла, то есть углы, а не решётку. Зажим по самим отсчётам — сторонам
-/// короче пола: повторившийся узел развалил бы решётку у потребителя, там оси
-/// собираются из различных долей (`Grid::new`).
+/// Per side, not one number for both: the granule is stretched along the orbit,
+/// and a single constant would mean for it dozens of samples between nodes
+/// across the track and hundreds along. The floor is needed by short sides —
+/// for a grid of two hundred samples the step would give four nodes, that is
+/// corners, not a lattice. The clamp by the samples themselves is for sides
+/// shorter than the floor: a repeated node would break the lattice at the
+/// consumer, where the axes are assembled from different fractions
+/// (`Grid::new`).
 fn count(side: u32) -> u32 {
     ((side - 1) / NODE_STEP + 1).clamp(TIE_GRID, TIE_CAP).min(side)
 }
 
-/// Узлы по одной оси: индексы отсчётов, на которых стоят опорные точки.
+/// Nodes along one axis: the sample indices the tie points stand on.
 ///
-/// Отрезок задаётся концами включительно — решётка стои́т не обязательно на всей
-/// стороне (см. [`footing`]). Отрезок в один отсчёт узлов не даёт: делить на
-/// число промежутков было бы не на что.
+/// The stretch is given by its ends inclusive — the lattice does not
+/// necessarily stand on the whole side (see [`footing`]). A stretch of one
+/// sample gives no nodes: there would be nothing to divide by the number of
+/// gaps.
 fn nodes(from: u32, to: u32) -> Vec<u32> {
     if to <= from {
         return Vec::new();
@@ -1384,71 +1443,75 @@ fn nodes(from: u32, to: u32) -> Vec<u32> {
         .collect()
 }
 
-/// На чём стои́т решётка: отступ от края, уводящий её узлы с незаполненных
-/// отсчётов.
+/// What the lattice stands on: a retreat from the edge that moves its nodes off
+/// unfilled samples.
 ///
-/// Дыры у координатной сетки лежат по краю — за полосой съёмки координат не
-/// пишут вовсе, и край бывает рваный. Решётка на всю сторону ловит такой край
-/// узлом, а выломать узел нельзя: потребителю нужен полный прямоугольник
-/// (`Grid::new`), и решётка без одного узла не соберётся вовсе. Значит чинится это
-/// отступом — решётка остаётся прямоугольной, просто стои́т на меньшем отрезке и
-/// оттого гуще. Линий у неё столько же, пока отрезок длиннее числа узлов; на
-/// отрезке короче узел приходится на каждый отсчёт, и линия при отступе
-/// теряется.
+/// Holes in the coordinate lattice lie along the edge — outside the imaging
+/// swath no coordinates are written at all, and the edge can be ragged. A
+/// lattice over the whole side catches such an edge with a node, and a node
+/// cannot be knocked out: the consumer needs a full rectangle (`Grid::new`),
+/// and a lattice missing one node does not assemble at all. So this is fixed by
+/// a retreat — the lattice stays rectangular, just stands on a shorter stretch
+/// and is denser for it. It keeps as many lines while the stretch is longer
+/// than the node count; on a stretch shorter than that a node lands on every
+/// sample, and a line is lost to the retreat.
 ///
-/// Ход выбирается в два приёма, и порядок между ними важен.
+/// The move is chosen in two stages, and the order between them matters.
 ///
-/// **Убавляющий шаг берётся, откуда бы он ни шёл** — в том числе с чистой
-/// стороны: узлы перекладываются по новому отрезку целиком, и сдвиг границы на
-/// один отсчёт уводит с дефекта всю ось. Сплошной негодный столбец, попавший
-/// ровно на узловой, чинится только так — негодны по одному узлу на первой и
-/// последней строке решётки, и по грязи отступали бы строки, где помочь нечем.
+/// **A helping step is taken wherever it comes from** — including from a clean
+/// side: the nodes are re-laid over the new stretch as a whole, and shifting
+/// the boundary by one sample moves the whole axis off the defect. A solid bad
+/// column landing exactly on a node column is fixed only this way — one node on
+/// the first and last row of the lattice is bad, and a dirt-driven retreat
+/// would abandon rows where it helps nothing.
 ///
-/// **Убавляющего нет — идёт грязнейшая сторона.** Это марш через сплошную
-/// полосу негодного: пока решётка стои́т в ней целиком, ни один шаг ничего не
-/// убавляет, и пройти её можно только по отсчёту за раз. Выбирать здесь по
-/// «останется меньше» нельзя — на ровном месте выбор падал бы на чистую
-/// сторону, и бюджет утекал бы в шаги, которые не приближают ни к чему. Чистая
-/// сторона идёт только тогда, когда грязных нет вовсе: негодное лежит внутри
-/// решётки, и увести с него узлы может лишь перекладка.
+/// **No helping step — the dirtiest side goes.** That is a march through a
+/// solid band of badness: while the lattice stands wholly inside it, no step
+/// reduces anything, and it can only be crossed one sample at a time. Choosing
+/// here by "fewer left" is not allowed — on level ground the choice would fall
+/// on the clean side, and the budget would leak into steps that approach
+/// nothing. The clean side goes only when there are no dirty ones at all: the
+/// badness lies inside the lattice, and only a re-laying can move nodes off it.
 ///
-/// Бюджет — **мельчайший** шаг решётки, и он же ограничивает счёт шагов: каждой
-/// стороне отпущено не больше него, всего не больше четырежды. Мельчайший из
-/// двух, а не свой у каждой оси: гранула вытянута вдоль витка, шаг решётки по
-/// строкам у неё в сотни отсчётов, и отступ по такой мерке бросал бы сотни
-/// километров трека. За краем решётки координаты продолжаются прямой
-/// (`Grid::cell`), так что бросать можно только то, чего решётка и так не
-/// различает.
+/// The budget is the **smallest** lattice step, and it also caps the step
+/// count: each side is given no more than it, four steps in total no more. The
+/// smallest of the two, not one per axis: the granule is stretched along the
+/// orbit, the lattice step along its rows is hundreds of samples, and a retreat
+/// on that measure would abandon hundreds of kilometres of track. Beyond the
+/// lattice edge the coordinates continue in a straight line (`Grid::cell`), so
+/// only what the lattice cannot tell apart may be abandoned.
 ///
-/// `None` — идти некуда: бюджет вышел, либо негодного нет ни на одной стороне,
-/// а убавить его нечем. Дыра посреди решётки отступом не чинится.
+/// `None` — there is nowhere to go: the budget is spent, or there is no
+/// badness on any side and nothing to reduce it with. A hole in the middle of
+/// the lattice is not fixed by a retreat.
 ///
-/// **Отступ находится не всегда, и это выбор, а не недосмотр.** Правило жадное
-/// и смотрит на шаг вперёд, а марш идёт по грязи, не глядя на остаток, — то
-/// есть шаг марша бывает в убыток: дыр после него больше, чем до. На краевой
-/// дыре, ради которой правило и написано, это выигрыш: у настоящей маски
-/// SYNERGY AOD с одним добавленным негодным столбцом выбор по «останется
-/// меньше» бросает 31 строку и 13 столбцов годных данных на 44 лишних шага, а
-/// выбор по грязи не бросает ничего. На разреженной россыпи бывает наоборот —
-/// есть расстановки в девять точек, где убыточный шаг стои́т всей привязки.
-/// Одной меркой на оба класса не угодить, и взята та, что чаще: краевыми
-/// дырами болеют съёмочные продукты, россыпью — никакой из виденных.
+/// **A retreat is not always found, and that is a choice, not an oversight.**
+/// The rule is greedy and looks one step ahead, while the march goes through
+/// dirt without looking at the remainder — that is, a march step can run at a
+/// loss: more holes after it than before. On the edge hole the rule is written
+/// for this is a win: on a real SYNERGY AOD mask with one added bad column, a
+/// "fewer left" choice abandons 31 rows and 13 columns of fit data for 44
+/// extra steps, while the dirt-driven choice abandons nothing. On a sparse
+/// scatter it happens the other way — there are arrangements of nine points
+/// where a lossy step costs the whole binding. One measure cannot suit both
+/// classes, and the more common one is taken: imaging products suffer from edge
+/// holes, scatter — none of those seen.
 ///
-/// Отказ здесь стои́т ровно того же, чего стоил бы он без отступа вовсе, а
-/// искать дальше значит перебирать прямоугольники: их `(бюджет + 1)⁴`, и у
-/// сетки OLCI это четырнадцать миллионов.
+/// A refusal here costs exactly what it would cost with no retreat at all, and
+/// searching further means enumerating rectangles: there are `(budget + 1)⁴` of
+/// them, and for the OLCI grid that is fourteen million.
 fn footing(rows: Span, columns: Span, sound: impl Fn(u32, u32) -> bool) -> Option<(Span, Span)> {
-    // Шаг решётки у каждой оси свой (см. [`count`]), а бюджетом идёт мельчайший
-    // из двух. Считается он по самим узлам, а не по их числу заново: два вывода
-    // одного правила разошлись бы на первой же правке, и бюджет перестал бы
-    // совпадать с настоящим шагом.
+    // Each axis has its own lattice step (see [`count`]), and the budget is the
+    // smallest of the two. It is computed from the nodes themselves, not from
+    // their count anew: two derivations of one rule would drift at the first
+    // edit, and the budget would stop matching the real step.
     let step = |span: Span| match nodes(span.0, span.1).len() {
         more_than_one if more_than_one > 1 => (span.1 - span.0) / (more_than_one as u32 - 1),
         _ => 0,
     };
     let budget = step(rows).min(step(columns));
-    // Стороны по порядку: первая строка, последняя строка, первый столбец,
-    // последний столбец.
+    // The sides in order: the first row, the last row, the first column, the
+    // last column.
     let step = |side: usize, rows: Span, columns: Span| match side {
         0 => ((rows.0 + 1, rows.1), columns),
         1 => ((rows.0, rows.1 - 1), columns),
@@ -1497,31 +1560,31 @@ fn footing(rows: Span, columns: Span, sound: impl Fn(u32, u32) -> bool) -> Optio
     }
 }
 
-/// Решётка из узлов, стоящая на отрезках, которые нашёл [`footing`]. Пусто —
-/// привязки не вышло: решётка с дырой уложила бы снимок куда попало, а у
-/// гранулы со сложным контуром слой на этом и кончается ошибкой (см.
-/// `globe::module::on_described`).
+/// A lattice of nodes standing on the stretches [`footing`] found. Empty — no
+/// binding came out: a lattice with a hole would lay the snapshot anywhere, and
+/// for a granule with a complex contour the layer ends on this with an error
+/// (see `globe::module::on_described`).
 ///
-/// Узел стои́т в середине отсчёта (+0.5): широта записана для центра пикселя, а
-/// не для его угла.
+/// A node stands in the middle of the sample (+0.5): latitude is written for
+/// the centre of the pixel, not its corner.
 ///
-/// `seat` — как узлы сетки садятся на пиксели растра (см. [`seating`]).
+/// `seat` — how the lattice nodes sit on the raster pixels (see [`seating`]).
 fn lattice(
     rows: Span,
     columns: Span,
     seat: Seating,
     at: impl Fn(u32, u32) -> Option<(f64, f64)>,
 ) -> Vec<Tie> {
-    // Одно и то же замыкание спрашивается дважды — отступом и сборкой, — и
-    // отвечать на один и тот же довод обязано одинаково: годность узлов
-    // проверил отступ, и второй раз она не спрашивается.
+    // The same closure is asked twice — by the footing and by the assembly —
+    // and it must answer the same argument the same way: the footing checked
+    // the nodes' fitness, and it is not asked a second time.
     let sound = |row: u32, column: u32| at(row, column).is_some_and(|(lat, lon)| placed(lat, lon));
     let Some((stand_rows, stand_columns)) = footing(rows, columns, sound) else {
         return Vec::new();
     };
     if (stand_rows, stand_columns) != (rows, columns) {
         veldsdk::log::debug!(target: "decode",
-            "NetCDF: решётка отступила от края — строки {}…{} из {}…{}, столбцы {}…{} из {}…{}",
+            "NetCDF: the lattice retreated from the edge — rows {}…{} of {}…{}, columns {}…{} of {}…{}",
             stand_rows.0, stand_rows.1, rows.0, rows.1,
             stand_columns.0, stand_columns.1, columns.0, columns.1);
     }
@@ -1529,8 +1592,9 @@ fn lattice(
     let mut ties = Vec::with_capacity(r.len() * c.len());
     for &row in &r {
         for &column in &c {
-            // Годность узлов обеспечил отступ — здесь остаётся только край
-            // прочитанного: не дотянулся до отсчёта, значит решётки нет.
+            // The footing ensured the nodes' fitness — here only the edge of
+            // the read remains: if it did not reach the sample, there is no
+            // lattice.
             let Some((lat, lon)) = at(row, column) else { return Vec::new() };
             ties.push(Tie {
                 px: f64::from(column) * seat.step.0 + seat.origin.0 + 0.5,
@@ -1543,19 +1607,21 @@ fn lattice(
     ties
 }
 
-/// Пара поотсчётных координат величины — по заголовкам, без единого
-/// прочитанного отсчёта.
+/// The pair of per-sample coordinates of a variable — from the headers, without
+/// a single sample read.
 ///
-/// Названное `coordinates` — первый ответ: файл сам сказал, где лежат его
-/// отсчёты, и спорить тут не с чем. Не сказал — спрашиваем единицы: плоскость в
-/// `degrees_north` той же формы и той же группы и есть широта этого измерения.
-/// Так лежит `.nc` внутри `.SAFE`: упаковка там своя, CF-атрибута `coordinates`
-/// у измерений нет вовсе, а широта с долготой лежат рядом и названы единицами.
+/// What `coordinates` names is the first answer: the file itself said where its
+/// samples lie, and there is nothing to argue with. If it did not — the units
+/// are asked: a plane in `degrees_north` of the same shape and the same group
+/// is the latitude of this measurement. That is how the `.nc` lies inside a
+/// `.SAFE`: the packing there is its own, the CF attribute `coordinates` is
+/// absent from the measurements altogether, and the latitude and longitude lie
+/// nearby and are named by their units.
 ///
-/// Единственность обязательна: две широты одной формы — это уже вопрос
-/// «которая», а ответа на него у файла нет. Гранула SLSTR держит их несколько
-/// (`latitude_in`, `latitude_tx`), но разной формы, и под это условие они не
-/// подпадают.
+/// Uniqueness is mandatory: two latitudes of one shape is already a question of
+/// "which", and the file has no answer to it. An SLSTR granule holds several
+/// (`latitude_in`, `latitude_tx`), but of different shapes, and they do not
+/// fall under this condition.
 fn swath_pair<'a>(items: &'a [Item], chosen: &Item) -> Option<(&'a Item, &'a Item)> {
     let named: Vec<&Item> = chosen
         .coordinates
@@ -1581,8 +1647,9 @@ fn swath_pair<'a>(items: &'a [Item], chosen: &Item) -> Option<(&'a Item, &'a Ite
     Some((lat, lon))
 }
 
-/// Оси регулярной сетки: ряды широт и долгот той же длины, что стороны растра.
-/// Ищутся в группе величины и в корне — там их и держит CF.
+/// Axes of a regular grid: rows of latitudes and longitudes of the same length
+/// as the raster sides. Looked for in the variable's group and in the root —
+/// that is where CF keeps them.
 fn grid_axes<'a>(items: &'a [Item], chosen: &Item) -> Option<(&'a Item, &'a Item)> {
     let (height, width) = chosen.plane?;
     let nearby = |item: &Item| item.group == chosen.group || item.group.is_empty();
@@ -1591,18 +1658,21 @@ fn grid_axes<'a>(items: &'a [Item], chosen: &Item) -> Option<(&'a Item, &'a Item
     Some((lat, lon))
 }
 
-/// Есть ли у величины оси земли — то есть выражено ли в файле её место вообще.
+/// Whether the variable has earth axes — that is, whether its place is
+/// expressed in the file at all.
 ///
-/// Тем же кодом, каким координаты потом и берутся: вторая мерка того же самого
-/// разошлась бы с первой молча — величину выбрали бы как привязываемую, а
-/// привязки у неё не оказалось бы. Отвечает по заголовкам, ни одного отсчёта не
-/// читая: форма и единицы записаны рядом с именем.
+/// The same code the coordinates are later taken with: a second measure of the
+/// same thing would drift from the first silently — the variable would be
+/// chosen as bindable while having no binding. It answers from the headers,
+/// reading not a single sample: the shape and the units are written next to the
+/// name.
 fn placeable(items: &[Item], chosen: &Item) -> bool {
     swath_pair(items, chosen).is_some() || grid_axes(items, chosen).is_some()
 }
 
-/// Оси регулярной сетки: ряды широт и долгот той же длины, что стороны растра.
-/// Ищутся в группе величины и в корне — там их и держит CF.
+/// Axes of a regular grid: rows of latitudes and longitudes of the same length
+/// as the raster sides. Looked for in the variable's group and in the root —
+/// that is where CF keeps them.
 fn grid(items: &[Item], chosen: &Item, file: &File) -> Option<(Vec<f64>, Vec<f64>)> {
     let (lat, lon) = grid_axes(items, chosen)?;
     let read = |item: &Item| {
@@ -1613,14 +1683,14 @@ fn grid(items: &[Item], chosen: &Item, file: &File) -> Option<(Vec<f64>, Vec<f64
     Some((read(lat)?, read(lon)?))
 }
 
-/// Время съёмки — «когда», а не «что», и правило то же, что у широты с
-/// долготой: плоскость времени лежит рядом с измерениями, а растягивается в
-/// ровную лесенку поперёк полосы.
+/// Imaging time — "when", not "what", and the rule is the same as for latitude
+/// and longitude: the time plane lies next to the measurements and stretches
+/// into a smooth ladder across the swath.
 ///
-/// Узнаётся по первому слову единиц. CF пишет время как «<единица> since
-/// <момент>», упаковки Sentinel-3 обходятся одной единицей («microseconds»,
-/// а «с какого мига» написано словами в `long_name`), — ловится и то, и
-/// другое. По первому слову, а не по вхождению: «m s-1» — это скорость.
+/// Recognized by the first word of the units. CF writes time as "<unit> since
+/// <moment>", the Sentinel-3 packings get by with a single unit
+/// ("microseconds", and "since when" is written in words in `long_name`) —
+/// both are caught. By the first word, not by occurrence: "m s-1" is a speed.
 fn timing(item: &Item) -> bool {
     matches!(
         item.units.split_whitespace().next().unwrap_or_default().to_ascii_lowercase().as_str(),
@@ -1635,23 +1705,26 @@ fn timing(item: &Item) -> bool {
     )
 }
 
-/// Угловая величина: направление ветра, зенит солнца, азимут наблюдения.
+/// An angular quantity: wind direction, solar zenith, viewing azimuth.
 ///
-/// Яркостью такое не показывается, и дело не в красоте. Угол замкнут: 359° и
-/// 1° — соседи, а растяг перцентилей разводит их по краям шкалы, и ровное поле
-/// направления выходит белым с чёрным клином на месте оборота. Угол наблюдения
-/// — и вовсе не измерение, а геометрия съёмки: ровная лесенка поперёк полосы.
+/// Such a thing is not shown as brightness, and it is not about beauty. An
+/// angle is closed: 359° and 1° are neighbours, while a percentile stretch
+/// pulls them to the ends of the scale, and a flat direction field comes out
+/// white with a black wedge at the wrap-around. A viewing angle is not a
+/// measurement at all, but imaging geometry: a smooth ladder across the swath.
 ///
-/// Поэтому такая величина идёт последней среди годных (см. [`preferred`]), но
-/// не выбрасывается: если ничего другого в файле нет, показать её честнее, чем
-/// промолчать. Широта с долготой сюда не попадают — их отбирают раньше и по
-/// своим единицам (`degrees_north`, `degrees_east`).
+/// Therefore such a variable goes last among the fit ones (see [`preferred`]),
+/// but is not discarded: if the file has nothing else, showing it is more
+/// honest than staying silent. Latitude and longitude do not get here — they
+/// are filtered out earlier and by their own units (`degrees_north`,
+/// `degrees_east`).
 fn angular(units: &str) -> bool {
     matches!(units.trim(), "degrees" | "degree" | "deg" | "degrees_t" | "radians" | "rad")
 }
 
-/// Широта ли это. По единицам измерения — так CF велит их и записывать; имя
-/// величины при этом бывает любым (`lat`, `latitude`, `LATITUDE`).
+/// Whether this is latitude. By the units of measurement — that is how CF
+/// orders them written; the variable name can be anything (`lat`, `latitude`,
+/// `LATITUDE`).
 fn northing(item: &Item) -> bool {
     let units = item.units.to_ascii_lowercase();
     units.starts_with("degrees_north") || units.starts_with("degree_north")
@@ -1662,9 +1735,10 @@ fn easting(item: &Item) -> bool {
     units.starts_with("degrees_east") || units.starts_with("degree_east")
 }
 
-// ── Мелочь ─────────────────────────────────────────────────────
+// ── Odds and ends ──────────────────────────────────────────────
 
-/// Байт на отсчёт; `None` — тип не числовой, показывать его нечем.
+/// Bytes per sample; `None` — the type is not numeric, there is nothing to
+/// show it with.
 fn width_of(dtype: &DType) -> Option<u32> {
     Some(match dtype {
         DType::I8 | DType::U8 => 1,
@@ -1675,8 +1749,8 @@ fn width_of(dtype: &DType) -> Option<u32> {
     })
 }
 
-/// Сторона растра числом. `None` — она больше, чем бывает у растра; такую
-/// величину показывать всё равно нечем.
+/// Raster side as a number. `None` — it is larger than a raster ever gets;
+/// such a variable cannot be shown anyway.
 fn fit(side: u64) -> Option<u32> {
     u32::try_from(side).ok()
 }
@@ -1685,9 +1759,10 @@ fn text(attrs: &HashMap<String, AttrValue>, name: &str) -> String {
     attrs.get(name).and_then(|value| value.as_str()).unwrap_or_default().to_string()
 }
 
-/// Число из атрибута. Спрашивается обеими лестницами нарочно: `_FillValue`
-/// записан типом самой величины, и у целочисленной он целый (`-9999` у
-/// температуры поверхности), а у дробной дробный — одной мало.
+/// A number from an attribute. Both ladders are asked on purpose: `_FillValue`
+/// is written with the type of the variable itself, and for an integer variable
+/// it is integer (`-9999` for surface temperature), for a fractional one
+/// fractional — one is not enough.
 fn number(value: &AttrValue) -> Option<f32> {
     let single = |numbers: Vec<f64>| numbers.first().copied();
     value
@@ -1698,7 +1773,7 @@ fn number(value: &AttrValue) -> Option<f32> {
         .map(|number| number as f32)
 }
 
-/// Имена в атрибуте CF идут через пробел, а иногда и через запятую.
+/// Names in a CF attribute go separated by a space, and sometimes by a comma.
 fn words(text: String) -> impl Iterator<Item = String> {
     text.split([' ', ',', '\t', '\n'])
         .filter(|word| !word.is_empty())
@@ -1707,798 +1782,12 @@ fn words(text: String) -> impl Iterator<Item = String> {
         .into_iter()
 }
 
-/// Имя из атрибута — в путь файла. Абсолютное берётся как есть, остальные
-/// ищутся в группе самой величины: так их и понимает CF.
+/// A name from an attribute becomes a file path. An absolute one is taken as
+/// is, the rest are looked for in the group of the variable itself: that is how
+/// CF reads them.
 fn resolve(group: &str, name: &str) -> String {
     match name.starts_with('/') {
         true => name.to_string(),
         false => format!("{}/{}", group, name),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::super::budget;
-    use super::*;
-
-    /// Узлы стоят по краям отрезка и равномерно между ними, без повторов:
-    /// повтор сложил бы решётку не в прямоугольник, и привязка отвалилась бы
-    /// целиком. Отрезок в один отсчёт узлов не даёт — делить не на что.
-    #[test]
-    fn nodes_span_the_stretch_without_repeats() {
-        assert_eq!(nodes(0, 1), vec![0, 1]);
-        assert_eq!(nodes(0, 20).len(), 21);
-        let wide = nodes(0, 449);
-        assert_eq!(wide.len(), 21);
-        assert_eq!((wide[0], *wide.last().unwrap()), (0, 449));
-        assert!(wide.windows(2).all(|pair| pair[0] < pair[1]), "{:?}", wide);
-
-        // Отступившая решётка стои́т на отрезке, а не на всей стороне, и концы
-        // у неё те же самые — иначе крайние узлы уехали бы обратно на дыру.
-        let inset = nodes(11, 320);
-        assert_eq!(inset.len(), 21);
-        assert_eq!((inset[0], *inset.last().unwrap()), (11, 320));
-        assert!(inset.windows(2).all(|pair| pair[0] < pair[1]), "{:?}", inset);
-
-        assert!(nodes(5, 5).is_empty());
-        assert!(nodes(6, 5).is_empty());
-    }
-
-    /// Годность узла: незаполненный отсчёт помечен и `NaN`, и числом, и
-    /// проверяются обе координаты порознь.
-    #[test]
-    fn a_node_is_sound_when_written_and_inside_the_circle() {
-        assert!(placed(55.0, 37.0));
-        assert!(placed(0.0, 359.0), "долгота бывает записана и как 0…360");
-        assert!(!placed(f64::NAN, 37.0), "круг отвергает NaN сам");
-        assert!(!placed(55.0, f64::NAN));
-        assert!(!placed(f64::INFINITY, 37.0), "и бесконечность тоже");
-        assert!(!placed(120.0, 37.0), "широта у шара своя, и она у́же долготной");
-        assert!(!placed(-999.0, 37.0), "заполнитель SYNERGY");
-        assert!(!placed(9.969_21e36, 37.0), "заполнитель CF");
-        assert!(!placed(55.0, -999.0));
-        assert!(!placed(55.0, 9.969_21e36));
-    }
-
-    /// Чистая сетка стои́т там, где стои́т: отступ на ней не двигает ничего.
-    /// Отрезок, на котором решётки не построить, отступ не принимает.
-    #[test]
-    fn a_clean_grid_stands_where_it_is() {
-        let stand = footing((0, 265), (0, 1499), |_, _| true);
-        assert_eq!(stand, Some(((0, 265), (0, 1499))));
-        assert_eq!(footing((0, 0), (0, 5), |_, _| true), None, "сторона в один отсчёт — не сетка");
-    }
-
-    /// Рваный край отступ обходит, а не отменяет им привязку.
-    ///
-    /// Размах и границы негодного сняты с гранулы
-    /// `S3A_SY_2_AOD____20260812T011939` (растр 4022×324: столбцы 0…4 и 323
-    /// негодны целиком, строка 0 целиком, столбцы 5…10 и 321…322 рвано), а сама
-    /// рванина смоделирована полосой: настоящая гуще с одного конца витка.
-    /// Ответ у модели тот же, что правило даёт на снятой с файла маске, —
-    /// строки 1…4021 и столбцы 11…320, то есть 95,7 % растра вместо пропавшей
-    /// привязки.
-    #[test]
-    fn a_ragged_edge_is_retreated_from() {
-        let sound = |row: u32, column: u32| {
-            !(column <= 4
-                || column == 323
-                || row == 0
-                || (((5..=10).contains(&column) || (321..=322).contains(&column)) && row < 3000))
-        };
-        assert_eq!(footing((0, 4021), (0, 323), sound), Some(((1, 4021), (11, 320))));
-    }
-
-    /// Узлов на стороне — по её длине, а не одним числом на обе.
-    ///
-    /// Числа настоящие: у сетки OLCI 15076 строк и 77 столбцов, и решётка
-    /// выходит 236×21 вместо 21×21; у AOD 4022×324 — 63×21. Пол держит короткую
-    /// сторону, потолок — длинную, а отсчёты стороны — совсем короткую, где
-    /// узел пришёлся бы на каждый.
-    #[test]
-    fn the_nodes_are_counted_by_the_side() {
-        assert_eq!((count(15076), count(77)), (236, 21));
-        assert_eq!((count(4022), count(324)), (63, 21));
-        assert_eq!(count(266), 21, "короткой стороне довольно пола");
-        assert_eq!((count(1344), count(1345)), (21, 22), "пол кончается там, где шаг догнал его");
-        assert_eq!((count(16320), count(16321)), (255, 256), "и упирается в потолок");
-        assert_eq!(count(1_000_000), 256);
-        assert_eq!((count(2), count(3)), (2, 3), "узел не встаёт дважды на один отсчёт");
-        assert_eq!(nodes(0, 1), vec![0, 1]);
-        assert_eq!(nodes(0, 15075).len(), 236);
-    }
-
-    /// Отступает та сторона, которая переложит нужную ось. Сплошной негодный
-    /// столбец, попавший ровно на узловой, даёт по одному негодному узлу на
-    /// первой и последней строке решётки — и сторона, где негодных больше
-    /// сейчас, увела бы отступ в строки, где он не помогает вовсе.
-    #[test]
-    fn a_bad_line_on_a_node_moves_the_axis_that_helps() {
-        let bad = nodes(0, 319)[10];
-        assert_eq!(bad, 160);
-        let stand = footing((0, 3999), (0, 319), |_, column| column != bad);
-        assert_eq!(stand, Some(((0, 3999), (0, 318))), "решётка сдвинула столбцы, а не строки");
-    }
-
-    /// Дыра не у края отступом не чинится: сдвигать нечего, и привязки нет.
-    #[test]
-    fn a_hole_in_the_middle_is_not_retreated_from() {
-        let sound =
-            |row: u32, column: u32| !((1900..2100).contains(&row) && (130..190).contains(&column));
-        assert_eq!(footing((0, 3999), (0, 319), sound), None);
-    }
-
-    /// Бюджет — мельчайший шаг решётки, и мельчайший из двух, а не свой у
-    /// каждой оси.
-    ///
-    /// Числа настоящие: у растра AOD 4022×324 решётка выходит 63×21, шаг по
-    /// строкам 64 отсчёта, по столбцам 16. Отступ на шестнадцать столбцов
-    /// проходит, на семнадцать — нет.
-    ///
-    /// Мельчайшая ось бывает и строчной: у отрезка в 21 строку и 4022 столбца
-    /// шаг по строкам — один отсчёт, и отступать по столбцам он разрешает ровно
-    /// столько же, хотя своя их мерка вшестидесятеро свободнее.
-    #[test]
-    fn the_budget_is_the_finest_step_of_the_two() {
-        let bad_to = |edge: u32| move |_row: u32, column: u32| column >= edge;
-        assert_eq!(footing((0, 4021), (0, 323), bad_to(16)), Some(((0, 4021), (16, 323))));
-        assert_eq!(footing((0, 4021), (0, 323), bad_to(17)), None);
-
-        assert_eq!(footing((0, 20), (0, 4021), bad_to(1)), Some(((0, 20), (1, 4021))));
-        assert_eq!(footing((0, 20), (0, 4021), bad_to(2)), None);
-    }
-
-    /// Шаг оси меряется промежутками между узлами, а не отсчётами стороны, и
-    /// сторона в два отсчёта — это шаг в один, а не в ноль.
-    #[test]
-    fn the_step_of_an_axis_is_measured_between_its_nodes() {
-        let bad_to = |edge: u32| move |_row: u32, column: u32| column >= edge;
-        // Промежутков двадцать, отсчётов сорок: у отрезка (0, 39) шаг равен
-        // одному, а не двум, и на два столбца отступать уже нечем.
-        assert_eq!(footing((0, 39), (0, 39), bad_to(1)), Some(((0, 39), (1, 39))));
-        assert_eq!(footing((0, 39), (0, 39), bad_to(2)), None);
-        // Сторона в два отсчёта — решётка в два узла, и шаг у неё есть.
-        assert_eq!(footing((0, 1), (0, 40), bad_to(1)), Some(((0, 1), (1, 40))));
-    }
-
-    /// Бюджет — предел каждой стороне порознь, и предел этот точный.
-    ///
-    /// У отрезка в 40 промежутков мельчайший шаг решётки — два отсчёта, и
-    /// сплошная негодная полоса ровно в два столбца проходится, а в три —
-    /// уже нет.
-    #[test]
-    fn the_budget_is_spent_side_by_side() {
-        assert_eq!(footing((0, 40), (0, 40), |_, column| column > 1), Some(((0, 40), (2, 40))));
-        assert_eq!(footing((0, 40), (0, 40), |_, column| column > 2), None);
-    }
-
-    /// Грязнейшая сторона узнаётся своей: марш ведёт та сторона, на которой
-    /// негодное и лежит, а не её противоположная.
-    #[test]
-    fn the_march_goes_by_the_side_that_is_dirty() {
-        assert_eq!(footing((0, 40), (0, 40), |row, _| row < 39), Some(((0, 38), (0, 40))));
-        assert_eq!(footing((0, 40), (0, 40), |_, column| column < 39), Some(((0, 40), (0, 38))));
-    }
-
-    /// Ничью решает грязь: когда обе стороны уводят узлы с дефекта, идёт та, на
-    /// которой он и лежит. Негодная точка стои́т здесь на первом столбце и на
-    /// внутренней строке — отступить можно и строками, и столбцами, а верно
-    /// столбцами.
-    #[test]
-    fn a_tie_is_broken_by_the_dirty_side() {
-        let sound = |row: u32, column: u32| (row, column) != (11, 0);
-        assert_eq!(footing((0, 44), (0, 44), sound), Some(((0, 44), (1, 44))));
-    }
-
-    /// Марш идёт по грязнейшей стороне, а при равной грязи — туда, где дыр
-    /// останется меньше.
-    ///
-    /// Расстановки найдены перебором: правило разбирается тут не рассуждением,
-    /// и закрепить его можно только свидетелем.
-    #[test]
-    fn the_march_weighs_what_is_left_behind() {
-        let holes = [(18u32, 53u32), (33, 35), (46, 35), (53, 58)];
-        let sound = |row: u32, column: u32| !holes.contains(&(row, column));
-        assert_eq!(footing((0, 59), (0, 59), sound), Some(((0, 58), (1, 59))));
-
-        let holes = [(7u32, 13u32), (24, 35), (29, 20), (41, 13)];
-        let sound = |row: u32, column: u32| !holes.contains(&(row, column));
-        assert_eq!(footing((0, 44), (0, 44), sound), Some(((2, 44), (0, 43))));
-    }
-
-    /// Убавляющий шаг берётся и с чистой стороны — иначе решётка топчется по
-    /// грязи, которая ничего не решает, и сдаётся при живом ответе.
-    ///
-    /// Негодны здесь угол первой строки и полоса, до которой решётка дотянется
-    /// только после сдвига строк: по грязи отступать пришлось бы столбцам, и
-    /// бюджет утёк бы в них весь.
-    #[test]
-    fn a_step_that_helps_is_taken_from_any_side() {
-        let holes = [(0, 4), (0, 5), (1, 36), (1, 37), (1, 38), (1, 39), (31, 38)];
-        let sound = |row: u32, column: u32| !holes.contains(&(row, column));
-        assert_eq!(footing((0, 40), (0, 40), sound), Some(((2, 39), (0, 40))));
-    }
-
-    /// Бюджет меряется мельчайшим шагом решётки, а не своим у каждой оси.
-    ///
-    /// Клин тонок в узлах и толст в отсчётах: по мерке шага собственной оси
-    /// (201 отсчёт у растра в 4000 строк) отступ прошагал бы внутрь 191 строку
-    /// и бросил бы их годные данные линейной экстраполяции — сотни километров
-    /// трека молча.
-    #[test]
-    fn a_retreat_deeper_than_the_finest_step_is_refused() {
-        let sound = |row: u32, column: u32| !(column == 0 || (row <= 190 && column <= 300));
-        assert_eq!(footing((0, 3999), (0, 319), sound), None);
-    }
-
-    /// Решётке, которой некуда отступать, одна негодная точка отменяет всё:
-    /// бюджет у неё нулевой, а решётка с дырой уложила бы снимок куда попало.
-    #[test]
-    fn a_single_broken_node_drops_the_whole_lattice() {
-        let rows = (0u32, 1u32);
-        let columns = (0u32, 1u32);
-        let whole = lattice(rows, columns, Seating::SAME, |row, column| {
-            Some((f64::from(row), f64::from(column)))
-        });
-        assert_eq!(whole.len(), 4);
-        assert_eq!(whole[0].px, 0.5, "узел стои́т в середине отсчёта");
-
-        let holed = lattice(rows, columns, Seating::SAME, |row, column| match (row, column) {
-            (1, 1) => Some((f64::NAN, 0.0)),
-            _ => Some((f64::from(row), f64::from(column))),
-        });
-        assert!(holed.is_empty());
-
-        // Широта за пределами шара — тоже дыра, только записанная числом:
-        // так лежит незаполненный край полосы съёмки. И долгота тоже: у
-        // решётки, проверенной лишь по широте, такая дыра проходила бы.
-        let filled = lattice(rows, columns, Seating::SAME, |_, _| Some((9.969_21e36, 0.0)));
-        assert!(filled.is_empty());
-        let eastless = lattice(rows, columns, Seating::SAME, |_, _| Some((0.0, 9.969_21e36)));
-        assert!(eastless.is_empty());
-
-        // Опорная сетка разрежена: отсчёт координат стои́т не на каждом пикселе,
-        // и узел уезжает туда, куда указывает шаг.
-        let step = Seating { step: (64.0, 1.0), origin: (0.0, 0.0) };
-        let sparse = lattice(rows, columns, step, |row, column| {
-            Some((f64::from(row), f64::from(column)))
-        });
-        assert_eq!(sparse[1].px, 64.5, "второй столбец опорной сетки — 64-й пиксель");
-        assert_eq!(sparse[1].py, 0.5);
-
-        // У посадки есть и начало: решётка `tx` SLSTR свисает за левый край
-        // растра, и её нулевой узел приходится на 26 пикселей левее нуля.
-        let shifted = lattice(
-            rows,
-            columns,
-            Seating { step: (16.0, 1.0), origin: (-26.0, 0.0) },
-            |row, column| Some((f64::from(row), f64::from(column))),
-        );
-        assert_eq!(shifted[0].px, -25.5, "нулевой узел стои́т левее растра");
-        assert_eq!(shifted[1].px, -9.5);
-        assert_eq!(shifted[1].py, 0.5, "по строкам начала нет — они совпадают отсчёт в отсчёт");
-    }
-
-    /// Отступившая решётка и строится на отступе: узлы стоят на тех отсчётах,
-    /// которые нашёл [`footing`], а не на тех, о которых спросили.
-    #[test]
-    fn a_retreated_lattice_stands_on_what_it_found() {
-        let edge = lattice((0, 40), (0, 40), Seating::SAME, |_, column| {
-            Some((if column == 0 { -999.0 } else { 1.0 }, 37.0))
-        });
-        assert_eq!(edge.len(), 441);
-        assert_eq!(edge[0].px, 1.5, "нулевой узел ушёл с негодного столбца");
-        assert_eq!(edge[0].py, 0.5, "по строкам отступать было не от чего");
-
-        // Отступ не помог — привязки нет, и решётка не строится на негодном.
-        let blocked = lattice((0, 40), (0, 40), Seating::SAME, |row, column| {
-            let inside = (15..=25).contains(&row) && (15..=25).contains(&column);
-            Some((if inside { -999.0 } else { 1.0 }, 37.0))
-        });
-        assert!(blocked.is_empty());
-    }
-
-    /// Отсчёт прибора у гранулы SLSTR: растр `in` и решётка `tx` стоят в
-    /// разных отсчётах, и сходятся они только через смещения.
-    ///
-    /// Числа настоящие — `S3A_SL_2_LST____20260824T174507`: растр 266×1500 при
-    /// `track_offset` 998 и разрешении 1000 м, решётка 266×130 при
-    /// `track_offset` 64 и разрешении 16000 м поперёк трека.
-    #[test]
-    fn the_slstr_tie_grid_sits_by_the_instrument_frame() {
-        let raster = Frame { across_at: 998.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
-        let grid = Frame { across_at: 64.0, along_at: 3598.0, across: 16000.0, along: 1000.0 };
-        let seat = seating(Some(raster), Some(grid), None, (1500, 266), (130, 266))
-            .expect("отсчёты названы обоими файлами");
-        assert_eq!(seat.step, (16.0, 1.0), "шаг — отношение разрешений");
-        assert_eq!(seat.origin, (-26.0, 0.0), "нулевой узел свисает за левый край растра");
-        // Крайний узел приходится далеко за правый край — решётка шире снимка.
-        assert_eq!(129.0 * seat.step.0 + seat.origin.0, 2038.0);
-    }
-
-    /// Опорная сетка OLCI названа подвыборкой, и та обязана сойтись с
-    /// размерами: узлы стоят на краях растра.
-    ///
-    /// Числа настоящие — `S3A_OL_2_LRR____20260824T161836`: растр 15076×1217,
-    /// сетка 15076×77, `ac_subsampling_factor` 16, `al_subsampling_factor` 1.
-    #[test]
-    fn the_olci_tie_grid_sits_by_its_subsampling() {
-        let seat = seating(None, None, Some((16.0, 1.0)), (1217, 15076), (77, 15076))
-            .expect("подвыборка сходится с размерами");
-        assert_eq!(seat.step, (16.0, 1.0));
-        assert_eq!(seat.origin, (0.0, 0.0), "узел ноль стои́т на пикселе ноль");
-        assert_eq!(76.0 * seat.step.0 + seat.origin.0, 1216.0, "крайний узел — крайний столбец");
-    }
-
-    /// Сетка размером с растр садится отсчёт в отсчёт, и подвыборку у неё не
-    /// спрашивают. Правило это не про дешевизну: `ac_subsampling_factor`
-    /// описывает опорную сетку продукта, и поотсчётный `geo_coordinates.nc`
-    /// OLCI несёт его тоже. Спрошенный раньше размеров, он растянул бы
-    /// поотсчётную сетку в шестнадцать раз.
-    #[test]
-    fn a_grid_the_size_of_the_raster_ignores_the_subsampling_attribute() {
-        let seat = seating(None, None, Some((16.0, 1.0)), (1217, 15076), (1217, 15076))
-            .expect("сетка размером с растр садится всегда");
-        assert_eq!(seat, Seating::SAME);
-    }
-
-    /// Подвыборка, не сошедшаяся с размерами, — это подвыборка не про эту
-    /// пару. Посадка по ней вышла бы такой же молчаливой, как выведенная из
-    /// размеров, поэтому здесь отказ.
-    #[test]
-    fn a_subsampling_that_misses_the_sizes_is_refused() {
-        let off = seating(None, None, Some((16.0, 1.0)), (1217, 15076), (130, 15076));
-        assert!(off.is_err(), "77 узлов ожидалось, а сетка о 130");
-        // Допуск — пиксель, а не «примерно»: 77 узлов шагом 16 покрывают 1217
-        // столбцов, и растру шириной 1220 та же подвыборка уже не отвечает.
-        let near = seating(None, None, Some((16.0, 1.0)), (1220, 15076), (77, 15076));
-        assert!(near.is_err(), "разошлись на три столбца — это уже другая пара");
-    }
-
-    /// Разрежённая сетка без единого слова о том, чем она связана с растром,
-    /// не садится вовсе: снимок ляжет по контуру каталога, а не мимо себя.
-    #[test]
-    fn a_sparse_grid_that_says_nothing_about_itself_is_refused() {
-        let mute = seating(None, None, None, (1500, 266), (130, 266));
-        assert!(mute.is_err());
-    }
-
-    /// Полукилометровая сетка `an` и косой обзор `fo` — те случаи, где обе оси
-    /// и оба начала разные, и симметричная описка в них была бы видна.
-    ///
-    /// Числа настоящие — `S3A_SL_1_RBT____20260824T174507`: у `an` растр
-    /// 533×3000 при `track_offset` 1996, `start_offset` 7195 и разрешении 500 м
-    /// по обеим осям; у `fo` растр 266×900 при `track_offset` 450. Решётка `tx`
-    /// им обоим одна и та же.
-    #[test]
-    fn every_slstr_grid_seats_on_the_same_tie_lattice() {
-        let tie = Frame { across_at: 64.0, along_at: 3598.0, across: 16000.0, along: 1000.0 };
-
-        let half_kilometre = Frame { across_at: 1996.0, along_at: 7195.0, across: 500.0, along: 500.0 };
-        let seat = seating(Some(half_kilometre), Some(tie), None, (3000, 533), (130, 266))
-            .expect("отсчёты названы обоими файлами");
-        assert_eq!(seat.step, (32.0, 2.0), "полукилометровому пикселю узел вдвое дороже");
-        // Начало уезжает по обеим осям, и в разные стороны: смещения считаются
-        // от разного (см. `Frame`). Проверено сличением поотсчётных сеток `an`
-        // и `in` одной гранулы, без участия опорной: строка `in` отвечает
-        // строке `an` с номером `2·i + 1`, а не `2·i − 1`.
-        assert_eq!(seat.origin, (-52.0, 1.0), "поперёк влево, вдоль вправо");
-
-        let oblique = Frame { across_at: 450.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
-        let seat = seating(Some(oblique), Some(tie), None, (900, 266), (130, 266))
-            .expect("отсчёты названы обоими файлами");
-        assert_eq!(seat.step, (16.0, 1.0));
-        assert_eq!(seat.origin, (-574.0, 0.0), "косой обзор смещён поперёк трека сильнее надирного");
-    }
-
-    /// Прочитанное сверяется с видимым: посадка обязана накрыть растр.
-    ///
-    /// Атрибут бывает не про эту пару файлов. `resolution` у OLCI одинаков и у
-    /// поотсчётного, и у опорного файла — он свойство продукта, — и отношение
-    /// разрешений дало бы шестнадцатикратно разрежённой сетке шаг единица.
-    #[test]
-    fn a_seating_that_leaves_the_raster_uncovered_is_refused() {
-        let same = Frame { across_at: 0.0, along_at: 0.0, across: 1080.0, along: 1176.0 };
-        let short = seating(Some(same), Some(same), None, (1217, 15076), (77, 15076));
-        assert!(short.is_err(), "77 узлов шагом единица накрывают шестнадцатую долю снимка");
-
-        // Настоящая посадка растр накрывает — с запасом слева и справа.
-        let raster = Frame { across_at: 998.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
-        let tie = Frame { across_at: 64.0, along_at: 3598.0, across: 16000.0, along: 1000.0 };
-        assert!(seating(Some(raster), Some(tie), None, (1500, 266), (130, 266)).is_ok());
-    }
-
-    /// Отсчёт прибора отвечает раньше размеров и раньше подвыборки: он
-    /// прочитан, а те выведены.
-    #[test]
-    fn the_instrument_frame_outranks_both_guesses() {
-        let raster = Frame { across_at: 998.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
-        let tie = Frame { across_at: 64.0, along_at: 3598.0, across: 16000.0, along: 1000.0 };
-
-        // Подвыборка названа тоже, и она о другом — отсчёт главнее.
-        let seat = seating(Some(raster), Some(tie), Some((4.0, 4.0)), (1500, 266), (130, 266))
-            .expect("отсчёты названы обоими файлами");
-        assert_eq!(seat.step, (16.0, 1.0), "шаг взят у отсчёта, а не у подвыборки");
-        assert_eq!(seat.origin, (-26.0, 0.0));
-
-        // Формы совпали, а отсчёты разошлись — это не сетка этого растра, и
-        // равенство форм её таковой не делает: отказ, а не посадка один в один.
-        let elsewhere = Frame { across_at: 450.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
-        let apart = seating(Some(raster), Some(elsewhere), None, (1500, 266), (1500, 266));
-        assert!(apart.is_err(), "сетка, съехавшая на 548 столбцов, растр не накрывает");
-    }
-
-    /// Отсчёт прибора и подвыборка читаются из глобальных атрибутов, и каждая
-    /// ось берётся из своего: перепутанные, они разъехались бы молча.
-    #[test]
-    fn the_global_attributes_are_read_axis_by_axis() {
-        let attrs: HashMap<String, AttrValue> = [
-            ("resolution".to_string(), AttrValue::String("[ 16000 1000 ]".to_string())),
-            ("track_offset".to_string(), AttrValue::I32(64)),
-            ("start_offset".to_string(), AttrValue::I32(3598)),
-            ("ac_subsampling_factor".to_string(), AttrValue::I32(16)),
-            ("al_subsampling_factor".to_string(), AttrValue::I32(1)),
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(
-            frame(&attrs),
-            Some(Frame { across_at: 64.0, along_at: 3598.0, across: 16000.0, along: 1000.0 })
-        );
-        assert_eq!(subsampling(&attrs), Some((16.0, 1.0)));
-
-        // Без единого из трёх отсчёта не выходит.
-        for missing in ["resolution", "track_offset", "start_offset"] {
-            let mut lean = attrs.clone();
-            lean.remove(missing);
-            assert_eq!(frame(&lean), None, "без '{}' отсчёт не собрать", missing);
-        }
-        let mut lean = attrs.clone();
-        lean.remove("al_subsampling_factor");
-        assert_eq!(subsampling(&lean), None, "подвыборка нужна по обеим осям");
-    }
-
-    /// Отсчёт прибора без пары бесполезен: одно смещение не говорит ни о шаге,
-    /// ни о начале.
-    #[test]
-    fn one_instrument_frame_without_the_other_is_not_enough() {
-        let raster = Frame { across_at: 998.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
-        assert!(seating(Some(raster), None, None, (1500, 266), (130, 266)).is_err());
-        assert!(seating(None, Some(raster), None, (1500, 266), (130, 266)).is_err());
-    }
-
-    /// `resolution` записан строкой в скобках, и читаются оба числа.
-    #[test]
-    fn the_resolution_attribute_is_read_out_of_its_brackets() {
-        assert_eq!(resolution("[ 16000 1000 ]"), Some((16000.0, 1000.0)));
-        assert_eq!(resolution("[ 1000 1000 ]"), Some((1000.0, 1000.0)));
-        assert_eq!(resolution("[ 1080 1176 ]"), Some((1080.0, 1176.0)));
-        assert_eq!(resolution("1000"), None, "одного числа мало");
-        assert_eq!(resolution(""), None);
-        assert_eq!(resolution("[ 0 1000 ]"), None, "нулевая ячейка — не разрешение");
-        // Число берётся целиком: разрезанное по цифрам, `1.5` дало бы единицу и
-        // пятёрку, и обе прошли бы дальше как правдоподобные разрешения.
-        assert_eq!(resolution("[ 1.5 2.5 ]"), Some((1.5, 2.5)));
-        assert_eq!(resolution("[ 1e3 2e3 ]"), Some((1000.0, 2000.0)));
-        assert_eq!(resolution("[ -1000 -1000 ]"), None, "знак не теряется");
-        assert_eq!(resolution("[ 1.2.3 1000 ]"), None, "не число — не разрешение");
-    }
-
-    /// Окно строк режется по оси строк плоскости: чанк во всю высоту — окно
-    /// ростом с плоскость; иначе окно — связка чанков файла не длиннее тайла,
-    /// а чанк выше тайла — сам. Сколько единичных осей стоит перед строками,
-    /// окно не спрашивает.
-    ///
-    /// Числа настоящие: у величины SYNERGY AOD 324 строки одним чанком, у
-    /// OLCI 15076 строк чанками по 5026.
-    #[test]
-    fn окно_строк_режется_по_оси_строк_плоскости() {
-        assert_eq!(rows_of(324, Some(324)), 324, "один чанк — плоскость");
-        assert_eq!(rows_of(15076, Some(100)), 500, "связка чанков не длиннее тайла");
-        assert_eq!(rows_of(15076, Some(TILE as u64)), TILE);
-        assert_eq!(rows_of(15076, Some(300)), 300, "второй чанк уже не влезает в тайл");
-        assert_eq!(rows_of(15076, Some(600)), 600, "чанк выше тайла берётся сам");
-        assert_eq!(rows_of(15076, Some(5026)), 5026);
-        assert_eq!(rows_of(15076, None), TILE, "непрерывной раскладке окно — тайл");
-        assert_eq!(rows_of(300, None), 300, "и не длиннее самой величины");
-        assert_eq!(rows_of(1217, Some(1)), TILE, "чанк в строку — связка в тайл");
-    }
-
-    /// Регион окна: по оси строк — окно, обрезанное высотой величины, по оси
-    /// столбцов — вся ширина, по единичным осям — нулевой отсчёт, где бы они
-    /// ни стояли.
-    #[test]
-    fn регион_окна_ложится_по_осям_плоскости() {
-        let mut layout = Layout::of(450, 4172, 256, DType::F32);
-        assert_eq!(layout.region(512, 256), (vec![512, 0], vec![256, 450]));
-        assert_eq!(layout.region(4096, 256), (vec![4096, 0], vec![76, 450]), "нижнее окно короче");
-        layout.shape = vec![1, 4172, 450];
-        layout.axes = (1, 2);
-        assert_eq!(layout.region(512, 256), (vec![0, 512, 0], vec![1, 256, 450]));
-        layout.shape = vec![4172, 1, 450, 1];
-        layout.axes = (0, 2);
-        assert_eq!(layout.region(0, 256), (vec![0, 0, 0, 0], vec![256, 1, 450, 1]));
-    }
-
-    /// Глубина свежего чанка — большая из двух фаз чтения крейта: сборка
-    /// окна (окно, сжатое, распакованный чанк — три отсчёта на отсчёт) и
-    /// развёртка (сырое и типизированное либо f32). Занижена — трап вместо
-    /// отказа.
-    #[test]
-    fn глубина_чанка_считает_копии_крейта() {
-        assert_eq!(depth_of(&DType::U8), 3, "байтам развёртка не нужна, решает сборка");
-        assert_eq!(depth_of(&DType::U16), 6);
-        assert_eq!(depth_of(&DType::I16), 6);
-        assert_eq!(depth_of(&DType::F32), 12);
-        assert_eq!(depth_of(&DType::F64), 24, "восьмибайтовый отсчёт: сборка дороже развёртки в f32");
-        assert_eq!(depth_of(&DType::I32), 12);
-        assert_eq!(depth_of(&DType::I8), 5, "у байта со знаком развёртка в f32 дороже сборки");
-        assert_eq!(depth_of(&DType::String), 24, "неузнанный тип считается восьмибайтовым");
-        let layout = Layout::of(450, 4172, 4172, DType::F32);
-        assert_eq!(layout.grid.depth, 12);
-        assert_eq!(layout.grid.chunk, (450, 4172));
-    }
-
-    /// Шаг выборки разводится со строкой: общий делитель у шага и ширины
-    /// оставил бы выборку в одних и тех же столбцах каждой строки, а у полосы
-    /// съёмки крайние столбцы не измерены вовсе.
-    #[test]
-    fn the_sampling_step_never_walks_one_column() {
-        // Гранула OLCI: 4865×1687 отсчётов на выборку в миллион даёт шаг 7, а
-        // 4865 = 5·7·139 — то есть исходный шаг делит ширину, и выборка ходила
-        // бы по одной седьмой столбцов. Разведённый шаг — 8.
-        let (width, height) = (4865usize, 1687usize);
-        let step = sampling_step(width * height, width);
-        assert_eq!(step, 8, "шаг разводится с шириной");
-        assert_eq!(gcd_for_test(step, width), 1);
-
-        // Плоскость мельче выборки: шаг единичный, разводить нечего.
-        assert_eq!(sampling_step(450 * 372, 450), 1);
-
-        // И общее правило — на ширинах, где шаг заведомо больше единицы.
-        for width in 2..64usize {
-            let step = sampling_step(width * STRETCH_SAMPLES * 3, width);
-            assert!(step > 1, "шаг должен быть больше единицы: {}", step);
-            assert_eq!(
-                gcd_for_test(step, width), 1,
-                "шаг {} и ширина {} не взаимно просты", step, width
-            );
-        }
-    }
-
-    fn gcd_for_test(mut a: usize, mut b: usize) -> usize {
-        while b != 0 {
-            (a, b) = (b, a % b);
-        }
-        a
-    }
-
-    /// Растяг считается по годным значениям: метка «нет данных» утянула бы
-    /// нижний край, и весь снимок вышел бы белым.
-    #[test]
-    fn stretch_ignores_the_fill_value() {
-        let mut values = vec![-9999.0f32; 100];
-        values.extend((0..=100i16).map(|value| f32::from(value) + 300.0));
-        let mapping = mapping("/проба", &values, Some(-9999.0));
-        // Поле «нет данных» — прозрачное, а живое значение попадает в середину
-        // растяга, а не в белое.
-        let out = mapping.rgba(&Samples::F32(&[-9999.0, 350.0]), Pixel::named(1), 2);
-        assert_eq!(&out[..4], &[0, 0, 0, 0]);
-        assert!((100..=160).contains(&out[4]), "середина растяга: {}", out[4]);
-    }
-
-    /// Пустая величина — не изображение гранулы, однотонная — изображение
-    /// последней очереди. Ловится это только по самим отсчётам: заголовок у
-    /// пустой и у заполненной один и тот же.
-    #[test]
-    fn an_unfilled_variable_is_not_a_picture() {
-        let fill = Some(65535.0);
-        assert_eq!(spread(&[65535.0; 8], fill), Spread::Empty);
-        assert_eq!(spread(&[], fill), Spread::Empty);
-        assert_eq!(spread(&[f32::NAN, f32::INFINITY], None), Spread::Empty);
-        assert_eq!(spread(&[0.0, 65535.0, 0.0], fill), Spread::Flat);
-        assert_eq!(spread(&[0.0, 1.0, 65535.0], fill), Spread::Varying);
-        // Без метки «нет данных» пустоту делают только нечисла.
-        assert_eq!(spread(&[7.0, 7.0], None), Spread::Flat);
-    }
-
-    /// Имена координат разрешаются в пути: относительное — от группы величины,
-    /// абсолютное — как есть.
-    #[test]
-    fn coordinate_names_become_paths() {
-        assert_eq!(resolve("/PRODUCT", "latitude"), "/PRODUCT/latitude");
-        assert_eq!(resolve("/PRODUCT", "/OTHER/latitude"), "/OTHER/latitude");
-        assert_eq!(resolve("", "lat"), "/lat");
-        let names: Vec<String> = words("Q_FLAGS, ERRORBAR_LST, TIME_DELTA".to_string()).collect();
-        assert_eq!(names, ["Q_FLAGS", "ERRORBAR_LST", "TIME_DELTA"]);
-    }
-
-    /// «Нет данных» записано типом самой величины: у температуры поверхности
-    /// это целое −9999, у индекса аэрозоля — дробное 9.96921e36. Прочитать
-    /// одной лестницей нельзя, а потерянное «нет данных» утягивает растяг и
-    /// красит весь снимок в один цвет.
-    #[test]
-    fn the_fill_value_is_read_whatever_its_type() {
-        assert_eq!(number(&AttrValue::F64Array(vec![9.969_209_968_386_869e36])), Some(9.969_21e36));
-        assert_eq!(number(&AttrValue::I64Array(vec![-9999])), Some(-9999.0));
-        assert_eq!(number(&AttrValue::I32(-32767)), Some(-32767.0));
-        assert_eq!(number(&AttrValue::F64(0.5)), Some(0.5));
-        assert_eq!(number(&AttrValue::AsciiString("K".to_string())), None);
-    }
-
-    /// Величина, которой негде лечь, не изображение этой гранулы, чем бы она ни
-    /// была измерена, — и спрашивается место раньше всех прочих доводов.
-    ///
-    /// Живой случай, ради которого правило и заведено: у гранулы Sentinel-5P
-    /// уровня 1B в одной группе с широтой и долготой лежат углы наблюдения, а в
-    /// соседней — таблица длин волн прибора. Таблица дробная, не угловая и той
-    /// же глубины, поэтому по прежним доводам она побеждала все четыре угла — и
-    /// показ уходил в то, что вообще не про Землю, а слой кончался словами
-    /// «привязки нет», хотя привязка была не нужна ей одной.
-    ///
-    /// Отбором, а не отсевом: файл, о месте не сказавший ничего, показывается
-    /// по-прежнему — он ляжет по контуру каталога.
-    #[test]
-    fn место_спрашивается_раньше_всех_прочих_доводов() {
-        let plane = |path: &str, group: &str, shape: (u32, u32)| Item {
-            path: path.to_string(),
-            group: group.to_string(),
-            depth: 3,
-            plane: Some(shape),
-            line: None,
-            real: true,
-            angular: false,
-            candidate: true,
-            fill: None,
-            packing: (1.0, 0.0),
-            said: String::new(),
-            units: String::new(),
-            coordinates: Vec::new(),
-            ancillary: Vec::new(),
-            shape: vec![10, 10],
-            axes: (0, 1),
-            chunk_rows: None,
-        };
-        let coordinate = |path: &str, group: &str, units: &str| Item {
-            units: units.to_string(),
-            candidate: false,
-            ..plane(path, group, (497, 77))
-        };
-        const GEO: &str = "/BAND1/STANDARD_MODE/GEODATA";
-        const INSTR: &str = "/BAND1/STANDARD_MODE/INSTRUMENT";
-        let items = vec![
-            // Таблица прибора: дробная, не угловая, но её форма — канал на
-            // пиксель, и координат такой формы в файле нет.
-            plane(&format!("{}/nominal_wavelength", INSTR), INSTR, (497, 77)),
-            // Угол наблюдения: угловой, то есть по прежним доводам младше, —
-            // зато широта с долготой лежат рядом и той же формы.
-            Item { angular: true, ..plane(&format!("{}/solar_zenith_angle", GEO), GEO, (497, 77)) },
-            coordinate(&format!("{}/latitude", GEO), GEO, "degrees_north"),
-            coordinate(&format!("{}/longitude", GEO), GEO, "degrees_east"),
-        ];
-        let order = preferred(&items);
-        assert_eq!(
-            order.first().map(|item| item.path.as_str()),
-            Some("/BAND1/STANDARD_MODE/GEODATA/solar_zenith_angle"),
-            "победила величина, которой негде лечь",
-        );
-
-        // Место старше и глубины — довода, который до него был первым. Проверить
-        // это на живом файле нечем: у Sentinel-5P обе группы лежат на одной
-        // глубине, и там два правила отвечают одинаково. А разойтись они могут,
-        // и ответ должен быть тот же: величина, которой негде лечь, не
-        // становится изображением оттого, что лежит ближе к корню.
-        let deeper = vec![
-            Item { depth: 1, ..plane("/shallow/nominal_wavelength", "/shallow", (497, 77)) },
-            Item { depth: 5, ..plane(&format!("{}/solar_zenith_angle", GEO), GEO, (497, 77)) },
-            coordinate(&format!("{}/latitude", GEO), GEO, "degrees_north"),
-            coordinate(&format!("{}/longitude", GEO), GEO, "degrees_east"),
-        ];
-        assert_eq!(
-            preferred(&deeper).first().map(|item| item.path.as_str()),
-            Some("/BAND1/STANDARD_MODE/GEODATA/solar_zenith_angle"),
-            "мелкая величина без места победила глубокую с местом",
-        );
-
-        // Те же две величины, но файл о месте не сказал ничего: прежний порядок
-        // цел — место не отменяет доводов, оно только идёт раньше них.
-        let mute = vec![
-            plane(&format!("{}/nominal_wavelength", INSTR), INSTR, (497, 77)),
-            Item { angular: true, ..plane(&format!("{}/solar_zenith_angle", GEO), GEO, (497, 77)) },
-        ];
-        assert_eq!(
-            preferred(&mute).first().map(|item| item.path.as_str()),
-            Some("/BAND1/STANDARD_MODE/INSTRUMENT/nominal_wavelength"),
-            "без координат выбор обязан остаться прежним",
-        );
-    }
-
-    /// Из годных величин показывается та, что ближе к корню и дробная:
-    /// подробности расчёта лежат в подгруппах, а целое в CF — код или счётчик.
-    #[test]
-    fn the_shallowest_measurement_wins() {
-        let item = |path: &str, depth: usize, real: bool| Item {
-            path: path.to_string(),
-            group: String::new(),
-            depth,
-            plane: Some((10, 10)),
-            line: None,
-            real,
-            angular: false,
-            candidate: true,
-            fill: None,
-            packing: (1.0, 0.0),
-            said: String::new(),
-            units: String::new(),
-            coordinates: Vec::new(),
-            ancillary: Vec::new(),
-            shape: vec![10, 10],
-            axes: (0, 1),
-            chunk_rows: None,
-        };
-        let items = vec![
-            item("/PRODUCT/SUPPORT_DATA/cloud_fraction", 2, true),
-            item("/PRODUCT/qa_value", 1, false),
-            item("/PRODUCT/aerosol_index_354_388", 1, true),
-            item("/PRODUCT/aerosol_index_335_367", 1, true),
-        ];
-        // Глубина важнее дробности, дробность — важнее алфавита, алфавит —
-        // последний, и он же делает выбор одним и тем же от запуска к запуску.
-        let order = preferred(&items);
-        // Угловая величина идёт после всех прочих той же глубины и дробности:
-        // замкнутый угол в яркость не растягивается (см. `angular`).
-        let angles = vec![
-            Item { angular: true, ..item("/PRODUCT/aerosol_index_000", 1, true) },
-            item("/PRODUCT/zzz_last_by_alphabet", 1, true),
-        ];
-        assert_eq!(
-            preferred(&angles).iter().map(|item| item.path.as_str()).collect::<Vec<&str>>(),
-            ["/PRODUCT/zzz_last_by_alphabet", "/PRODUCT/aerosol_index_000"],
-        );
-        assert!(angular("degrees") && angular(" deg ") && angular("radians"));
-        assert!(!angular("m s-1") && !angular("degrees_north") && !angular("k"));
-
-        // Время — «когда», а не «что»: по первому слову единиц, иначе «m s-1»
-        // прочиталось бы секундами.
-        let with_units = |units: &str| Item {
-            units: units.to_string(),
-            ..item("/x", 1, true)
-        };
-        assert!(timing(&with_units("microseconds")));
-        assert!(timing(&with_units("seconds since 2000-01-01 00:00:00")));
-        assert!(!timing(&with_units("m s-1")));
-        assert!(!timing(&with_units("kelvin")));
-        assert!(!timing(&with_units("")));
-        // Единицы хранятся как записаны — сравнение с CF регистра не видит.
-        assert!(timing(&with_units("Seconds since 2000-01-01 00:00:00")));
-        assert!(northing(&with_units("Degrees_North")) && easting(&with_units("degrees_East")));
-        assert!(!northing(&with_units("K")) && !easting(&with_units("K")));
-        assert_eq!(
-            order.iter().map(|item| item.path.as_str()).collect::<Vec<&str>>(),
-            [
-                "/PRODUCT/aerosol_index_335_367",
-                "/PRODUCT/aerosol_index_354_388",
-                "/PRODUCT/qa_value",
-                "/PRODUCT/SUPPORT_DATA/cloud_fraction",
-            ],
-        );
-
-        // Не осталось годных — сказано, чего именно не нашлось.
-        let none: Vec<Item> = items
-            .into_iter()
-            .map(|item| Item { candidate: false, ..item })
-            .collect();
-        assert!(preferred(&none).is_empty());
-        assert!(explain(&none).contains("координаты"), "{}", explain(&none));
-    }
-
-    /// Кэш заголовков помещается в запас, отложенный на всё несчитаемое: он и
-    /// есть самая крупная его часть, названная числом.
-    #[test]
-    fn кэш_заголовков_помещается_в_запас() {
-        assert!(
-            u64::try_from(METADATA_CACHE).is_ok_and(|cache| cache < budget::RESERVE),
-            "кэш метаданных не помещается в запас"
-        );
     }
 }

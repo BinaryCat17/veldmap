@@ -1,51 +1,51 @@
 # VeldMap
 
-Настольное приложение для работы со спутниковыми снимками: обход и поиск по
-каталогу провайдера (Copernicus Data Space), скачивание продуктов в локальную
-библиотеку и просмотр — в том числе снимков, которые не скачаны, прямо из
-удалённого хранилища. Построено как микроядро: нативный хост на Rust с
-рантаймом WebAssembly, а вся прикладная логика — изолированные wasm-модули,
-общающиеся через шину событий.
+A desktop application for working with satellite imagery: walking and searching
+the provider catalogue (Copernicus Data Space), downloading products into a
+local library, and viewing them — including imagery that has not been
+downloaded, straight from remote storage. Built as a microkernel: a native Rust
+host with a WebAssembly runtime, while all application logic lives in isolated
+wasm modules that communicate over an event bus.
 
-## Требования
+## Requirements
 
 | | |
 |---|---|
-| Rust | nightly (закреплён в `veldcore/rust-toolchain.toml`) — ради `-Zthreads` в `veldcore/.cargo/config.toml`; нестабильных возможностей языка в коде нет |
-| Цели сборки | `wasm32-wasip1` для модулей, `x86_64-unknown-linux-gnu` для хоста |
-| Python | 3.10+ (кодогенерация и сборочные скрипты; `buildgen/.venv` создаётся сам) |
+| Rust | nightly (pinned in `veldcore/rust-toolchain.toml`) — for `-Zthreads` in `veldcore/.cargo/config.toml`; the code uses no unstable language features |
+| Build targets | `wasm32-wasip1` for the modules, `x86_64-unknown-linux-gnu` for the host |
+| Python | 3.10+ (code generation and build scripts; `buildgen/.venv` is created automatically) |
 | GPU | Vulkan |
-| Линковка (Linux) | `clang` + `mold` |
-| Кросс-сборка под Windows | `x86_64-w64-mingw32-gcc` |
+| Linking (Linux) | `clang` + `mold` |
+| Cross-compiling for Windows | `x86_64-w64-mingw32-gcc` |
 
-## Сборка и запуск
+## Build and run
 
 ```bash
-python3 buildgen/build.py          # единственная команда сборки и проверки
-python3 buildgen/run-native.py     # запуск
+python3 buildgen/build.py          # the single build and check command
+python3 buildgen/run-native.py     # run
 ```
 
-Что делает сборка по шагам, как гонять тесты порознь, прогон сценариев
-интерфейса — [docs/operations/](docs/operations/build.md). Процесс работы над
-кодом — [CLAUDE.md](CLAUDE.md).
+What the build does step by step, how to run the tests individually, how to run
+the interface scenarios — [docs/operations/](docs/operations/build.md). The
+development process — [CLAUDE.md](CLAUDE.md).
 
-## Доступ к Copernicus
+## Copernicus access
 
-Каталог и скачивание требуют ключей S3 к Copernicus Data Space: скопируйте
-[`.env.example`](.env.example) в `.env` и впишите свои
-(`COPERNICUS_ACCESS_KEY`, `COPERNICUS_ACCESS_SECRET`). Без них сборка и
-запуск проходят, поиск по каталогу работает, а листинг хранилища, показ по
-сети и скачивание отвечают отказом. Как значения попадают в конфиги —
-[docs/operations/configuration.md](docs/operations/configuration.md).
+Catalogue browsing and downloading require S3 keys for Copernicus Data Space:
+copy [`.env.example`](.env.example) to `.env` and fill in your own
+(`COPERNICUS_ACCESS_KEY`, `COPERNICUS_ACCESS_SECRET`). Without them the build
+and the run still pass and catalogue search works, but storage listing, viewing
+over the network and downloading answer with a refusal. How the values reach
+the configs — [docs/operations/configuration.md](docs/operations/configuration.md).
 
-## Документация
+## Documentation
 
-- [docs/architecture/overview.md](docs/architecture/overview.md) — карта
-  репозитория, микроядро, сервисы и указатели на остальные страницы.
-- [docs/glossary.md](docs/glossary.md) — термины; [docs/limitations.md](docs/limitations.md)
-  — чего приложение не делает и почему; [docs/decisions/](docs/decisions/README.md)
-  — принятые решения с замерами.
+- [docs/architecture/overview.md](docs/architecture/overview.md) — the map of
+  the repository, the microkernel, the services and pointers to the other pages.
+- [docs/glossary.md](docs/glossary.md) — terms; [docs/limitations.md](docs/limitations.md)
+  — what the application does not do and why; [docs/decisions/](docs/decisions/README.md)
+  — accepted decisions with their measurements.
 
-## Лицензия
+## License
 
-См. [LICENSE](LICENSE).
+See [LICENSE](LICENSE).

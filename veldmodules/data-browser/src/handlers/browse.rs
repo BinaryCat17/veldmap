@@ -1,42 +1,45 @@
-//! Сетевой каталог: переходы по папкам и подгрузка раскрытых строк.
+//! Network catalogue: folder navigation and loading of expanded rows.
 
 use crate::module::components::{arrange, folder_of, folder_path, last_segment, rows};
 use crate::module::state::browse::BrowseItem;
 use crate::module::state::{Highlight, Listing, State, ViewId, ViewKind};
 use crate::proto::data_provider::{ListEntry, ListPathRequest, ListPathResponse};
 
-/// Сколько записей забирать из одной папки. Хранилище отдаёт листинг
-/// страницами, и страницы дочитываются одна за другой — иначе папка с сотней
-/// продуктов показывала бы первые двести и молчала об остальных. Потолок нужен
-/// затем, что корень бакета не кончается.
+/// How many entries to take from one folder. The storage returns the listing in
+/// pages, and the pages are read one after another — otherwise a folder with a
+/// hundred products would show the first two hundred and stay silent about the
+/// rest. The cap exists because the bucket root never ends.
 pub const MAX_ITEMS: usize = 1000;
 
-/// Запрашивает листинг пути у названного вида и переводит его в loading.
-/// Единственная точка входа — и для навигации в папку, и для «вверх», и для
-/// открытия вкладки (см. handlers::nav): три копии этих десяти строк
-/// расходились в мелочах.
+/// Requests the listing of a path for the named view and moves it to loading.
+/// The single entry point — for folder navigation, for "up", and for opening a
+/// tab (see handlers::nav): three copies of these ten lines drift apart in
+/// small details.
 pub fn request_path(state: &mut State, view: ViewId, path: String) {
-    // Путь папки — всегда со слэшем; корень — пустой. Продукт из поиска
-    // приходит голым ключом (`eodata/…/S1C_….SAFE`), а листинг по префиксу
-    // без слэша показал бы саму папку вместо её содержимого.
+    // The folder path always ends with a slash; the root is empty. A product
+    // from search arrives as a bare key (`eodata/…/S1C_….SAFE`), and listing by
+    // a prefix without a slash would show the folder itself instead of its
+    // contents.
     let path = if path.is_empty() || path.ends_with('/') { path } else { path + "/" };
     let correlation_id = {
         let Some(ViewKind::Browse(browse)) = state.get_mut(view) else { return };
         browse.current_path = path.clone();
         browse.error = None;
-        // Содержимое накапливается ответами (см. on_list_path_result), поэтому
-        // новый обход начинается с пустого списка, а не заменяет старый в конце:
-        // иначе на экране до первого ответа стояла бы чужая папка.
+        // The contents accumulate by responses (see on_list_path_result), so a
+        // new walk starts from an empty list instead of replacing the old one at
+        // the end: otherwise the screen would show a foreign folder until the
+        // first response.
         browse.items.clear();
-        // Раскрытое принадлежало прошлой папке: её строк здесь больше нет, а
-        // одноимённая раскрылась бы сама собой, ничего для этого не сделав.
+        // The expanded rows belonged to the previous folder: its rows are no
+        // longer here, and a same-named one would appear expanded on its own,
+        // without anything done for it.
         browse.children.clear();
         browse.listing.expanded.clear();
         browse.listing.page = 0;
         browse.request.begin()
     };
-    // Ушли из папки, к строке которой привёл переход, — подсвечивать больше
-    // нечего.
+    // Left the folder whose row the navigation pointed at — there is nothing
+    // left to highlight.
     state.drop_target_in(view);
     state.listings.insert(correlation_id.clone(), Listing::Path(view));
 
@@ -47,14 +50,14 @@ pub fn request_path(state: &mut State, view: ViewId, path: String) {
     }, &correlation_id);
 }
 
-/// Спросить содержимое раскрытой строки. Зовётся только на раскрытие: закрытая
-/// строка своё содержимое не показывает, и листать его незачем — в корне бакета
-/// папок сотни.
+/// Ask for the contents of an expanded row. Called only on expansion: a closed
+/// row does not show its contents, and paging through them is pointless — the
+/// bucket root holds hundreds of folders.
 pub fn request_children(state: &mut State, view: ViewId, key: String) {
     let path = folder_path(&key);
     let Some(children) = state.get_mut(view).and_then(ViewKind::children_mut) else { return };
-    // Спрашивали уже — второй раз незачем: строку раскрывают и закрывают
-    // сколько угодно, а содержимое папки от этого не меняется.
+    // Already asked — no need to ask again: a row can be expanded and closed
+    // any number of times, and the folder contents do not change because of it.
     if children.known(&path) {
         return;
     }
@@ -68,12 +71,12 @@ pub fn request_children(state: &mut State, view: ViewId, key: String) {
     }, &correlation_id);
 }
 
-/// Перейти в папку. Пустой путь — перечитать текущую: так же приходит и
-/// «обновить», у которого своего пути нет.
+/// Enter a folder. An empty path rereads the current one: "refresh" arrives the
+/// same way, as it has no path of its own.
 ///
-/// Из вида, у которого каталога нет (скачанное, поиск), переход ведёт в
-/// каталог — открытый, а не новый: показать папку — это перейти в неё, а не
-/// завести под неё вкладку (см. `handlers::nav::catalog`).
+/// From a view that has no catalogue (downloaded, search), the navigation leads
+/// to the catalogue — an open one, not a new one: showing a folder means going
+/// to it, not opening a tab for it (see `handlers::nav::catalog`).
 pub fn on_enter(state: &mut State, view: ViewId, path: String) {
     let Some(browse) = state.browse_mut(view) else {
         if !path.is_empty() {
@@ -100,10 +103,10 @@ pub fn on_up(state: &mut State, view: ViewId) {
     request_path(state, view, path);
 }
 
-/// Показать запись в этом каталоге: перейти в её папку и встать на её строку.
+/// Show an entry in this catalogue: go to its folder and stand on its row.
 ///
-/// Переход к уже открытой папке не перечитывает её: содержимое под рукой, и
-/// сетевой ход ради того же самого только заставил бы ждать.
+/// Navigating to an already open folder does not reread it: the contents are at
+/// hand, and a network round trip for the same thing would only make one wait.
 pub fn reveal(state: &mut State, view: ViewId, key: String) {
     let folder = match folder_of(&key) {
         "" => String::new(),
@@ -113,32 +116,33 @@ pub fn reveal(state: &mut State, view: ViewId, key: String) {
     if !here {
         request_path(state, view, folder);
     }
-    // Привели к другому снимку, чем обведён на шаре, — лента гаснет: подсвечена
-    // на экране одна строка, и переход — свежий ответ на тот же вопрос, что и
-    // щелчок по шару (см. `state::Highlight`). К тому же самому снимку приводит
-    // как раз полоса под шаром, и там гасить нечего.
+    // Pointed at a different snapshot than the one outlined on the globe — the
+    // ribbon goes dark: one row is highlighted on screen, and the navigation is
+    // a fresh answer to the same question as a click on the globe (see
+    // `state::Highlight`). The strip under the globe leads to that very
+    // snapshot, and there is nothing to dim there.
     let same = state.picked_key() == key;
     if !same {
         super::outline::deselect(state);
     }
     if let Some(listing) = state.listing_mut(view) {
-        // Просьба новая, даже если строка та же: без этого повторный переход к
-        // ней ничего бы не сдвинул (см. `ListingState::aim`).
+        // The request is new even if the row is the same: without this, a
+        // repeated navigation to it would move nothing (see `ListingState::aim`).
         listing.aim = listing.aim.wrapping_add(1);
     }
     state.highlight = Some(Highlight { key, view: Some(view), on_globe: same });
-    // Папку ещё листают — считать страницу не по чему; посчитает её конец
-    // листинга (см. [`aim`]).
+    // The folder is still being paged through — there is nothing to compute the
+    // page from; the end of the listing will do it (see [`aim`]).
     if here {
         aim(state, view);
     }
 }
 
-/// Встать на страницу, где стоит строка перехода.
+/// Stand on the page where the target row sits.
 ///
-/// Считается по тем же строкам и тому же отбору, что показаны: страница —
-/// свойство показа, и второй способ её вычислить указал бы не туда ровно
-/// тогда, когда список отсортирован не по умолчанию.
+/// Computed over the same rows and the same filtering that are shown: the page
+/// is a property of the display, and a second way to compute it would point the
+/// wrong way exactly when the list is sorted non-default.
 fn aim(state: &mut State, view: ViewId) {
     let rows = rows::of(state, view);
     let Some(listing) = state.get(view).and_then(ViewKind::listing) else { return };
@@ -147,9 +151,9 @@ fn aim(state: &mut State, view: ViewId) {
         return;
     }
     let page = arrange::page_of(&rows, listing, &key);
-    // Строка в папке есть, а на странице её нет — значит её убрал отбор,
-    // набранный в этой вкладке. Промолчать тут нельзя: снаружи «привели, но
-    // никуда» и «не сработало» выглядят одинаково.
+    // The row is in the folder but not on the page — the filter set on this tab
+    // removed it. Silence is not an option here: from the outside "pointed but
+    // nowhere" and "did not work" look the same.
     let hidden = page.is_none() && rows.iter().any(|row| row.named(&key));
 
     if let Some(page) = page {
@@ -157,12 +161,12 @@ fn aim(state: &mut State, view: ViewId) {
             listing.page = page;
         }
     } else if hidden {
-        state.notice = Some("Строка есть в папке, но её скрыл отбор".to_string());
+        state.notice = Some("The row is in the folder but hidden by the filter".to_string());
     }
 }
 
-/// Broadcast-топик: кому этот листинг, знает таблица маршрутов. Не найден — не
-/// наш.
+/// Broadcast topic: the routing table knows whose listing this is. Not found —
+/// not ours.
 pub fn on_list_path_result(state: &mut State, response: ListPathResponse) {
     let correlation_id = veldsdk::correlation();
     let Some(asked) = state.listings.take(&correlation_id) else { return };
@@ -176,15 +180,16 @@ pub fn on_list_path_result(state: &mut State, response: ListPathResponse) {
     }
 }
 
-/// Содержимое папки, которую показывает вкладка.
+/// The contents of the folder the tab shows.
 ///
-/// Вид не найден — вкладку закрыли, пока ответ шёл, и показывать его негде.
-/// Свой, но устаревший (пользователь успел уйти в другую папку) отбрасываем
-/// тоже: его содержимое под нынешним путём было бы неправдой.
+/// View not found — the tab was closed while the response was in flight, and
+/// there is nowhere to show it. A stale one of ours (the user moved to another
+/// folder in the meantime) is dropped as well: its contents under the current
+/// path would be a lie.
 ///
-/// Ответ бывает не последним: пока хранилище отдаёт продолжение, запрос
-/// остаётся тем же — та же корреляция, тот же учёт, — и с учёта снимается
-/// только на последней странице.
+/// The response is not always the last one: while the storage serves a
+/// continuation, the request stays the same — same correlation, same accounting
+/// — and it is taken off the books only on the last page.
 fn on_path(state: &mut State, view: ViewId, correlation_id: String, response: ListPathResponse) {
     let Some(ViewKind::Browse(browse)) = state.get_mut(view) else { return };
 
@@ -202,10 +207,10 @@ fn on_path(state: &mut State, view: ViewId, correlation_id: String, response: Li
     browse.error = None;
     browse.items.extend(response.entries.into_iter().map(item));
 
-    // Потолок обхода. Молча обрывать нельзя — тем же правилом, что и у
-    // раскрытой строки (см. [`on_children`]): папка с тысячей записей и папка,
-    // которой оборвали хвост, с виду одинаковы, а «здесь всё» и «здесь начало»
-    // — разные ответы.
+    // The walk cap. Breaking off silently is not allowed — the same rule as for
+    // an expanded row (see [`on_children`]): a folder with a thousand entries
+    // and a folder whose tail was cut look the same, while "this is everything"
+    // and "this is the beginning" are different answers.
     let cut = !response.next_token.is_empty() && browse.items.len() >= MAX_ITEMS;
     let more = !response.next_token.is_empty() && !cut;
     if !more {
@@ -213,11 +218,11 @@ fn on_path(state: &mut State, view: ViewId, correlation_id: String, response: Li
         if cut {
             let shown = browse.items.len();
             let path = browse.current_path.clone();
-            veldsdk::log::warn!(target: "handlers", "листинг '{}' оборван на {}", path, shown);
-            state.notice = Some(format!("Показаны первые {} записей папки", shown));
+            veldsdk::log::warn!(target: "handlers", "listing '{}' cut at {}", path, shown);
+            state.notice = Some(format!("Showing the first {} entries of the folder", shown));
         }
-        // Строка перехода могла приехать только что — теперь видно, на какой
-        // она странице.
+        // The target row may have just arrived — now it is visible which page
+        // it is on.
         aim(state, view);
         return;
     }
@@ -231,24 +236,25 @@ fn on_path(state: &mut State, view: ViewId, correlation_id: String, response: Li
     }, &correlation_id);
 }
 
-/// Как назвать папку в извещении: своим именем, а не путём.
+/// How to name a folder in a notice: by its own name, not its path.
 ///
-/// Путь снимка — полтораста знаков, и вставленный в полосу состояния целиком он
-/// съедает всё её место: увидено будет начало пути и ничего больше. Имя же
-/// коротко и опознаётся с одного взгляда — оно и стои́т в строке списка.
+/// A snapshot path is a hundred and fifty characters, and pasted whole into the
+/// status bar it eats all of its room: only the start of the path would be
+/// seen. The name is short and recognizable at a glance — it is what stands in
+/// the list row.
 fn named(key: &str) -> String {
     let leaf = key.trim_end_matches('/').rsplit('/').next().unwrap_or(key);
     crate::module::components::format::ellipsize(leaf, 24)
 }
 
-/// Содержимое раскрытой строки.
+/// The contents of an expanded row.
 ///
-/// Отказ вид не ломает — папка одна из многих, — но и не запоминается: папка
-/// забывается целиком, и следующее раскрытие спросит её заново. Оставленный
-/// пустой ключ значил бы «спрашивали, и там пусто», то есть закрыл бы дорогу
-/// повтору навсегда. Извещением он при этом говорится: молчание тут неотличимо
-/// от пустой папки, а повторять нажатие человек станет, только зная, что первое
-/// не вышло.
+/// A failure does not break the view — the folder is one of many — but it is
+/// not remembered either: the folder is forgotten whole, and the next expansion
+/// will ask for it again. Leaving an empty key would mean "asked, and it is
+/// empty", closing the road to a retry forever. It is reported in a notice
+/// meanwhile: silence here is indistinguishable from an empty folder, and a
+/// person will press again only knowing that the first attempt failed.
 fn on_children(
     state: &mut State,
     view: ViewId,
@@ -259,22 +265,22 @@ fn on_children(
     let Some(children) = state.get_mut(view).and_then(ViewKind::children_mut) else { return };
 
     if !response.error.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "'{}' не раскрылась: {}", key, response.error);
+        veldsdk::log::warn!(target: "handlers", "'{}' failed to expand: {}", key, response.error);
         children.forget(&key);
-        // Сказать об этом надо тем же доводом, что и об оборванном хвосте
-        // ниже: не раскрывшаяся папка и пустая с виду одинаковы. Треугольник
-        // схлопывается, и всё — а причина уезжает в лог, куда смотрящий на
-        // список не смотрит.
+        // This must be told for the same reason as the cut tail below: a folder
+        // that failed to expand and an empty one look the same. The triangle
+        // collapses and that is it — while the reason goes to the log, where
+        // whoever looks at the list does not look.
         //
-        // Папка при этом не названа: место в полосе не резиновое, а имя снимка
-        // — полтораста знаков, и вместе с ним причина не помещается вовсе.
-        // Спрашивающий помнит, по чему нажал, секунду назад; чего он не знает —
-        // это почему не вышло.
-        state.notice = Some(format!("Папка не раскрылась: {}", response.error));
+        // The folder is not named meanwhile: the bar space is not elastic, and
+        // a snapshot name is a hundred and fifty characters, leaving no room
+        // for the reason at all. The person remembers what they pressed a
+        // second ago; what they do not know is why it failed.
+        state.notice = Some(format!("The folder failed to expand: {}", response.error));
         return;
     }
-    // Папку успели забыть, пока страница шла, — цепочку обрываем: её хвост в
-    // набор не кладут (см. `Children::extend`).
+    // The folder was forgotten while the page was in flight — break the chain:
+    // its tail is not added to the set (see `Children::extend`).
     if !children.extend(&key, response.entries.into_iter().map(item)) {
         return;
     }
@@ -283,12 +289,13 @@ fn on_children(
         children.settle(&key);
         return;
     }
-    // Потолок обхода. Молча обрывать нельзя: раскрытая папка с тысячей записей
-    // и раскрытая папка, которой оборвали хвост, с виду одинаковы.
+    // The walk cap. Breaking off silently is not allowed: an expanded folder
+    // with a thousand entries and an expanded folder whose tail was cut look
+    // the same.
     if children.get(&key).len() >= MAX_ITEMS {
         let shown = children.get(&key).len();
         children.settle(&key);
-        state.notice = Some(format!("«{}»: показаны первые {} записей", named(&key), shown));
+        state.notice = Some(format!("\"{}\": showing the first {} entries", named(&key), shown));
         return;
     }
 
@@ -300,10 +307,10 @@ fn on_children(
     }, &correlation_id);
 }
 
-/// Запись листинга → то, чем её помнит вид. Одно место на все три листинга:
-/// признак папки выводится здесь из ключа, а короткое имя — общим правилом
-/// (см. [`last_segment`]), потому что так же его называют и строка списка, и
-/// заголовок вкладки.
+/// A listing entry → what the view remembers it as. One place for all three
+/// listings: the folder flag is derived here from the key, and the short name
+/// by a common rule (see [`last_segment`]), because the list row and the tab
+/// title name it the same way.
 fn item(entry: ListEntry) -> BrowseItem {
     BrowseItem {
         is_folder: entry.key.ends_with('/'),

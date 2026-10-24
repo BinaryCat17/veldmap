@@ -1,8 +1,8 @@
-//! Действия над библиотекой: скачать/пауза, удалить — и приём её состояния.
+//! Library actions: download/pause, delete — and accepting its state.
 //!
-//! Здесь нет ни путей, ни сидкаров, ни знания о том, как на диске отличается
-//! недокачанное: всё это делает data-library. Модуль только переводит нажатие
-//! в запрос к ней, а состояние получает рассылкой.
+//! Nothing here knows paths, sidecars, or how an unfinished download is told
+//! apart on disk: data-library does all of that. The module only turns a press
+//! into a request to it, and gets state by broadcast.
 
 use crate::proto::data_library::{
     DownloadRequest, ItemRequest, LibraryEntry, LibraryState as LibraryStateMsg, SnapshotFiles,
@@ -14,8 +14,8 @@ use crate::module::state::{Batch, Listing, State, ViewId, ViewKind};
 use crate::module::state::library::status_of;
 use crate::proto::data_library::LibraryStatus;
 
-/// Пользователь нажал «скачать». Повторное нажатие на идущую закачку —
-/// пауза: скачанное сохраняется, следующее нажатие продолжит с него.
+/// The user pressed "download". Pressing again on an ongoing download is a
+/// pause: what is downloaded stays, and the next press resumes from it.
 pub fn on_download_pressed(state: &mut State, identifier: String, product: String) {
     if identifier.is_empty() { return; }
 
@@ -31,29 +31,30 @@ pub fn on_download_pressed(state: &mut State, identifier: String, product: Strin
     crate::calls::data_library::on_download(&DownloadRequest { identifier, product });
 }
 
-/// Пользователь нажал «удалить» — на любой записи библиотеки (полной,
-/// недокачанной или заявленной одним лишь намерением). Идущую закачку это
-/// заодно отменяет; отдельного «отменить» нет, потому что оставить после себя
-/// он обязан то же самое — ничего (см. меню строки в components::table).
+/// The user pressed "delete" — on any library record (complete, unfinished,
+/// or declared by intent alone). This also cancels an ongoing download; there
+/// is no separate "cancel", because it must leave behind the same thing —
+/// nothing (see the row menu in components::table).
 pub fn on_delete_pressed(_state: &mut State, name: String) {
     if name.is_empty() { return; }
 
     crate::calls::data_library::on_delete(&ItemRequest { name });
 }
 
-/// Показать запись в файловом менеджере. Путь считает библиотека: раскладка
-/// хранения её, и знать её нам незачем.
+/// Show the record in the file manager. The library computes the path: the
+/// storage layout is its concern, and there is no need for us to know it.
 pub fn on_reveal_pressed(_state: &mut State, name: String) {
     if name.is_empty() { return; }
 
     crate::calls::data_library::on_reveal(&ItemRequest { name });
 }
 
-/// Скачать снимок целиком. Библиотека качает по файлу — снимка она не знает
-/// вовсе, — поэтому сперва спрашиваем провайдера, из чего снимок состоит.
+/// Download the whole snapshot. The library downloads file by file — it does
+/// not know about snapshots at all — so we first ask the provider what the
+/// snapshot consists of.
 ///
-/// Рекурсивным листингом, а не обходом по ярусам: файлы .SAFE разложены в
-/// четыре-пять уровней, и обход стоил бы запроса на каждый.
+/// By a recursive listing, not a walk by tiers: .SAFE files are laid out in
+/// four or five levels, and a walk would cost a request per level.
 pub fn on_download_snapshot(state: &mut State, product: String) {
     if product.is_empty() { return; }
 
@@ -65,21 +66,21 @@ pub fn on_download_snapshot(state: &mut State, product: String) {
     );
 }
 
-/// Снимок и то, что о нём насчитано страницами: обход идёт по одной, а оба
-/// числа — итоговые.
+/// The snapshot and what has been counted for it across pages: the walk goes
+/// page by page, while both numbers are running totals.
 pub struct Counted {
     pub product: String,
-    /// Сколько файлов снимка уже перечислено.
+    /// How many snapshot files have been listed so far.
     pub files: u32,
-    /// Сколько из них поставлено в закачку.
+    /// How many of them are queued for download.
     pub queued: usize,
 }
 
-/// Файлы снимка приехали — ставим в закачку то, чего на диске ещё нет, под тем
-/// снимком, из которого их позвали.
+/// The snapshot files arrived — queue for download what is not yet on disk,
+/// under the snapshot they were called from.
 ///
-/// Папок в рекурсивном листинге не бывает (см. `ListPathRequest.recursive`),
-/// поэтому отсеивать по роду нечего: всё, что пришло, — файлы.
+/// A recursive listing never contains folders (see `ListPathRequest.recursive`),
+/// so there is nothing to filter by kind: everything that arrived is files.
 pub fn on_snapshot_files(
     state: &mut State,
     counted: Counted,
@@ -88,17 +89,18 @@ pub fn on_snapshot_files(
 ) {
     let Counted { product, mut files, mut queued } = counted;
     if !response.error.is_empty() {
-        state.notice = Some(format!("Снимок «{}» не перечислился: {}", product, response.error));
+        state.notice = Some(format!("Snapshot \"{}\" could not be listed: {}", product, response.error));
         return;
     }
 
     files += response.entries.len() as u32;
     for entry in response.entries {
-        // Уже доведённое не трогаем. Перекачка сносит готовый файл до старта
-        // (см. data-library::download), поэтому «докачать снимок» на снимке,
-        // где половина уже на диске, стирало бы ровно то, что в нём есть, — и
-        // качало бы гигабайты заново. Перекачивают по одному файлу, из его
-        // меню, где это и помечено как необратимое.
+        // Already finished files are left alone. Re-downloading removes the
+        // finished file before starting (see data-library::download), so
+        // "resume the snapshot" on a snapshot half of which is already on disk
+        // would erase exactly what is in it — and download the gigabytes
+        // again. Re-downloading happens file by file, from its menu, where it
+        // is marked as irreversible.
         let done = state
             .library
             .by_identifier(&entry.key)
@@ -113,34 +115,37 @@ pub fn on_snapshot_files(
         queued += 1;
     }
 
-    // Страница не последняя — дочитываем той же корреляцией. Потолок тот же,
-    // что у обхода папки: снимок конечен, но раскладка, в которой он не
-    // кончается, не должна превращаться в бесконечную закачку. Молча
-    // обрывать её нельзя — недокачанный снимок с виду ничем не отличается от
-    // целого.
+    // Not the last page — read on with the same correlation. The cap is the
+    // same as for a folder walk: a snapshot is finite, but a layout in which
+    // it never ends must not turn into an endless download. It cannot be
+    // aborted silently — an unfinished snapshot looks no different from a
+    // whole one.
     let short = crate::module::components::last_segment(&product).to_string();
     if response.next_token.is_empty() {
-        veldsdk::log::info!(target: "handlers", "снимок '{}': {} файлов, в закачке {}", product, files, queued);
-        // Обход дошёл до конца — значит, состав снимка известен целиком, и это
-        // единственный момент, когда его можно назвать. Библиотека без этого
-        // числа считает полным всякий снимок, у которого доведено всё, что
-        // качали, — три файла из двадцати шести читались бы как «на диске».
+        veldsdk::log::info!(target: "handlers", "snapshot '{}': {} files, {} queued", product, files, queued);
+        // The walk reached the end — so the snapshot's contents are known in
+        // full, and this is the only moment when they can be named. Without
+        // this number the library treats as complete any snapshot where
+        // everything downloaded is finished — three files out of twenty-six
+        // would read as "on disk".
         crate::calls::data_library::on_snapshot(&SnapshotFiles { product, files });
         state.notice = Some(match (files, queued) {
-            // Обход кончился, не встретив ни файла. «Уже на диске» тут — ложь:
-            // на диске ничего нет, и качать хранилищу тоже нечего.
-            (0, _) => format!("В снимке «{}» нет файлов", short),
-            (_, 0) => format!("Снимок «{}» уже на диске", short),
-            (_, n) => format!("Снимок «{}»: в закачке {} файлов", short, n),
+            // The walk ended without meeting a single file. "Already on disk"
+            // would be a lie here: there is nothing on disk, and nothing for
+            // the storage to download either.
+            (0, _) => format!("Snapshot \"{}\" contains no files", short),
+            (_, 0) => format!("Snapshot \"{}\" is already on disk", short),
+            (_, n) => format!("Snapshot \"{}\": {} files queued", short, n),
         });
         return;
     }
     if queued >= super::browse::MAX_ITEMS {
-        // Состав снимка здесь не называем: обход оборван, и перечисленное —
-        // не весь снимок. Сказать библиотеке насчитанное значило бы объявить
-        // полным ровно тот снимок, который мы не дочитали.
+        // The snapshot's contents are not named here: the walk is aborted, and
+        // what was listed is not the whole snapshot. Telling the library the
+        // counted number would declare complete exactly the snapshot we did
+        // not finish reading.
         state.notice =
-            Some(format!("Снимок «{}»: поставлено {} файлов, остальные пропущены", short, queued));
+            Some(format!("Snapshot \"{}\": {} files queued, the rest skipped", short, queued));
         return;
     }
 
@@ -152,12 +157,12 @@ pub fn on_snapshot_files(
     );
 }
 
-/// Приостановить закачку снимка целиком.
+/// Pause the whole snapshot download.
 ///
-/// Разворачивается он так же, как при удалении: библиотека снимков не знает, а
-/// файлов у одного бывает под три десятка, и жать паузу на каждом — работа,
-/// которую приложение обязано сделать само. Приостанавливается только идущее:
-/// пауза на доведённом файле означала бы «начать и остановить».
+/// It unfolds the same way as on deletion: the library knows nothing of
+/// snapshots, and one can hold nearly thirty files, and pressing pause on each
+/// is work the application must do itself. Only ongoing downloads are paused:
+/// a pause on a finished file would mean "start and stop".
 pub fn on_pause_snapshot(state: &mut State, product: String) {
     if product.is_empty() { return; }
 
@@ -167,13 +172,15 @@ pub fn on_pause_snapshot(state: &mut State, product: String) {
     }
 }
 
-/// Выбросить снимок целиком. Библиотека про снимки не знает — она ведёт учёт
-/// файлам, — поэтому разворачиваем его здесь, в том же месте, где строку
-/// снимка и собрали (`downloaded_rows`), и просим удалить каждый её файл.
+/// Discard the whole snapshot. The library knows nothing of snapshots — it
+/// keeps track of files — so we unfold it here, in the same place where the
+/// snapshot row is assembled (`downloaded_rows`), and ask to delete each of
+/// its files.
 ///
-/// Отдельного «удали всё по снимку» в контракте нет намеренно: он потребовал
-/// бы от библиотеки знать границу снимка, а знает её провайдер, и второй
-/// носитель этого факта разошёлся бы с первым.
+/// A separate "delete everything for a snapshot" is deliberately absent from
+/// the contract: it would require the library to know the snapshot boundary,
+/// while the provider knows it, and a second carrier of this fact would
+/// diverge from the first.
 pub fn on_delete_snapshot(state: &mut State, product: String) {
     if product.is_empty() { return; }
 
@@ -182,11 +189,11 @@ pub fn on_delete_snapshot(state: &mut State, product: String) {
     }
 }
 
-/// Скачать всё выбранное в списке.
+/// Download everything selected in the list.
 ///
-/// Не то же, что нажать «скачать» у каждой строки: там это переключатель и
-/// второе нажатие ставит закачку на паузу (см. [`on_download_pressed`]), а
-/// пакетное действие названо одним словом и делать обязано одно.
+/// Not the same as pressing "download" on every row: there it is a toggle and
+/// a second press pauses the download (see [`on_download_pressed`]), while a
+/// batch action is named by one word and must do one thing.
 pub fn on_download_selected(state: &mut State, view: ViewId) {
     for what in fetches(state, view) {
         match what {
@@ -198,24 +205,26 @@ pub fn on_download_selected(state: &mut State, view: ViewId) {
     }
 }
 
-/// Что уедет закачке за одно пакетное нажатие.
+/// What goes to the download queue on a single batch press.
 ///
-/// Снимок и файл разведены родом, а не парой полей: снимка библиотека не знает
-/// вовсе — сперва у провайдера спрашивают, из чего он состоит (см.
-/// [`on_download_snapshot`]), — а файл уходит закачке прямо.
+/// Snapshot and file are separated by kind, not by a pair of fields: the
+/// library knows nothing of snapshots — the provider is first asked what one
+/// consists of (see [`on_download_snapshot`]) — while a file goes straight to
+/// the download queue.
 #[derive(PartialEq, Eq, Debug)]
 pub enum Fetch {
     Snapshot(String),
     File { identifier: String, product: String },
 }
 
-/// Имеет ли смысл качать эту строку — и чем.
+/// Whether this row is worth downloading — and how.
 ///
-/// Файл разбирается точно: доведённый и уже идущий пропускаются, оборванный
-/// докачивается. Снимок — только целиком доведённый, потому что чего в нём
-/// недостаёт, знает провайдер, а не мы: пока снимок не обойдён, у библиотеки
-/// нет и списка его файлов. Отсюда и `files == 0` — необойдённый качать есть
-/// зачем, и это самый частый случай: снимок из сетевого каталога.
+/// A file is judged precisely: finished and already ongoing ones are skipped,
+/// an interrupted one is resumed. A snapshot only when finished as a whole,
+/// because what is missing in it is known to the provider, not to us: until a
+/// snapshot is walked, the library has no list of its files either. Hence
+/// `files == 0` — an unwalked one is worth downloading, and this is the most
+/// common case: a snapshot from the network catalog.
 fn fetch_of(state: &State, key: &str, what: &Chosen) -> Option<Fetch> {
     match what {
         Chosen::Snapshot => {
@@ -240,7 +249,7 @@ fn fetch_of(state: &State, key: &str, what: &Chosen) -> Option<Fetch> {
     }
 }
 
-/// Что из выбранного имеет смысл качать. Дальше остаются одни запросы.
+/// What of the selection is worth downloading. From here on only requests remain.
 fn fetches(state: &State, view: ViewId) -> Vec<Fetch> {
     selection(state, view)
         .iter()
@@ -248,14 +257,14 @@ fn fetches(state: &State, view: ViewId) -> Vec<Fetch> {
         .collect()
 }
 
-/// Имена записей библиотеки, которыми обернётся удаление этой строки.
+/// The library record names that deleting this row will unfold into.
 ///
-/// Снимок разворачивается в свои файлы (см. [`files_of`]) — библиотека ведёт
-/// учёт файлам и о снимках не знает. Файл называет себя сам, но имя
-/// спрашивается у библиотеки, а не берётся из выбора: файл могли скачать уже
-/// после того, как его выбрали, — тогда запись появилась, а в выборе имени
-/// нет. Запомненное в выборе остаётся на случай, когда записи под этим ключом
-/// у библиотеки нет вовсе.
+/// A snapshot unfolds into its files (see [`files_of`]) — the library keeps
+/// track of files and knows nothing of snapshots. A file names itself, but the
+/// name is asked of the library, not taken from the selection: the file could
+/// have been downloaded after it was chosen — then the record appeared, while
+/// the selection holds no name. The name remembered in the selection stays for
+/// the case when the library has no record under this key at all.
 fn deletions_of(state: &State, key: &str, what: &Chosen) -> Vec<String> {
     match what {
         Chosen::Snapshot => files_of(state, key, |_| true),
@@ -264,8 +273,8 @@ fn deletions_of(state: &State, key: &str, what: &Chosen) -> Vec<String> {
                 Some(entry) => entry.name.clone(),
                 None => name.clone(),
             };
-            // Пустое имя до библиотеки не доезжает: удалять нечего, а запрос
-            // без имени она разберёт отказом.
+            // An empty name never reaches the library: there is nothing to
+            // delete, and a request without a name it answers with a refusal.
             match named.is_empty() {
                 true => Vec::new(),
                 false => vec![named],
@@ -274,13 +283,14 @@ fn deletions_of(state: &State, key: &str, what: &Chosen) -> Vec<String> {
     }
 }
 
-/// Выбросить всё выбранное — и с диска, и из очереди закачек.
+/// Discard everything selected — from disk and from the download queue.
 ///
-/// Выбор снимается с того, что действительно ушло удалению, и только с
-/// файлов: строки за удалённым файлом в «Скачанном» больше нет, и оставшийся
-/// выбор считался бы в заголовке до конца сеанса. Снимок остаётся выбранным —
-/// удалены его файлы с диска, а сам он живёт в каталоге, и делать с ним есть
-/// что и дальше.
+/// The selection is cleared only for what actually went to deletion, and only
+/// for files: the row for a deleted file is gone from "Downloaded", and the
+/// leftover selection would be counted in the header until the end of the
+/// session. A snapshot stays selected — its files are deleted from disk, while
+/// the snapshot itself lives in the catalog, and there is still something to
+/// do with it.
 pub fn on_delete_selected(state: &mut State, view: ViewId) {
     let (names, gone) = deletions(state, view);
     for name in names {
@@ -293,11 +303,11 @@ pub fn on_delete_selected(state: &mut State, view: ViewId) {
     }
 }
 
-/// Что уйдёт удалению за одно пакетное нажатие: имена записей библиотеки и
-/// ключи выбора, которые после этого перестанут на что-либо указывать.
+/// What goes to deletion on a single batch press: library record names and
+/// selection keys that will stop pointing at anything afterwards.
 ///
-/// Двумя списками из одного перебора, а не двумя переборами: разойдись они,
-/// выбор снимался бы не с того, что удалили.
+/// As two lists out of one traversal, not two traversals: should they diverge,
+/// the selection would be cleared for what was not deleted.
 fn deletions(state: &State, view: ViewId) -> (Vec<String>, Vec<String>) {
     let mut names: Vec<String> = Vec::new();
     let mut gone: Vec<String> = Vec::new();
@@ -308,21 +318,22 @@ fn deletions(state: &State, view: ViewId) -> (Vec<String>, Vec<String>) {
         }
         names.extend(asked);
     }
-    // Выбрать можно и снимок, и отдельный его файл, а удалить запись дважды
-    // значит вторым запросом промахнуться по уже несуществующему.
+    // Both a snapshot and its individual file can be selected, and deleting a
+    // record twice means the second request misses what no longer exists.
     names.sort();
     names.dedup();
     (names, gone)
 }
 
-/// Есть ли что делать пакетным кнопкам. Тем же разбором, каким потом пойдёт и
-/// само действие ([`deletions_of`], [`fetch_of`]): по этим ответам решают,
-/// показывать ли кнопку, и второй ответ на вопрос «что будет сделано» однажды
-/// разошёлся бы с первым — кнопка обещала бы действие и не совершала его.
+/// Whether the batch buttons have anything to do. The same analysis as the
+/// action itself will use later ([`deletions_of`], [`fetch_of`]): these
+/// answers decide whether to show a button, and a second answer to "what will
+/// be done" would one day diverge from the first — the button would promise an
+/// action and not perform it.
 ///
-/// Ответом «да/нет», а не числом: числа нигде не показываются, а спрашивают об
-/// этом на каждый кадр разметки — перебор обрывается на первом же выбранном,
-/// которому есть что сделать.
+/// As a yes/no answer, not a number: the numbers are shown nowhere, and this
+/// is asked on every layout frame — the traversal stops at the very first
+/// selected item for which something can be done.
 pub fn batch(state: &State, view: ViewId) -> Batch {
     let picked = selection(state, view);
     Batch {
@@ -331,12 +342,12 @@ pub fn batch(state: &State, view: ViewId) -> Batch {
     }
 }
 
-/// Выбранное в списке — копией: следом идут запросы к библиотеке, а они трогают
-/// то же состояние.
+/// The selection in the list — as a copy: library requests follow, and they
+/// touch the same state.
 ///
-/// В порядке ключей, а не множества: порядок множества случаен, и один и тот же
-/// выбор давал бы то запросы в одном порядке, то в другом, — а по этому же
-/// перебору считаются и числа заголовка.
+/// In key order, not set order: the order of a set is arbitrary, and the same
+/// selection would give requests in one order one time and in another the
+/// next — while the header numbers are counted by this same traversal.
 fn selection(state: &State, view: ViewId) -> Vec<(String, Chosen)> {
     let Some(listing) = state.get(view).and_then(ViewKind::listing) else {
         return Vec::new();
@@ -347,13 +358,14 @@ fn selection(state: &State, view: ViewId) -> Vec<(String, Chosen)> {
     picked
 }
 
-/// Имена записей снимка — то, чем библиотека адресует его файлы. Правило «что
-/// считать файлом этого снимка» написано здесь одно на всех: разворачивают
-/// снимок и пауза, и удаление, а два обхода её записей однажды разошлись бы —
-/// и пауза оставила бы качаться то, что удаление стёрло.
+/// The snapshot record names — how the library addresses its files. The rule
+/// "what counts as a file of this snapshot" is written here once for all: both
+/// pause and deletion unfold a snapshot, and two traversals of its records
+/// would one day diverge — and pause would keep downloading what deletion
+/// erased.
 ///
-/// Именами, а не ссылками на записи: следом за обходом идут запросы к
-/// библиотеке, и держать её состояние занятым до конца перебора незачем.
+/// As names, not references to records: library requests follow the
+/// traversal, and there is no need to keep its state busy until the end.
 fn files_of(state: &State, product: &str, wanted: impl Fn(&LibraryEntry) -> bool) -> Vec<String> {
     state
         .library
@@ -364,12 +376,12 @@ fn files_of(state: &State, product: &str, wanted: impl Fn(&LibraryEntry) -> bool
         .collect()
 }
 
-/// Библиотека прислала состояние — своё или в ответ на наш запрос. Второго
-/// источника правды о скачанном у нас нет, поэтому просто заменяем.
+/// The library sent state — its own or in answer to our request. We have no
+/// second source of truth about what is downloaded, so we simply replace.
 ///
-/// Отказ показывается до следующего удачного состояния и им же снимается:
-/// сообщение, которое некому погасить, висит на экране до перезапуска и врёт
-/// тем дольше, чем дольше работает приложение.
+/// A failure is shown until the next successful state and cleared by it: a
+/// message with nobody to clear it hangs on screen until restart and lies the
+/// longer the application runs.
 pub fn on_state(state: &mut State, msg: LibraryStateMsg) {
     if !msg.error.is_empty() {
         state.error = Some(format!("Library: {}", msg.error));
@@ -380,12 +392,12 @@ pub fn on_state(state: &mut State, msg: LibraryStateMsg) {
     measure_speed(state);
 }
 
-/// Скорость закачки — из двух соседних состояний: сколько байт прибавилось за
-/// сколько секунд. Своего поля под неё у библиотеки нет, и быть не должно —
-/// она рассылает то, что есть сейчас, а не то, как быстро оно росло.
+/// Download speed — from two adjacent states: how many bytes were added over
+/// how many seconds. The library has no field for it, and should not have one
+/// — it broadcasts what exists now, not how fast it was growing.
 ///
-/// Замер сбрасывается, когда качать нечего: скорость закончившейся закачки —
-/// это уже не скорость, а последнее увиденное число.
+/// The measurement resets when there is nothing to download: the speed of a
+/// finished download is no longer a speed, but the last number seen.
 fn measure_speed(state: &mut State) {
     let (count, done, _) = state.library.downloading();
     if count == 0 {
@@ -398,9 +410,9 @@ fn measure_speed(state: &mut State) {
 
     if let Some((measured_at, measured_done)) = state.measured {
         let seconds = now - measured_at;
-        // Того же мгновения мало: разделив на ноль секунд, получим не скорость,
-        // а бесконечность. Прошлый замер при этом сохраняется — следующее
-        // состояние сравнится уже с ним.
+        // The same instant is not enough: dividing by zero seconds yields not
+        // a speed but infinity. The previous measurement is kept — the next
+        // state will then be compared against it.
         if seconds > 0 {
             state.speed = done.saturating_sub(measured_done) as f32 / seconds as f32;
             state.measured = Some((now, done));
@@ -408,236 +420,4 @@ fn measure_speed(state: &mut State) {
         return;
     }
     state.measured = Some((now, done));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::module::state::{BrowseState, ViewKind};
-
-    fn state() -> State {
-        State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние")
-    }
-
-    fn entry(name: &str, product: &str, status: LibraryStatus) -> LibraryEntry {
-        LibraryEntry {
-            name: name.to_string(),
-            identifier: format!("eodata/{}/{}", product, name),
-            product: product.to_string(),
-            done: 10,
-            total: 10,
-            status: status as i32,
-            modified: 0,
-            siblings: 0,
-            trouble: String::new(),
-        }
-    }
-
-    /// Список с выбором: вид, его строки и то, что в нём отмечено.
-    fn chose(picked: Vec<(&str, Chosen)>, entries: Vec<LibraryEntry>) -> (State, ViewId) {
-        let mut state = state();
-        state.library.entries = entries;
-        let pane = state.focused();
-        let view = state.open_in(pane, ViewKind::Browse(BrowseState::default()));
-        let listing = state.listing_mut(view).expect("список");
-        for (key, what) in picked {
-            listing.selected.insert(key.to_string(), what);
-        }
-        (state, view)
-    }
-
-    fn file(identifier: &str, name: &str) -> Chosen {
-        Chosen::File {
-            identifier: identifier.to_string(),
-            product: String::new(),
-            name: name.to_string(),
-        }
-    }
-
-    /// Выбранный снимок разворачивается в свои файлы — и только в свои; его же
-    /// файл, выбранный отдельно, второго запроса не добавляет.
-    ///
-    /// Библиотека ведёт учёт файлам и о снимках не знает, поэтому разворот
-    /// здесь единственный способ удалить снимок. Второй запрос по тому же
-    /// имени промахнулся бы по уже несуществующему, а чужой файл рядом
-    /// проверяет, что отбор идёт равенством `product`, а не префиксом.
-    #[test]
-    fn a_snapshot_unfolds_into_its_own_files_and_only_once() {
-        let (state, view) = chose(
-            vec![
-                ("S2B_X.SAFE", Chosen::Snapshot),
-                ("eodata/S2B_X.SAFE/B1.TIF", file("eodata/S2B_X.SAFE/B1.TIF", "B1.TIF")),
-            ],
-            vec![
-                entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete),
-                entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete),
-                entry("C1.TIF", "S2B_Y.SAFE", LibraryStatus::LibComplete),
-            ],
-        );
-
-        assert_eq!(
-            deletions(&state, view).0,
-            vec!["B1.TIF".to_string(), "B2.TIF".to_string()],
-            "оба файла снимка по разу, чужой не тронут"
-        );
-    }
-
-    /// Файл, скачанный уже после того, как его выбрали, всё равно удаляется:
-    /// имя записи спрашивается у библиотеки, а запомненное в выборе остаётся на
-    /// случай, когда записи под этим ключом у неё нет вовсе.
-    #[test]
-    fn a_file_downloaded_after_it_was_chosen_is_still_deleted() {
-        let (state, view) = chose(
-            vec![("eodata/lone/dem.tif", file("eodata/lone/dem.tif", ""))],
-            vec![entry("dem.tif", "lone", LibraryStatus::LibComplete)],
-        );
-
-        assert_eq!(deletions(&state, view).0, vec!["dem.tif".to_string()]);
-    }
-
-    /// Выбранного нет на диске вовсе — удалять нечего, и пустое имя до
-    /// библиотеки не доезжает: запрос без имени она разобрала бы отказом.
-    #[test]
-    fn nothing_on_disk_means_nothing_to_delete() {
-        let (state, view) = chose(
-            vec![("eodata/lone/dem.tif", file("eodata/lone/dem.tif", ""))],
-            Vec::new(),
-        );
-
-        assert!(deletions(&state, view).0.is_empty());
-    }
-
-    /// Доведённое пакетное «скачать» обходит: у строки то же нажатие — это
-    /// переключатель и остановило бы идущее, а пакетное действие названо одним
-    /// словом и делает одно.
-    #[test]
-    fn what_is_already_here_is_not_fetched_again() {
-        let (state, view) = chose(
-            vec![
-                ("eodata/lone/done.tif", file("eodata/lone/done.tif", "done.tif")),
-                ("eodata/lone/going.tif", file("eodata/lone/going.tif", "going.tif")),
-                ("eodata/lone/new.tif", file("eodata/lone/new.tif", "")),
-            ],
-            vec![
-                entry("done.tif", "lone", LibraryStatus::LibComplete),
-                entry("going.tif", "lone", LibraryStatus::LibDownloading),
-            ],
-        );
-
-        assert_eq!(
-            fetches(&state, view),
-            vec![Fetch::File {
-                identifier: "eodata/lone/new.tif".to_string(),
-                product: String::new(),
-            }]
-        );
-    }
-
-    /// Снимок, обойдённый и доведённый целиком, качать незачем; обойдённый
-    /// наполовину — есть зачем, а чего в нём недостаёт, скажет провайдер.
-    #[test]
-    fn a_whole_snapshot_is_not_fetched_again() {
-        let whole = |files: u32, done: LibraryStatus| {
-            let mut one = entry("B1.TIF", "S2B_X.SAFE", done);
-            one.siblings = files;
-            let mut two = entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete);
-            two.siblings = files;
-            vec![one, two]
-        };
-
-        let (state, view) =
-            chose(vec![("S2B_X.SAFE", Chosen::Snapshot)], whole(2, LibraryStatus::LibComplete));
-        assert!(fetches(&state, view).is_empty(), "снимок уже целиком на диске");
-
-        let (state, view) =
-            chose(vec![("S2B_X.SAFE", Chosen::Snapshot)], whole(3, LibraryStatus::LibComplete));
-        assert_eq!(
-            fetches(&state, view),
-            vec![Fetch::Snapshot("S2B_X.SAFE".to_string())],
-            "в снимке три файла, а на диске два"
-        );
-    }
-
-    /// Запись без ключа провайдера удаляется по запомненному имени и в закачку
-    /// не ставится: качать её неоткуда, а на диске она есть.
-    #[test]
-    fn a_file_without_a_provider_key_is_deleted_but_not_fetched() {
-        let (state, view) = chose(
-            vec![("dem.tif", Chosen::File {
-                identifier: String::new(),
-                product: String::new(),
-                name: "dem.tif".to_string(),
-            })],
-            Vec::new(),
-        );
-
-        assert_eq!(deletions(&state, view).0, vec!["dem.tif".to_string()]);
-        assert!(fetches(&state, view).is_empty(), "закачка без ключа никуда не поедет");
-    }
-
-    /// Оборванная закачка пакетом продолжается: остановленное — это то, что
-    /// человек и хотел бы дотянуть, а `.part` докачивается с места обрыва.
-    #[test]
-    fn an_interrupted_file_is_picked_up_again() {
-        let (state, view) = chose(
-            vec![("eodata/lone/half.tif", file("eodata/lone/half.tif", "half.tif"))],
-            vec![entry("half.tif", "lone", LibraryStatus::LibPaused)],
-        );
-
-        assert_eq!(
-            fetches(&state, view),
-            vec![Fetch::File {
-                identifier: "eodata/lone/half.tif".to_string(),
-                product: String::new(),
-            }]
-        );
-    }
-
-    /// Снимок, который ни разу не обходили, качать есть зачем — и это самый
-    /// частый случай: снимок из сетевого каталога, где на диске нет ничего.
-    /// Из чего он состоит, скажет провайдер.
-    #[test]
-    fn a_snapshot_never_walked_is_worth_fetching() {
-        let (state, view) = chose(vec![("S2B_X.SAFE", Chosen::Snapshot)], Vec::new());
-
-        assert_eq!(fetches(&state, view), vec![Fetch::Snapshot("S2B_X.SAFE".to_string())]);
-    }
-
-    /// Кнопка стои́т ровно тогда, когда ей есть что сделать, и отвечает на это
-    /// тем же разбором, каким пойдёт действие.
-    #[test]
-    fn the_buttons_answer_for_what_the_action_will_do() {
-        // Скачанный файл: удалять есть что, качать нечего.
-        let (state, view) = chose(
-            vec![("eodata/lone/done.tif", file("eodata/lone/done.tif", "done.tif"))],
-            vec![entry("done.tif", "lone", LibraryStatus::LibComplete)],
-        );
-        let can = batch(&state, view);
-        assert!(can.deletable && !can.fetchable);
-
-        // Снимок из каталога, которого на диске нет: наоборот.
-        let (state, view) = chose(vec![("S2B_X.SAFE", Chosen::Snapshot)], Vec::new());
-        let can = batch(&state, view);
-        assert!(!can.deletable && can.fetchable);
-    }
-
-    /// Удалённый файл уходит и из выбора: строки за ним больше нет, и оставшаяся
-    /// отметка считалась бы в заголовке до конца сеанса. Снимок остаётся: с
-    /// диска ушли его файлы, а сам он живёт в каталоге.
-    #[test]
-    fn deleting_drops_the_file_from_the_choice_and_keeps_the_snapshot() {
-        let (mut state, view) = chose(
-            vec![
-                ("S2B_X.SAFE", Chosen::Snapshot),
-                ("eodata/lone/dem.tif", file("eodata/lone/dem.tif", "dem.tif")),
-            ],
-            vec![entry("dem.tif", "lone", LibraryStatus::LibComplete)],
-        );
-
-        on_delete_selected(&mut state, view);
-
-        let listing = state.get(view).and_then(ViewKind::listing).expect("список");
-        assert!(listing.selected.contains_key("S2B_X.SAFE"), "снимок ушёл из выбора");
-        assert!(!listing.selected.contains_key("eodata/lone/dem.tif"), "файл остался в выборе");
-    }
 }

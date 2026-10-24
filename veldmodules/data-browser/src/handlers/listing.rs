@@ -1,9 +1,9 @@
-//! Показ списка: отбор, порядок, группировка, страница и меню.
+//! List presentation: filtering, order, grouping, page, and menu.
 //!
-//! Все шесть сообщений одинаковы для трёх видов и правят одно и то же
-//! состояние (см. `ViewKind::listing_mut`) — поэтому и обработчик у них общий.
-//! Своей ветки на каждый вид здесь нет и быть не должно: список один, и
-//! правила показа у него одни.
+//! All six messages are the same for the three views and drive the same state
+//! (see `ViewKind::listing_mut`) — that is why their handler is shared. There is
+//! no per-view branch here and there must not be one: the list is one, and its
+//! presentation rules are one.
 
 use crate::module::state::listing::{Filter, Grouping, Menu, Sorting};
 use crate::module::state::{Open, State, ViewId};
@@ -36,18 +36,19 @@ pub fn on_query(state: &mut State, view: ViewId, query: String) {
     state.refine(view);
 }
 
-/// Раскрыть строку в её содержимое или свернуть обратно.
+/// Expand a row into its contents or collapse it back.
 ///
-/// Содержимое папки каталога подгружается лениво, и спрашивается оно ровно
-/// здесь: показать его без раскрытия некому, а листать сотню папок наперёд
-/// значит сходить в сеть сто раз ради одной строки.
+/// Catalog folder contents are loaded lazily, and they are requested exactly
+/// here: there is nobody to show them without expanding, and paging through a
+/// hundred folders in advance means a hundred network round trips for one row.
 pub fn on_expand(state: &mut State, view: ViewId, key: String) {
     let Some(listing) = state.listing_mut(view) else { return };
     if !listing.expand(key.clone()) {
         return;
     }
-    // Упаковки снимка приехали вместе с ответом каталога, и путём в хранилище
-    // их ключ не является (см. `row::scene_key`) — листать по нему нечего.
+    // The snapshot's packages arrive together with the catalog response, and
+    // their key is not a storage path (see `row::scene_key`) — there is nothing
+    // to page through by it.
     if crate::module::components::row::is_scene_key(&key) {
         return;
     }
@@ -59,13 +60,13 @@ pub fn on_page(state: &mut State, view: ViewId, page: usize) {
     if let Some(listing) = state.listing_mut(view) {
         listing.page = page;
     }
-    // Ушли со страницы, к которой привёл переход, — вести больше не к чему,
-    // и подсветка на другой странице говорила бы неправду.
+    // Left the page the navigation led to — there is nothing left to lead to,
+    // and a highlight on another page would speak an untruth.
     state.drop_target_in(view);
 }
 
-/// Раскрыть меню, закрыть раскрытое (`None`) или переключить то же самое —
-/// повторное нажатие на чип.
+/// Open a menu, close the open one (`None`), or toggle the same one — a repeated
+/// press on a chip.
 pub fn on_menu(state: &mut State, view: ViewId, menu: Option<Menu>) {
     match menu {
         Some(menu) => state.toggle_open(Open::Listing(view, menu)),

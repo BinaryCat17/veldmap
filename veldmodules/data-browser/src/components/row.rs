@@ -1,43 +1,46 @@
-//! components/row.rs — строка списка: то, что показывают все три вида.
+//! components/row.rs — a list row: what all three views show.
 //!
-//! Состояние записи здесь не выводится: его присылает data-library, которая
-//! одна и знает, что лежит на диске, что качается и откуда взялось. Осталось
-//! сопоставление «запись каталога → то, что рисуем».
+//! The record's state is not derived here: data-library sends it, being the
+//! only one that knows what lies on disk, what is downloading, and where it
+//! came from. What remains is the mapping "catalogue record -> what we draw".
 
 use crate::module::state::library::{status_of, LibraryState};
 use crate::module::state::overlay::{Pace, Progress};
 use crate::proto::data_library::{LibraryEntry, LibraryStatus};
 
-/// Состояние строки. Сумма-тип, а не набор булевых полей: сочетания вроде
-/// «недокачан, но байт ноль и задачи нет» перестают быть выразимыми.
+/// Row state. A sum type, not a set of boolean fields: combinations like
+/// "half-downloaded, but zero bytes and no task" stop being expressible.
 #[derive(Clone, PartialEq)]
 pub enum RowStatus {
-    /// Записи в библиотеке нет — есть только у провайдера.
+    /// No record exists in the library — only the provider has one.
     Remote,
     Downloading { done: u64, total: u64 },
-    /// Начато, но не доведено. `done: 0` — закачка сорвалась до первых байт.
+    /// Started but not finished. `done: 0` — the download failed before the
+    /// first bytes.
     ///
-    /// `trouble` — почему сорвалась последняя попытка. Пусто — причины нет:
-    /// закачку остановил человек, либо попытка была до перезапуска (причина
-    /// живёт в памяти библиотеки), либо это строка снимка, чьи файлы стоя́т по
-    /// разным причинам. Стои́т запись во всех случаях одинаково и продолжается
-    /// одинаково, поэтому это не отдельное состояние, а причина при нём:
-    /// разница только в том, знает ли человек, почему она стои́т.
+    /// `trouble` — why the last attempt failed. Empty — there is no reason:
+    /// a person stopped the download, or the attempt predates a restart (the
+    /// reason lives in the library's memory), or this is a scene row whose
+    /// files are stopped for different reasons. The record is stopped the same
+    /// way in every case and resumes the same way, so this is not a separate
+    /// state but a reason attached to it: the only difference is whether the
+    /// person knows why it is stopped.
     Paused { done: u64, total: u64, trouble: String },
     Complete,
-    /// Папка или снимок, часть содержимого которых уже на диске. Сколько там
-    /// файлов всего, каталог не говорит, поэтому сказано только скачанное.
+    /// A folder or scene, part of whose content is already on disk. The
+    /// catalogue does not say how many files there are in total, so only the
+    /// downloaded count is stated.
     ///
-    /// `trouble` — почему стои́т остальное; пусто — не стои́т или причина у
-    /// частей разная. Нужно оно здесь по той же причине, что и у оборванной
-    /// строки, и даже больше: «3 на диске» — надпись спокойная, зелёная, и
-    /// отказ за ней не виден вовсе.
+    /// `trouble` — why the rest is stopped; empty — nothing is stopped or the
+    /// parts have different reasons. It is needed here for the same reason as
+    /// on an interrupted row, and even more so: "3 on disk" is a calm, green
+    /// label, and a failure behind it is not visible at all.
     Partial { done: usize, trouble: String },
 }
 
 impl RowStatus {
-    /// Сколько сделано из скольки, если это вообще идёт. `None` — полосе
-    /// загрузки в этой строке места нет.
+    /// How much is done out of how much, if anything is running at all.
+    /// `None` — there is no room for a download bar in this row.
     pub fn progress(&self) -> Option<(u64, u64)> {
         match self {
             RowStatus::Downloading { done, total } | RowStatus::Paused { done, total, .. } if *total > 0 => {
@@ -48,69 +51,75 @@ impl RowStatus {
     }
 }
 
-/// Очерчен ли снимок строки на шаре.
+/// Whether the row's scene is outlined on the globe.
 ///
-/// Своё состояние, а не производное от выбора: контур, показ растром и выбор
-/// строки — три независимых вещи, и сведённые в одну они отвечали бы друг за
-/// друга. Спрашивают его двое: значок контура в строке (горит ли) и стоящая
-/// рядом наводка — навести можно только на то, что на шаре есть.
+/// Its own state, not derived from selection: outline, raster display, and row
+/// selection are three independent things, and merged into one they would
+/// answer for each other. Two parties ask for it: the outline icon in the row
+/// (whether it lights up) and the tooltip beside it — one can only hover what
+/// is on the globe.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum OnOutline {
     #[default]
     Off,
-    /// Очертить попросили, а геометрия ещё едет из каталога: рисовать пока
-    /// нечего, но нажатие уже принято.
+    /// Outlining was requested, but the geometry is still coming from the
+    /// catalogue: there is nothing to draw yet, though the click is accepted.
     Asking,
-    /// Попросили, а геометрии у снимка нет вовсе — рисовать нечего и ждать
-    /// нечего. Состояние отдельное от [`OnOutline::Asking`], потому что иначе
-    /// значок обещал бы контур, который не приедет никогда.
+    /// Requested, but the scene has no geometry at all — nothing to draw and
+    /// nothing to wait for. A state separate from [`OnOutline::Asking`],
+    /// because otherwise the icon would promise an outline that never arrives.
     Blank,
-    /// Спросить не вышло — сеть или отказ службы. Про сам снимок это не
-    /// говорит ничего, и отделено от [`OnOutline::Blank`] поэтому: там
-    /// переспрашивать нечего, а здесь только и остаётся.
+    /// Asking failed — the network or the service refused. It says nothing
+    /// about the scene itself, and is therefore separate from
+    /// [`OnOutline::Blank`]: there nothing can be re-asked, while here that is
+    /// all that is left.
     Failed,
-    /// Нарисован.
+    /// Drawn.
     Drawn,
 }
 
-/// Чем снимок строки лежит на шаре.
+/// How the row's scene lies on the globe.
 ///
-/// Один ответ на все экраны и на все три списка. Знание это принадлежит
-/// приложению, а не вкладке — шар один, а списков сколько угодно, — и
-/// спрашивают его четверо: значок глобуса в строке (горит ли), полоса хода под
-/// строкой, список слоёв и штриховка, которой место снимка помечено на шаре,
-/// пока картинки нет (см. `handlers::outline::send`). Четырьмя
-/// выражениями по месту они разошлись бы молча: значок горел бы у снятого слоя
-/// ровно до следующей пересборки разметки.
+/// One answer for all screens and all three lists. This knowledge belongs to
+/// the application, not the tab — there is one globe but any number of lists —
+/// and four parties ask for it: the globe icon in the row (whether it lights
+/// up), the progress bar under the row, the layer list, and the hatching that
+/// marks the scene's place on the globe while there is no picture yet (see
+/// `handlers::outline::send`). Expressed four times inline they would silently
+/// diverge: the icon would stay lit for a removed layer until the very next
+/// layout rebuild.
 ///
-/// Про контур здесь не сказано ничего: у него своё состояние — [`OnOutline`].
+/// Nothing is said about the outline here: it has its own state — [`OnOutline`].
 #[derive(Clone, Copy, PartialEq, Default)]
 pub enum OnGlobe {
     #[default]
-    /// Растром его на шаре нет.
+    /// It is not on the globe as a raster.
     Off,
-    /// Показ попросили, а продукт под этим ключом ещё восстанавливает каталог:
-    /// наложения нет вовсе. Отдельно от [`OnGlobe::Assembling`], потому что
-    /// наводить в этом положении не на что — ни слоя, ни его рамки ещё не
-    /// заведено, — а во всём остальном они говорят одно и то же.
+    /// Display was requested, but the product under this key is still being
+    /// reassembled by the catalogue: there is no overlay at all. Separate from
+    /// [`OnGlobe::Assembling`], because in this position there is nothing to
+    /// aim at — neither a layer nor its frame exists yet — while in every other
+    /// respect they say the same thing.
     Asked,
-    /// Растры спрошены у провайдера или открываются: на шаре его ещё нет, но
-    /// он туда едет.
+    /// Rasters are being requested from the provider or opened: the scene is
+    /// not on the globe yet, but it is on its way there.
     Assembling,
-    /// Лежит растром. `hidden` — остаётся в наборе, но не рисуется; `progress`
-    /// — ход добычи, каким его рассказал глобус.
+    /// It lies as a raster. `hidden` — it stays in the set but is not drawn;
+    /// `progress` — the acquisition progress as the globe reported it.
     ///
-    /// Ход целиком, а не одна доля из него: полосу рисует доля, а объясняет её
-    /// подпись, и считаться они обязаны из одного и того же — иначе полоса и
-    /// подсказка под одним значком говорят разное.
+    /// The whole progress, not just one share of it: the bar draws the share
+    /// while the caption explains it, and both must be computed from the same
+    /// source — otherwise the bar and the tooltip under one icon say different
+    /// things.
     Laid { hidden: bool, progress: Progress },
 }
 
 impl OnGlobe {
-    /// Чем рисовать полосу под строкой (см. [`Pace`]). У сборки доли нет
-    /// вовсе: растры ещё спрашивают и открывают, и считать в ней нечего — но
-    /// сказать, что работа началась, надо именно тогда, потому что это первое,
-    /// что должен увидеть нажавший значок.
+    /// What to draw the bar under the row with (see [`Pace`]). Assembling has
+    /// no share at all: rasters are still being requested and opened, and
+    /// there is nothing to count there — but the fact that work has started
+    /// must be stated exactly then, because that is the first thing the person
+    /// who clicked the icon must see.
     pub fn pace(self) -> Pace {
         match self {
             OnGlobe::Off => Pace::Idle,
@@ -119,22 +128,23 @@ impl OnGlobe {
         }
     }
 
-    /// Ход по частям, от старшей к младшей: что полоса отсчитывает, сколько
-    /// прочитано и что едет прямо сейчас. Пусто — работа кончилась либо о ней
-    /// ещё нечего сказать.
+    /// Progress in parts, from coarse to fine: what the bar counts, how much
+    /// has been read, and what is arriving right now. Empty — the work is done
+    /// or there is nothing to say about it yet.
     ///
-    /// Частями, потому что мест у этой фразы два и они разной ширины: в ячейку
-    /// колонки влезают не все, в подсказку — все (см. `Progress::parts`).
+    /// In parts because this phrase has two places of different widths: not
+    /// everything fits in the column cell, while the tooltip fits everything
+    /// (see `Progress::parts`).
     pub fn parts(self) -> Vec<String> {
         match self {
             OnGlobe::Off => Vec::new(),
-            OnGlobe::Asked => vec!["спрашиваем каталог…".to_string()],
-            OnGlobe::Assembling => vec!["растры открываются…".to_string()],
+            OnGlobe::Asked => vec!["asking the catalogue…".to_string()],
+            OnGlobe::Assembling => vec!["opening rasters…".to_string()],
             OnGlobe::Laid { progress, .. } => progress.parts(),
         }
     }
 
-    /// Тот же ход одной фразой. `None` — сказать нечего.
+    /// The same progress in one phrase. `None` — there is nothing to say.
     pub fn said(self) -> Option<String> {
         let parts = self.parts();
         match parts.is_empty() {
@@ -143,81 +153,87 @@ impl OnGlobe {
         }
     }
 
-    /// Есть ли снимок на шаре хоть в каком-то виде — тем и горит значок, и
-    /// тем же занято место под полосу.
+    /// Whether the scene is on the globe in any form — that is what makes the
+    /// icon light up, and the same reserves the room for the bar.
     pub fn any(self) -> bool {
         !matches!(self, OnGlobe::Off)
     }
 
-    /// Есть ли куда наводить камеру: заведён слой — у него посчитана рамка.
-    /// Одной просьбы мало: пока каталог не ответил, о снимке не известно даже
-    /// того, где он.
+    /// Whether there is anywhere to aim the camera: a layer exists — its frame
+    /// is computed. One request is not enough: until the catalogue answers,
+    /// not even the scene's location is known.
     pub fn laid(self) -> bool {
         matches!(self, OnGlobe::Assembling | OnGlobe::Laid { .. })
     }
 
 }
 
-/// Чем запись является для приложения. Сумма-тип, а не пара булевых полей:
-/// «папка» и «снимок» — не два независимых свойства, а один род. Парой их не
-/// выразить: снимок бывает и каталогом, и одним объектом, а «папка, которая не
-/// снимок» и «снимок, который не папка» — это разные строки с разными
-/// действиями, а не сочетания флагов.
+/// What the record is to the application. A sum type, not a pair of boolean
+/// fields: "folder" and "scene" are not two independent properties but one
+/// kind. A pair cannot express it: a scene can be both a directory and a
+/// single object, while "a folder that is not a scene" and "a scene that is
+/// not a folder" are different rows with different actions, not combinations
+/// of flags.
 #[derive(Clone, Copy, PartialEq)]
 pub enum RowKind {
     File,
-    /// Папка пути: внутри снимки или другие папки. Сама по себе не показывает
-    /// ничего — в неё только заходят.
+    /// A folder of the path: inside are scenes or other folders. By itself it
+    /// shows nothing — one only enters it.
     Folder,
-    /// Снимок — одна логическая единица. Лежит он развёрнутым каталогом
-    /// (.SAFE, .SEN3) или одним объектом, показу безразлично: и то, и другое
-    /// декодер собирает в один растр. `folder` говорит лишь о том, есть ли
-    /// куда зайти внутрь.
+    /// A scene — one logical unit. It may lie as an expanded directory (.SAFE,
+    /// .SEN3) or as a single object; the display does not care: the decoder
+    /// assembles both into one raster. `folder` only says whether there is
+    /// anything to enter inside.
     Product { folder: bool },
 }
 
 impl RowKind {
-    /// Есть ли внутри содержимое, в которое заходят. У снимка-каталога оно
-    /// есть, но заход — не главное его действие: смотрят снимок целиком.
+    /// Whether there is content inside to enter. A catalogue folder has it,
+    /// but entering is not its main action: the scene is viewed as a whole.
     pub fn is_folder(self) -> bool {
         matches!(self, RowKind::Folder | RowKind::Product { folder: true })
     }
 
-    /// Снимок ли это — то, что кладут на шар и смотрят одной картинкой.
+    /// Whether this is a scene — what is put on the globe and viewed as one
+    /// picture.
     pub fn is_product(self) -> bool {
         matches!(self, RowKind::Product { .. })
     }
 }
 
-/// Голый ключ хранилища: без завершающего слэша, которым листинг помечает
-/// папку.
+/// The bare storage key: without the trailing slash that a listing uses to
+/// mark a folder.
 ///
-/// Слэш — признак строки листинга, а не часть пути: один и тот же продукт
-/// приходит из каталога со слэшем, а из выдачи поиска без него. Правило
-/// написано здесь одно на всех — от него зависят и папка записи, и путь
-/// листинга, и ключ снимка, и имя, которым его называют (см. [`last_segment`]),
-/// и сравнение строки с ключом перехода, а пять его копий однажды сочли бы один
-/// снимок за два.
+/// The slash is a mark of a listing row, not part of the path: the same
+/// product arrives from the catalogue with a slash and from search results
+/// without it. The rule is written here once for everyone — the record's
+/// folder, the listing path, the scene key, and the name it is called by (see
+/// [`last_segment`]) all depend on it, as does comparing a row with a
+/// navigation key, while five copies of it would one day count one scene as
+/// two.
 pub fn bare(key: &str) -> &str {
     key.trim_end_matches('/')
 }
 
-/// Последний сегмент пути — то, чем путь называют человеку: имя файла у ключа
-/// объекта, имя снимка у ключа каталога, заголовок у пути вкладки.
+/// The last path segment — what the path is called to a person: the file name
+/// for an object key, the scene name for a directory key, the title for a tab
+/// path.
 ///
-/// Слэш на конце в счёт не идёт (см. [`bare`]): он помечает строку листинга, а
-/// не отделяет за собой пустой сегмент, и `eodata/S2B_X.SAFE/` зовётся тем же
-/// именем, что и `eodata/S2B_X.SAFE`, — снимок за ними один. Пусто отвечается
-/// только пути без единого сегмента: корню и пустому ключу, — и читается это
-/// как «имя брать неоткуда», а не как «имя пустое».
+/// The trailing slash does not count (see [`bare`]): it marks a listing row
+/// rather than separating an empty segment after itself, so
+/// `eodata/S2B_X.SAFE/` is called by the same name as `eodata/S2B_X.SAFE` —
+/// there is one scene behind them. Only a path without a single segment
+/// answers empty: the root and the empty key — and this reads as "there is
+/// nowhere to take a name from", not as "the name is empty".
 pub fn last_segment(path: &str) -> &str {
     bare(path).rsplit('/').next().unwrap_or("")
 }
 
-/// Папка, в которой лежит ключ провайдера. Выводится из самого ключа — своего
-/// поля под это нет ни у каталога, ни у библиотеки, — и написана здесь одна на
-/// всех: её спрашивают и строка списка, и полоса под глобусом, а две копии
-/// правила «где кончается путь» однажды ответят по-разному.
+/// The folder the provider key lies in. Derived from the key itself — neither
+/// the catalogue nor the library has a field for it — and written here once
+/// for everyone: both the list row and the bar under the globe ask for it, and
+/// two copies of the "where the path ends" rule would one day answer
+/// differently.
 pub fn folder_of(identifier: &str) -> &str {
     let path = bare(identifier);
     match path.rfind('/') {
@@ -226,23 +242,24 @@ pub fn folder_of(identifier: &str) -> &str {
     }
 }
 
-/// Путь, которым листают содержимое этой записи: ключ папки — всегда со
-/// слэшем. Без него листинг по префиксу показал бы саму папку вместо того, что
-/// в ней лежит.
+/// The path used to browse this record's content: a folder key always ends
+/// with a slash. Without it, a prefix listing would show the folder itself
+/// instead of what lies inside it.
 pub fn folder_path(identifier: &str) -> String {
     format!("{}/", bare(identifier))
 }
 
-/// Чем смотреть снимок, о котором известен один ключ.
+/// How to view a scene known by a single key.
 ///
-/// Правило одно на всех, кто предлагает «смотреть» не из строки списка: полоса
-/// под шаром и список слоёв. Строка решает это сама — род и запись библиотеки
-/// записаны прямо в ней.
+/// One rule for everyone who offers "view" outside a list row: the bar under
+/// the globe and the layer list. A row decides this on its own — the kind and
+/// the library record are written right into it.
 ///
-/// Порядок вопросов — от дешёвого к дорогому. Скачанное смотрят с диска: файл
-/// под рукой, и ходить за ним по сети значит ждать того, что уже есть. Снимок,
-/// лежащий каталогом, открывается через провайдера — растр внутри выбирает он,
-/// потому что `GET` по пути каталога отвечает 404. Остальное открывается прямо.
+/// The order of questions goes from cheap to expensive. Downloaded content is
+/// viewed from disk: the file is at hand, and going over the network for it
+/// means waiting for what already exists. A scene lying as a directory is
+/// opened through the provider — it picks the raster inside, because a `GET`
+/// on a directory path answers 404. Everything else is opened directly.
 pub fn preview_of(
     library: &LibraryState,
     identifier: &str,
@@ -258,117 +275,124 @@ pub fn preview_of(
     }
 }
 
-/// Приставка ключа строки снимка, у которого упаковок несколько
-/// (см. [`scene_key`]).
-const SCENE: &str = "снимок:";
+/// Prefix of a scene row key whose scene has several packages
+/// (see [`scene_key`]).
+const SCENE: &str = "scene:";
 
-/// Ключ строки снимка, собранного из нескольких упаковок.
+/// The key of a scene row assembled from several packages.
 ///
-/// Путём продукта ему быть нельзя: показываемая упаковка стои́т под снимком
-/// собственной строкой, и с одинаковыми ключами раскрывались бы обе разом.
-/// Двоеточия в ключах хранилища не бывает, поэтому приставка ни с чем не
-/// совпадёт.
+/// It cannot be the product path: the shown package stands under the scene as
+/// a row of its own, and with equal keys both would expand at once. Colons
+/// never occur in storage keys, so the prefix collides with nothing.
 pub fn scene_key(identifier: &str) -> String {
     format!("{}{}", SCENE, identifier)
 }
 
-/// Ключ строки снимка — не путь в хранилище: листать по нему нечего, упаковки
-/// приехали вместе с ответом каталога.
+/// The scene row key is not a storage path: there is nothing to browse by it,
+/// the packages arrived along with the catalogue answer.
 pub fn is_scene_key(key: &str) -> bool {
     key.starts_with(SCENE)
 }
 
 pub struct Row {
-    /// Ключ провайдера; пустой — неизвестен, тогда докачка и просмотр
-    /// удалённого не предлагаются.
+    /// Provider key; empty — unknown, then resuming a download and remote
+    /// preview are not offered.
     pub identifier: String,
-    /// Собственный ключ строки — только у снимка с несколькими упаковками
-    /// (см. [`scene_key`]). У всех остальных `None`, и ключом им служит путь.
+    /// The row's own key — only for a scene with several packages
+    /// (see [`scene_key`]). All others have `None`, and the path serves as
+    /// their key.
     pub group: Option<String>,
-    /// Имя записи в библиотеке — ключ для удаления и просмотра. Пустое, если
-    /// записи ещё нет (файл не скачан).
+    /// The record's name in the library — the key for removal and preview.
+    /// Empty if there is no record yet (the file is not downloaded).
     pub name: String,
-    /// Отображаемое имя.
+    /// Displayed name.
     pub title: String,
     pub kind: RowKind,
-    /// Очерчен ли снимок строки (см. [`OnOutline`]).
+    /// Whether the row's scene is outlined (see [`OnOutline`]).
     pub outlined: OnOutline,
-    /// Размер в байтах; 0 — неизвестен.
+    /// Size in bytes; 0 — unknown.
     pub size: u64,
-    /// Время файла, unix-секунды; 0 — неизвестно.
+    /// File time, unix seconds; 0 — unknown.
     pub date: i64,
-    /// Чем запись считает каталог: у снимка это тип продукта («S2MSI2A»).
-    /// Пусто — каталог не сказал, и вид выводится из рода и имени
-    /// (см. [`Row::format`]).
+    /// What the catalogue calls the record: for a scene this is the product
+    /// type ("S2MSI2A"). Empty — the catalogue did not say, and the format is
+    /// derived from the kind and the name (see [`Row::format`]).
     pub product_type: String,
-    /// Снимок, к которому относится запись; пусто — она сама по себе. Едет с
-    /// ней до самой закачки: библиотека записывает файл в тот снимок, из
-    /// которого его позвали, а вывести это из ключа она не может — раскладку
-    /// бакета знает провайдер (см. `ListEntry.product`).
+    /// The scene this record belongs to; empty — it stands on its own. It
+    /// travels with it up to the download itself: the library writes the file
+    /// into the scene it was called from, and it cannot derive that from the
+    /// key — the provider knows the bucket layout (see `ListEntry.product`).
     pub product: String,
-    /// Содержимое строки: файлы снимка или записи раскрытой папки.
+    /// The row's content: the scene's files or the records of an expanded
+    /// folder.
     ///
-    /// У сложенной строки они есть всегда — она из них и сложена, и по ним
-    /// считается всё, что о ней известно (см. [`Row::stored`]); у папки
-    /// каталога наполняются только раскрытые, потому что до раскрытия их и не
-    /// спрашивали. Показывать содержимое или молчать о нём — дело не этого
-    /// поля, а раскладки (см. `arrange::expand`).
+    /// On a folded row they are always present — it is folded from them, and
+    /// everything known about it is computed from them (see [`Row::stored`]);
+    /// a catalogue folder is filled only when expanded, because before the
+    /// expansion they were never requested. Whether to show the content or
+    /// stay silent about it is not this field's business but the layout's
+    /// (see `arrange::expand`).
     pub children: Vec<Row>,
-    /// Строка сложена из записей библиотеки, а не является записью. Качать и
-    /// открывать нужно её файлы: её ключ — путь снимка в хранилище, и послать
-    /// его в закачку значит попросить скачать папку одним объектом.
+    /// The row is folded from library records rather than being a record
+    /// itself. Its files are what must be downloaded and opened: its key is
+    /// the scene's path in storage, and sending it to the download would mean
+    /// asking for the folder to be downloaded as a single object.
     ///
-    /// Отдельным полем, а не «есть дети»: детей заводит и раскрытая папка
-    /// каталога, а она как раз обычная запись, и заход внутрь у неё никто не
-    /// отнимает.
+    /// A separate field rather than "has children": an expanded catalogue
+    /// folder also has children, and it is exactly an ordinary record, with
+    /// nobody taking away its entry.
     pub folded: bool,
-    /// Содержимое раскрытой папки ещё едет. Пустота под ней читается как
-    /// «здесь ничего нет», и это неправда до конца листинга.
+    /// The expanded folder's content is still arriving. Emptiness under it
+    /// reads as "there is nothing here", and that is untrue until the listing
+    /// ends.
     pub loading: bool,
-    /// Чем снимок этой строки лежит на шаре (см. [`OnGlobe`]). Стоит здесь, а
-    /// не в разметке, потому что спрашивают это по ключу снимка, а ключ есть у
-    /// строки.
+    /// How this row's scene lies on the globe (see [`OnGlobe`]). It stands
+    /// here, not in the layout, because it is asked by the scene key, and the
+    /// row has the key.
     pub globe: OnGlobe,
-    /// Почему «на глобус» не предлагать; пусто — предлагать. Сказал провайдер —
-    /// только он знает и уровень обработки, и то, какие форматы открывает
-    /// наложение (см. `DataProduct.unviewable`).
+    /// Why not to offer "to the globe"; empty — offer it. The provider said it
+    /// — only it knows both the processing level and which formats the overlay
+    /// opens (see `DataProduct.unviewable`).
     ///
-    /// Причиной, а не флагом: значок над тем, что заведомо не покажется, обещает
-    /// то, чего не бывает, но убранный молча он оставляет гадать. С причиной он
-    /// остаётся на месте выключенным и объясняет себя подсказкой — тем же
-    /// способом, каким объясняется наводка на снимок, которого на шаре нет.
-    /// В тесной панели объяснения нет: там значки уезжают пунктами меню, а
-    /// выключенный не уезжает (см. `table::actions`).
+    /// A reason rather than a flag: an icon over something that will surely
+    /// not display promises what never happens, but silently removing it
+    /// leaves one guessing. With a reason it stays in place, disabled, and
+    /// explains itself with a tooltip — the same way a hover on a scene that is
+    /// not on the globe is explained. In a cramped panel there is no
+    /// explanation: there icons become menu items, and a disabled one never
+    /// leaves (see `table::actions`).
     ///
-    /// У строки, о которой провайдер ничего не говорил, пусто: молчание не
-    /// повод отнимать действие (так стои́т скачанное — его собрала библиотека),
-    /// а отказ, если он есть, объяснится после нажатия.
+    /// For a row the provider said nothing about it is empty: silence is no
+    /// reason to take an action away (this is how downloaded content stands —
+    /// the library assembled it), while a refusal, if any, explains itself
+    /// after the click.
     pub unviewable: String,
-    /// Почему показ этого снимка не вышел в прошлый раз; пусто — не пробовали
-    /// либо вышло.
+    /// Why showing this scene failed last time; empty — not attempted or it
+    /// succeeded.
     ///
-    /// Отдельно от [`Row::unviewable`], хотя обе строки говорят «не покажется»:
-    /// разница в том, кто это знает и что делать дальше. Провайдер знает
-    /// заранее и наверняка — значок гаснет, нажимать нечего. А эта причина —
-    /// итог настоящей попытки, и попытка могла сорваться по сети: значок
-    /// остаётся нажимаемым, но горит предупреждением и носит причину
-    /// подсказкой. Сведённые в одно поле, они заставили бы выбирать между
-    /// «нельзя вовсе» и «не вышло сейчас» одним видом.
+    /// Separate from [`Row::unviewable`], though both say "it will not
+    /// display": the difference is who knows it and what to do next. The
+    /// provider knows in advance and for sure — the icon goes out and there is
+    /// nothing to press. This reason is the outcome of a real attempt, and the
+    /// attempt may have failed on the network: the icon stays pressable but
+    /// carries a warning and holds the reason in a tooltip. Merged into one
+    /// field, they would force "cannot at all" and "did not work now" into one
+    /// look.
     pub unshowable: String,
     pub status: RowStatus,
 }
 
-/// Строка, о которой ничего не известно: ключа нет, содержимого нет, на шаре её
-/// нет. Заведено ради `..Default::default()` в сборках строки — полей у неё
-/// полтора десятка, и выписанные по разу на сборку они расходятся молча:
-/// приписанное поле достаётся не всем.
+/// A row about which nothing is known: no key, no content, not on the globe.
+/// It exists for `..Default::default()` in row assemblies — it has a dozen and
+/// a half fields, and listed once per assembly they silently drift apart: an
+/// added field reaches only some of them.
 ///
-/// Написано руками, а не выведено: два поля отвечают не нулём своего типа. Род
-/// умолчания — файл: это единственная запись, которая ничего в себе не
-/// содержит; состояние — `Remote`: пока библиотека о записи не сказала, запись
-/// лежит в хранилище. Причина отказа при этом пуста, и здесь ноль типа отвечает
-/// сам за себя: молчание провайдера не повод отнимать действие
-/// (см. [`Row::unviewable`]).
+/// Written by hand, not derived: two fields do not answer with their type's
+/// zero. The default kind is File: it is the only record that contains
+/// nothing; the state is `Remote`: until the library has spoken about the
+/// record, the record lies in storage. The refusal reason is empty at the same
+/// time, and here the type's zero speaks for itself: the provider's silence is
+/// no reason to take an action away (see [`Row::unviewable`]).
 impl Default for Row {
     fn default() -> Row {
         Row {
@@ -394,10 +418,10 @@ impl Default for Row {
 }
 
 impl Row {
-    /// Устойчивое имя строки в списке — им она сопоставляется между кадрами
-    /// (см. `Element::key`) и им же адресуется её меню. Ключ провайдера, а без
-    /// него имя записи: пустыми оба сразу не бывают, иначе строке неоткуда
-    /// взяться.
+    /// The row's stable name in the list — by it rows are matched between
+    /// frames (see `Element::key`) and by it the row's menu is addressed. The
+    /// provider key, and failing that the record name: both cannot be empty at
+    /// once, otherwise the row has nowhere to come from.
     pub fn key(&self) -> &str {
         if let Some(group) = &self.group {
             return group;
@@ -405,25 +429,28 @@ impl Row {
         if self.identifier.is_empty() { &self.name } else { &self.identifier }
     }
 
-    /// Ключ снимка, каким его знает провайдер (см. [`bare`]). Им снимок
-    /// отмечают на шаре, кладут на него и открывают. Пуст у записи, которой
-    /// провайдер не знает вовсе, — такую ни очертить, ни показать.
+    /// The scene key as the provider knows it (see [`bare`]). By it the scene
+    /// is marked on the globe, put on it, and opened. Empty for a record the
+    /// provider does not know at all — such a scene can be neither outlined
+    /// nor shown.
     pub fn snapshot_key(&self) -> &str {
         bare(&self.identifier)
     }
 
-    /// Ключ снимка, которому эта строка принадлежит: собственный у снимка,
-    /// корень продукта у файла внутри него.
+    /// The key of the scene this row belongs to: its own for a scene, the
+    /// product root for a file inside one.
     ///
-    /// Спрашивают его там, где действие про снимок, а нажали на файл:
-    /// на шар кладётся снимок, и наложение ложится под тем ключом, которым его
-    /// зовёт провайдер (см. `handlers::overlay::on_located`). Позови мы его
-    /// ключом файла — снять положенное этим же пунктом было бы уже нечем: под
-    /// ключом файла на шаре нет ничего.
+    /// It is asked where the action is about the scene while a file was
+    /// clicked: what goes on the globe is the scene, and the overlay is laid
+    /// under the key the provider calls it by (see
+    /// `handlers::overlay::on_located`). Were it called by the file key,
+    /// removing what the same menu item laid would be impossible: under the
+    /// file key there is nothing on the globe.
     ///
-    /// Корень знает провайдер и присылает вместе с записью (`ListEntry.product`);
-    /// вывести его из ключа мы не можем — раскладка бакета не наша. Пусто —
-    /// провайдер промолчал, и тогда снимок это сама запись.
+    /// The root is known to the provider and arrives with the record
+    /// (`ListEntry.product`); we cannot derive it from the key — the bucket
+    /// layout is not ours. Empty — the provider stayed silent, and then the
+    /// scene is the record itself.
     pub fn product_key(&self) -> &str {
         match self.product.is_empty() {
             false => bare(&self.product),
@@ -431,34 +458,35 @@ impl Row {
         }
     }
 
-    /// Та ли это строка, о которой говорит ключ перехода. Сравнивается голыми
-    /// ключами по той же причине, по какой они и голые: слэш есть в каталоге и
-    /// нет в выдаче, а строка одна и та же.
+    /// Whether this is the row the navigation key speaks about. Compared with
+    /// bare keys for the same reason they are bare: the slash is present in the
+    /// catalogue and absent in search results, while the row is the same one.
     ///
-    /// Спрашивают и путём продукта: ведут к снимку отовсюду по ключу
-    /// хранилища, а собственный ключ есть только у строки снимка с несколькими
-    /// упаковками, и знают его одни её же дети.
+    /// The product path is asked too: one navigates to the scene from anywhere
+    /// by the storage key, while an own key exists only for a scene row with
+    /// several packages, and only its own children know it.
     pub fn named(&self, key: &str) -> bool {
         !key.is_empty()
             && (bare(self.key()) == bare(key) || bare(&self.identifier) == bare(key))
     }
 
-    /// Снимок ли это — то, у чего есть контур, растры и своя единица показа.
-    /// Род отвечает на это почти всегда; исключение — скачанный файл, который
-    /// сам себе снимок: записью библиотеки он остаётся файлом
-    /// (см. `downloaded_rows`).
+    /// Whether this is a scene — what has an outline, rasters, and its own
+    /// unit of display. The kind answers this almost always; the exception is
+    /// a downloaded file that is a scene to itself: as a library record it
+    /// remains a file (see `downloaded_rows`).
     pub fn is_snapshot(&self) -> bool {
         self.kind.is_product()
             || (!self.product.is_empty() && self.product == self.snapshot_key())
     }
 
-    /// Ключ, которым строку выбирают коробочкой. У снимка это его ключ у
-    /// провайдера — тот самый, которым он очерчивается на шаре, — у остального
-    /// собственный ключ строки.
+    /// The key by which the row is chosen with a checkbox. For a scene it is
+    /// its provider key — the very one by which it is outlined on the globe —
+    /// for anything else the row's own key.
     ///
-    /// Написано здесь одно на всех, кто спрашивает про выбор: коробочка строки,
-    /// коробочка шапки и обработчик выбора. Две копии этого правила однажды
-    /// сочли бы одну строку за две — отмеченную и неотмеченную сразу.
+    /// Written here once for everyone who asks about selection: the row's
+    /// checkbox, the header's checkbox, and the selection handler. Two copies
+    /// of this rule would one day count one row as two — checked and unchecked
+    /// at once.
     pub fn choice_key(&self) -> &str {
         match self.is_snapshot() {
             true => self.snapshot_key(),
@@ -466,37 +494,39 @@ impl Row {
         }
     }
 
-    /// Можно ли выбрать эту строку.
+    /// Whether this row can be chosen.
     ///
-    /// Папку пути — нельзя: в неё заходят, а выбирают то, что лежит в каталоге
-    /// или на диске. Снимок, лежащий каталогом (.SAFE, .SEN3), папкой в этом
-    /// смысле не считается — выбирают как раз его.
+    /// A folder of the path — cannot: one enters it, while what is chosen lies
+    /// in the catalogue or on disk. A scene lying as a directory (.SAFE,
+    /// .SEN3) does not count as a folder in this sense — it is exactly what is
+    /// chosen.
     ///
-    /// Безымянную — тоже нельзя: ключ выбора и есть то, чем его потом
-    /// адресуют, и пустым адресовать нечего.
+    /// A nameless one — cannot either: the choice key is what addresses the
+    /// choice later, and nothing can be addressed by an empty one.
     pub fn choosable(&self) -> bool {
         !matches!(self.kind, RowKind::Folder) && !self.choice_key().is_empty()
     }
 
-    /// Есть ли что раскрыть под этой строкой: упаковки снимка, его файлы или
-    /// содержимое папки. У папки каталога оно ещё не приехало — раскрытие его
-    /// и спросит.
+    /// Whether there is anything to expand under this row: the scene's
+    /// packages, its files, or a folder's content. A catalogue folder's
+    /// content has not arrived yet — the expansion is what asks for it.
     pub fn expandable(&self) -> bool {
         self.folded || self.group.is_some() || self.kind.is_folder()
     }
 
-    /// Путь папки, в которой лежит запись: по нему строки группируются, он же
-    /// показывается в меню строки.
+    /// The path of the folder the record lies in: rows are grouped by it, and
+    /// it is shown in the row's menu.
     pub fn folder(&self) -> &str {
         folder_of(&self.identifier)
     }
 
-    /// Сколько байт этой записи уже на диске: у недокачанной — скачанное, у
-    /// готовой — весь размер.
+    /// How many bytes of this record are already on disk: for a
+    /// half-downloaded one — what is downloaded, for a finished one — the
+    /// whole size.
     pub fn stored(&self) -> u64 {
-        // У сложенной строки своих байтов нет: она сумма своих файлов, и
-        // спрашивать её собственный статус значило бы считать снимок пустым
-        // ровно тогда, когда часть его уже лежит на диске.
+        // A folded row has no bytes of its own: it is the sum of its files, and
+        // asking for its own status would mean counting the scene as empty
+        // exactly when part of it already lies on disk.
         if self.folded {
             return self.children.iter().map(Row::stored).sum();
         }
@@ -507,18 +537,18 @@ impl Row {
         }
     }
 
-    /// Колонка «формат»: то, чем запись назвал каталог, а без этого — род
-    /// записи, а без него — расширение прописными. Тип от каталога старше
-    /// всего остального: снимок подписывается своим типом («S2MSI2A»), и
-    /// только безымянному достаётся слово строчными — это не расширение, и
-    /// набрано оно поэтому иначе.
+    /// The "format" column: what the catalogue called the record, failing that
+    /// — the record's kind, failing that — the extension in capitals. The type
+    /// from the catalogue outranks everything else: a scene is signed with its
+    /// type ("S2MSI2A"), and only the nameless gets a lowercase word — that is
+    /// not an extension, hence the different casing.
     pub fn format(&self) -> String {
         if !self.product_type.is_empty() {
             return self.product_type.clone();
         }
         match self.kind {
-            RowKind::Product { .. } => return "снимок".to_string(),
-            RowKind::Folder => return "папка".to_string(),
+            RowKind::Product { .. } => return "scene".to_string(),
+            RowKind::Folder => return "folder".to_string(),
             RowKind::File => {}
         }
         match self.title.rfind('.') {
@@ -527,15 +557,16 @@ impl Row {
         }
     }
 
-    /// Строка того, что содержит другое: папки пути или снимка, разложенного
-    /// каталогом. Размера и времени за ней не стоит — в S3 папка это общий
-    /// префикс ключей, и ни того, ни другого за ним нет; у снимка их знает
-    /// каталог, и приписывает их вызывающий (см. `components::rows::from_key`).
+    /// A row of something that contains other things: a folder of the path or
+    /// a scene laid out as a directory. No size or time stands behind it — in
+    /// S3 a folder is a shared key prefix, and it has neither; for a scene the
+    /// catalogue knows them, and the caller assigns them (see
+    /// `components::rows::from_key`).
     pub fn container_row(identifier: String, title: String, status: RowStatus, kind: RowKind) -> Row {
         Row { identifier, title, kind, status, ..Default::default() }
     }
 
-    /// Строка из записи библиотеки — вид «Скачанное».
+    /// A row from a library record — the "Downloaded" view.
     pub fn from_entry(entry: &LibraryEntry) -> Row {
         let status = match status_of(entry) {
             LibraryStatus::LibDownloading => RowStatus::Downloading { done: entry.done, total: entry.total },
@@ -549,27 +580,30 @@ impl Row {
         Row {
             identifier: entry.identifier.clone(),
             name: entry.name.clone(),
-            // Имя записи — путь внутри снимка, и целиком оно в строке не нужно:
-            // снимок уже назван строкой выше, а под ним читают файл. Ключом при
-            // этом остаётся имя целиком (поле `name`) — им запись адресуют.
+            // The record name is the path inside the scene, and the whole of
+            // it is not needed in the row: the scene is already named by the
+            // row above, and under it one reads the file. The key stays the
+            // whole name (the `name` field) — it addresses the record.
             title: last_segment(&entry.name).to_string(),
             kind: RowKind::File,
             size: if entry.total > 0 { entry.total } else { entry.done },
             date: entry.modified,
-            // Снимок едет с записью дальше: продолжение закачки уходит тем же
-            // сообщением, и потерянный здесь снимок стёр бы принадлежность в
-            // сидкаре — файл вывалился бы из своего снимка молча.
+            // The scene travels onward with the record: the download
+            // continuation goes as the same message, and a scene lost here
+            // would erase the belonging in the seedcard — the file would fall
+            // out of its scene silently.
             product: entry.product.clone(),
             status,
             ..Default::default()
         }
     }
 
-    /// Строка объекта каталога провайдера: состояние подтягивается из
-    /// библиотеки, если такая запись там уже есть.
+    /// A row of a provider catalogue object: the state is pulled from the
+    /// library if a record is already there.
     ///
-    /// Род приходит параметром, а не выводится здесь: снимком объект делает
-    /// раскладка хранилища, а знает её только провайдер (см. `s3::product_root`).
+    /// The kind arrives as a parameter, not derived here: the storage layout
+    /// is what makes an object a scene, and only the provider knows it (see
+    /// `s3::product_root`).
     pub fn remote(
         library: &LibraryState,
         identifier: String,
@@ -582,26 +616,27 @@ impl Row {
             Some(entry) => Row {
                 title,
                 kind,
-                // Размер и время у каталога точнее: библиотека знает только то,
-                // что успело лечь на диск.
+                // The catalogue's size and time are more precise: the library
+                // knows only what has made it to disk.
                 size: if size > 0 { size } else { entry.total.max(entry.done) },
                 date: if date > 0 { date } else { entry.modified },
                 ..Row::from_entry(entry)
             },
-            // Записи у библиотеки нет — значит запись лежит в хранилище, и это
-            // ровно то, чем строка отвечает по умолчанию.
+            // There is no record in the library — so the record lies in
+            // storage, and that is exactly what the row answers by default.
             None => Row { identifier, title, kind, size, date, ..Default::default() },
         }
     }
 }
 
-/// Все строки вида «Скачанное»: файлы одного снимка сведены в одну строку, а
-/// то, что снимку не принадлежит, остаётся само по себе.
+/// All rows of the "Downloaded" view: files of one scene are gathered into a
+/// single row, while what does not belong to a scene stays on its own.
 ///
-/// Свёртка здесь, а не в библиотеке: она ведёт учёт файлам — это её предмет, и
-/// один файл там одна запись, — а «снимок» это то, чем его показывают. Знание,
-/// какому снимку файл принадлежит, библиотека при этом хранит и отдаёт
-/// (`LibraryEntry.product`): вывести его из имени она не могла бы.
+/// The folding is here, not in the library: it keeps track of files — that is
+/// its subject, and one file is one record there — while "a scene" is what it
+/// is shown as. The library meanwhile keeps and hands out the knowledge of
+/// which scene a file belongs to (`LibraryEntry.product`): it could not derive
+/// it from the name.
 pub fn downloaded_rows(library: &LibraryState) -> Vec<Row> {
     let mut products: Vec<(String, Vec<Row>)> = Vec::new();
     let mut alone: Vec<Row> = Vec::new();
@@ -612,9 +647,9 @@ pub fn downloaded_rows(library: &LibraryState) -> Vec<Row> {
             alone.push(row);
             continue;
         }
-        // Порядок снимков — порядок первой встреченной записи: библиотека
-        // отдаёт их уже в своём порядке, и пересортировать их всё равно
-        // предстоит показу (см. `arrange`).
+        // The order of scenes is the order of the first record encountered:
+        // the library hands them out in its own order already, and the display
+        // will have to re-sort them anyway (see `arrange`).
         match products.iter_mut().find(|(key, _)| key == &entry.product) {
             Some((_, files)) => files.push(row),
             None => products.push((entry.product.clone(), vec![row])),
@@ -624,13 +659,14 @@ pub fn downloaded_rows(library: &LibraryState) -> Vec<Row> {
     products
         .into_iter()
         .map(|(key, mut files)| match files.len() == 1 && files[0].identifier == key {
-            // Снимок из одного файла — это и есть тот файл: обёртка над ним
-            // носила бы тот же ключ строки, и список сопоставлял бы состояние
-            // виджетов между ней и её же ребёнком.
+            // A scene of a single file is exactly that file: a wrapper around
+            // it would carry the same row key, and the list would match widget
+            // state between it and its own child.
             true => files.remove(0),
-            // Состав снимка спрашиваем у библиотеки, а не складываем здесь:
-            // правило «сколько файлов в снимке» одно на всех, и второй его
-            // носитель разошёлся бы с первым (см. `LibraryState::snapshot`).
+            // The scene's composition is asked of the library, not summed up
+            // here: the "how many files are in a scene" rule is one for
+            // everyone, and a second carrier of it would one day diverge from
+            // the first (see `LibraryState::snapshot`).
             false => {
                 let (_, siblings) = library.snapshot(&key);
                 snapshot(key, siblings, files)
@@ -640,14 +676,14 @@ pub fn downloaded_rows(library: &LibraryState) -> Vec<Row> {
         .collect()
 }
 
-/// Причина, общая всем остановленным файлам снимка. Пусто — причины у них
-/// разные или её нет вовсе.
+/// A reason common to all stopped files of a scene. Empty — their reasons
+/// differ or there is none at all.
 ///
-/// Нужна она затем, что снимок приходит свёрнутым, и в самом частом случае —
-/// отказала подпись, и с ней все два десятка файлов сразу — человек видит
-/// только эту строку. Одну причину из нескольких разных она назвать не может:
-/// строка говорит за все файлы разом, и назвавшая одну соврала бы про
-/// остальные.
+/// It is needed because the scene arrives folded, and in the most common case
+/// — the signature failed, and with it all two dozen files at once — the person
+/// sees only this row. It cannot name one reason out of several different
+/// ones: the row speaks for all files at once, and naming one would lie about
+/// the rest.
 fn common_trouble(files: &[Row]) -> String {
     let mut said: Option<&str> = None;
     for file in files {
@@ -661,31 +697,32 @@ fn common_trouble(files: &[Row]) -> String {
     said.unwrap_or_default().to_string()
 }
 
-/// Строка снимка поверх его файлов: то, что о снимке можно сказать, сложено из
-/// того, что известно о каждом файле, — кроме одного. Сколько файлов в снимке
-/// всего (`siblings`), из записей не выводится: их столько, сколько качали.
+/// A scene row on top of its files: what can be said about the scene is folded
+/// from what is known about each file — with one exception. How many files the
+/// scene has in total (`siblings`) is not derivable from the records: there are
+/// as many as were downloaded.
 fn snapshot(product: String, siblings: u32, files: Vec<Row>) -> Row {
     let done = files.iter().filter(|file| matches!(file.status, RowStatus::Complete)).count();
     let downloading = files.iter().any(|file| matches!(file.status, RowStatus::Downloading { .. }));
     let size = files.iter().map(Row::stored).sum();
-    // Время снимка — время самого свежего его файла: снимок «появился на
-    // диске» тогда, когда лёг последний из них.
+    // The scene's time is the time of its freshest file: the scene "appeared
+    // on disk" when the last of them landed.
     let date = files.iter().map(|file| file.date).max().unwrap_or(0);
 
     let status = match (downloading, done, files.len()) {
-        // Пока хоть один файл едет, снимок едет весь: сумма байтов по частям
-        // была бы правдой о файлах, а не о нём.
+        // While any file is arriving, the whole scene is arriving: the sum of
+        // bytes over parts would be true about the files, not about it.
         (true, ..) => RowStatus::Downloading { done: size, total: 0 },
-        // «На диске» — только когда известно, из скольки файлов снимок состоит,
-        // и все они здесь и доведены. Без этого числа доведённым выглядел бы
-        // всякий снимок, у которого доведено скачанное, — три файла из
-        // двадцати шести читались бы как целый снимок.
+        // "On disk" only when it is known how many files the scene consists of
+        // and all of them are here and finished. Without that number every
+        // scene with its downloaded part finished would look finished — three
+        // files out of twenty-six would read as a whole scene.
         (false, done, total) if siblings > 0 && done == total && total as u32 == siblings => {
             RowStatus::Complete
         }
-        // Не доведён ни один — снимок оборван, а не «частично скачан»: зелёная
-        // строка с нулём на диске обещает то, чего нет, и проходит отбор «на
-        // диске» вместе с целыми.
+        // Nothing finished — the scene is interrupted, not "partially
+        // downloaded": a green row with zero on disk promises what does not
+        // exist, and passes the "on disk" filter together with the whole ones.
         (false, 0, _) => RowStatus::Paused { done: size, total: 0, trouble: common_trouble(&files) },
         (false, done, _) => RowStatus::Partial { done, trouble: common_trouble(&files) },
     };
@@ -701,351 +738,5 @@ fn snapshot(product: String, siblings: u32, files: Vec<Row>) -> Row {
         folded: true,
         status,
         ..Default::default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::proto::data_library::{LibraryEntry, LibraryStatus};
-
-    fn entry(name: &str, product: &str, status: LibraryStatus, done: u64) -> LibraryEntry {
-        LibraryEntry {
-            name: name.to_string(),
-            identifier: format!("eodata/{}/{}", product, name),
-            product: product.to_string(),
-            done,
-            total: done,
-            status: status as i32,
-            modified: 0,
-            siblings: 0,
-            trouble: String::new(),
-        }
-    }
-
-    /// Те же записи, но снимок к этому времени обойдён: в нём столько файлов,
-    /// сколько сказано. Число носит каждая запись — оно и приходит к ним по
-    /// одной, в сидкары (см. data-library::catalog::on_snapshot).
-    fn walked(files: u32, mut entries: Vec<LibraryEntry>) -> Vec<LibraryEntry> {
-        for entry in &mut entries {
-            entry.siblings = files;
-        }
-        entries
-    }
-
-    /// Одиночный файл выбирается наравне со снимком.
-    ///
-    /// Коробочка — это выбор строки, а не показ контура: пакетом удаляют как
-    /// раз такие файлы, а контура у них не бывает вовсе.
-    #[test]
-    fn a_lone_file_is_chosen_just_like_a_snapshot() {
-        let mut entries =
-            walked(1, vec![entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 10)]);
-        let mut lone = entry("dem.tif", "", LibraryStatus::LibComplete, 7);
-        lone.identifier = "eodata/dem/dem.tif".to_string();
-        entries.push(lone);
-        let rows = downloaded_rows(&LibraryState { entries });
-
-        let (snapshot, lone) = (&rows[0], &rows[1]);
-        assert!(snapshot.choosable(), "снимок выбирается");
-        assert!(lone.choosable(), "файл вне снимка тоже выбирается");
-        assert!(!lone.is_snapshot(), "снимком он при этом не притворяется");
-        assert_eq!(lone.choice_key(), "eodata/dem/dem.tif", "файл адресуется своим ключом");
-    }
-
-    /// Ключ выбора снимка — тот же, которым его очерчивают, и там, где
-    /// собственный ключ строки с ним расходится, выбор обязан идти за ключом
-    /// снимка: иначе один снимок стал бы двумя — выбранным и очерченным
-    /// порознь.
-    ///
-    /// Расходятся они в двух местах: строка сетевого каталога приезжает со
-    /// слэшем на конце, а у снимка с несколькими упаковками собственный ключ
-    /// — ключ сцены (см. [`Row::key`]).
-    #[test]
-    fn a_snapshot_is_chosen_by_the_key_it_is_outlined_by() {
-        let listed = Row::container_row(
-            "eodata/store/S2B_X.SAFE/".to_string(),
-            "S2B_X.SAFE".to_string(),
-            RowStatus::Remote,
-            RowKind::Product { folder: true },
-        );
-        assert_eq!(listed.choice_key(), listed.snapshot_key());
-        assert_ne!(listed.choice_key(), listed.key(), "слэш листинга в ключ выбора не идёт");
-
-        let parted = Row {
-            group: Some("сцена".to_string()),
-            ..Row::container_row(
-                "eodata/store/S2B_X.SAFE".to_string(),
-                "S2B_X.SAFE".to_string(),
-                RowStatus::Remote,
-                RowKind::Product { folder: false },
-            )
-        };
-        assert_eq!(parted.choice_key(), parted.snapshot_key());
-        assert_ne!(parted.choice_key(), parted.key(), "ключ сцены в ключ выбора не идёт");
-    }
-
-    /// Папку пути не выбирают: в неё заходят. А снимок, лежащий каталогом, —
-    /// выбирают, хотя зайти в него тоже можно: «папка» у него про укладку, а
-    /// не про род. Безымянную строку не выбирают тоже: ключ выбора и есть то,
-    /// чем её потом адресуют.
-    #[test]
-    fn a_path_folder_is_not_chosen_but_a_snapshot_folder_is() {
-        let folder = Row::container_row(
-            "eodata/store/".to_string(),
-            "store".to_string(),
-            RowStatus::Remote,
-            RowKind::Folder,
-        );
-        let snapshot = Row::container_row(
-            "eodata/store/S2B_X.SAFE".to_string(),
-            "S2B_X.SAFE".to_string(),
-            RowStatus::Remote,
-            RowKind::Product { folder: true },
-        );
-
-        assert!(!folder.choosable());
-        assert!(snapshot.choosable());
-        assert!(!Row::default().choosable(), "адресовать безымянную строку нечем");
-    }
-
-    /// Файлы одного снимка сходятся в одну строку, а то, что снимку не
-    /// принадлежит, остаётся само по себе — это и есть весь смысл свёртки.
-    #[test]
-    fn files_of_one_snapshot_fold_into_one_row() {
-        let mut entries = walked(2, vec![
-            entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 10),
-            entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 20),
-        ]);
-        entries.push(entry("dem.tif", "", LibraryStatus::LibComplete, 7));
-        let rows = downloaded_rows(&LibraryState { entries });
-
-        assert_eq!(rows.len(), 2, "снимок и одиночный файл");
-        let snapshot = &rows[0];
-        assert_eq!(snapshot.title, "S2B_X.SAFE");
-        assert!(snapshot.kind.is_product());
-        assert_eq!(snapshot.children.len(), 2);
-        // Размер снимка — сумма его файлов, а не размер какого-то одного.
-        assert_eq!(snapshot.size, 30);
-        assert!(matches!(snapshot.status, RowStatus::Complete));
-
-        // Одиночный файл снимком не притворяется и детей не заводит.
-        assert_eq!(rows[1].title, "dem.tif");
-        assert!(!rows[1].kind.is_product());
-        assert!(rows[1].children.is_empty());
-    }
-
-    /// Пока хоть один файл едет, едет весь снимок: «3 на диске» рядом с идущей
-    /// закачкой говорило бы о файлах, а не о нём.
-    #[test]
-    fn snapshot_is_downloading_while_any_file_is() {
-        let rows = downloaded_rows(&LibraryState {
-            entries: vec![
-                entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 10),
-                entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibDownloading, 5),
-            ],
-        });
-        assert!(matches!(rows[0].status, RowStatus::Downloading { .. }));
-
-        // Ни один не идёт, но и не все доведены — сказано, сколько доведено.
-        let rows = downloaded_rows(&LibraryState {
-            entries: vec![
-                entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 10),
-                entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibPaused, 5),
-            ],
-        });
-        assert!(matches!(rows[0].status, RowStatus::Partial { done: 1, .. }));
-    }
-
-    /// Целым снимок называется только по обходу: доведённые файлы говорят,
-    /// сколько скачали, а не сколько в снимке есть.
-    #[test]
-    fn snapshot_is_whole_only_when_its_size_is_known() {
-        let files = vec![
-            entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 10),
-            entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 20),
-        ];
-        // Снимок не обходили: два доведённых файла — это два файла на диске.
-        let rows = downloaded_rows(&LibraryState { entries: files.clone() });
-        assert!(matches!(rows[0].status, RowStatus::Partial { done: 2, .. }));
-        // Обошли и насчитали три — двух мало.
-        let rows = downloaded_rows(&LibraryState { entries: walked(3, files.clone()) });
-        assert!(matches!(rows[0].status, RowStatus::Partial { done: 2, .. }));
-        // Насчитали два — снимок на диске целиком.
-        let rows = downloaded_rows(&LibraryState { entries: walked(2, files) });
-        assert!(matches!(rows[0].status, RowStatus::Complete));
-    }
-
-    /// Снимок, у которого не доведён ни один файл, оборван — а не «частично
-    /// скачан»: зелёная строка с нулём на диске обещала бы то, чего нет.
-    #[test]
-    fn snapshot_of_interrupted_files_says_it_is_interrupted() {
-        let rows = downloaded_rows(&LibraryState {
-            entries: vec![
-                entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibPaused, 3),
-                entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibPaused, 4),
-            ],
-        });
-        assert!(matches!(rows[0].status, RowStatus::Paused { .. }));
-        // Байты при этом не теряются: у строки с детьми они сумма детей.
-        assert_eq!(rows[0].stored(), 7);
-    }
-
-    /// Причину срыва строка снимка берёт у файлов — но только если она у них
-    /// одна: снимок приходит свёрнутым, и назвавшая одну из нескольких разных
-    /// соврала бы про остальные.
-    #[test]
-    fn a_snapshot_speaks_the_trouble_only_when_its_files_agree() {
-        let troubled = |name: &str, said: &str| LibraryEntry {
-            trouble: said.to_string(),
-            ..entry(name, "S2B_X.SAFE", LibraryStatus::LibPaused, 3)
-        };
-
-        let rows = downloaded_rows(&LibraryState {
-            entries: vec![troubled("B1.TIF", "HTTP 403"), troubled("B2.TIF", "HTTP 403")],
-        });
-        match &rows[0].status {
-            RowStatus::Paused { trouble, .. } => assert_eq!(trouble, "HTTP 403"),
-            _ => panic!("ожидалась оборванная строка"),
-        }
-
-        let rows = downloaded_rows(&LibraryState {
-            entries: vec![troubled("B1.TIF", "HTTP 403"), troubled("B2.TIF", "нет места")],
-        });
-        match &rows[0].status {
-            RowStatus::Paused { trouble, .. } => assert!(trouble.is_empty(), "причины разные"),
-            _ => panic!("ожидалась оборванная строка"),
-        }
-    }
-
-    /// Снимок из одного файла — это и есть тот файл: обёртка над ним носила бы
-    /// тот же ключ строки, что и её единственный ребёнок.
-    ///
-    /// Записью библиотеки он при этом остаётся файлом, а снимком его делает
-    /// совпадение ключей: род об этом сказать не может, а контур и шар у него
-    /// есть наравне с прочими снимками.
-    #[test]
-    fn single_file_snapshot_is_not_wrapped() {
-        let mut only = entry("S1A_X.zip", "eodata/S1A_X.zip", LibraryStatus::LibComplete, 9);
-        only.identifier = "eodata/S1A_X.zip".to_string();
-        let rows = downloaded_rows(&LibraryState { entries: vec![only] });
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].children.is_empty(), "обёртки нет");
-        assert_eq!(rows[0].name, "S1A_X.zip", "запись библиотеки осталась записью");
-        assert!(rows[0].is_snapshot(), "снимком его делает совпадение ключей");
-        assert!(!rows[0].expandable(), "раскрывать в нём нечего");
-    }
-
-    /// Сложенная строка раскрывается, но сама записью не является: её файлы
-    /// качают и открывают по одному, а её собственный ключ — путь снимка.
-    #[test]
-    fn a_folded_snapshot_expands_but_is_not_a_record() {
-        let rows = downloaded_rows(&LibraryState {
-            entries: vec![
-                entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 10),
-                entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 20),
-            ],
-        });
-        assert!(rows[0].folded);
-        assert!(rows[0].expandable());
-        assert!(rows[0].name.is_empty(), "своего имени в библиотеке у неё нет");
-        // Файлы под ней — обычные записи, и раскрывать в них нечего.
-        assert!(!rows[0].children[0].folded);
-        assert!(!rows[0].children[0].expandable());
-    }
-
-    /// Слэш папки в ключе перехода в счёт не идёт: в каталоге он есть, а в
-    /// выдаче поиска нет — строка при этом одна и та же.
-    #[test]
-    fn a_row_answers_to_its_key_with_or_without_the_folder_slash() {
-        let row = Row::container_row(
-            "eodata/S2B_X.SAFE/".to_string(),
-            "S2B_X.SAFE".to_string(),
-            RowStatus::Remote,
-            RowKind::Product { folder: true },
-        );
-        assert!(row.named("eodata/S2B_X.SAFE"));
-        assert!(row.named("eodata/S2B_X.SAFE/"));
-        assert!(!row.named("eodata/S2B_Y.SAFE"));
-        assert!(!row.named(""), "пустой ключ не называет никого");
-    }
-
-    /// Имя пути одно на всех, кто его называет, и слэш папки в счёт не идёт: из
-    /// каталога снимок приходит со слэшем, из выдачи поиска без него, а зовут
-    /// его одинаково.
-    #[test]
-    fn the_last_segment_ignores_the_folder_slash() {
-        assert_eq!(last_segment("eodata/S2B_X.SAFE/"), "S2B_X.SAFE");
-        assert_eq!(last_segment("eodata/S2B_X.SAFE"), "S2B_X.SAFE");
-        assert_eq!(last_segment("S2B_X.SAFE/GRANULE/B01.jp2"), "B01.jp2");
-        assert_eq!(last_segment("dem.tif"), "dem.tif");
-        // Сегмента нет вовсе — имя брать неоткуда: так выглядит корень бакета.
-        assert_eq!(last_segment(""), "");
-        assert_eq!(last_segment("/"), "");
-    }
-
-    /// Действие про снимок, нажатое на файле, адресуется снимку: наложение
-    /// ложится под тем ключом, которым продукт зовёт провайдер, и ключом файла
-    /// снять его потом было бы нечем.
-    #[test]
-    fn a_file_speaks_for_the_snapshot_it_belongs_to() {
-        let snapshot = "eodata/store/S2B_X.SAFE";
-        let mut file = Row {
-            identifier: format!("{}/GRANULE/B01.jp2", snapshot),
-            product: snapshot.to_string(),
-            ..Default::default()
-        };
-        assert!(!file.is_snapshot(), "файл снимком не притворяется");
-        assert_eq!(file.product_key(), snapshot);
-        assert_ne!(file.product_key(), file.snapshot_key(), "файл позвал бы сам себя");
-
-        // Снимок отвечает за себя сам — и тогда, когда каталог назвал его
-        // продуктом, и тогда, когда о продукте промолчал. Слэш листинга в счёт
-        // не идёт ни там, ни там: ключ у снимка один.
-        let listed = Row {
-            product: snapshot.to_string(),
-            ..Row::container_row(
-                format!("{}/", snapshot),
-                "S2B_X.SAFE".to_string(),
-                RowStatus::Remote,
-                RowKind::Product { folder: true },
-            )
-        };
-        assert!(listed.is_snapshot());
-        assert_eq!(listed.product_key(), snapshot);
-        assert_eq!(listed.product_key(), listed.snapshot_key());
-
-        // Провайдер промолчал о снимке — записью и остаётся: звать её больше
-        // нечем. Так приходит одиночный объект вне продуктов.
-        file.product = String::new();
-        assert_eq!(file.product_key(), file.snapshot_key());
-    }
-
-    /// Смотреть скачанное надо с диска: файл под рукой, и ходить за ним по
-    /// сети значит ждать того, что уже есть.
-    #[test]
-    fn preview_prefers_the_downloaded_file() {
-        use crate::module::ViewMsg;
-        let key = "eodata/S1A_X.SAFE/quick-look.png";
-
-        let done = LibraryState {
-            entries: vec![entry("quick-look.png", "S1A_X.SAFE", LibraryStatus::LibComplete, 4)],
-        };
-        assert!(
-            matches!(preview_of(&done, key, false), ViewMsg::Preview(name) if name == "quick-look.png")
-        );
-
-        // Недокачанного на диске ещё нет — смотреть его надо из хранилища.
-        let started = LibraryState {
-            entries: vec![entry("quick-look.png", "S1A_X.SAFE", LibraryStatus::LibPaused, 4)],
-        };
-        assert!(matches!(preview_of(&started, key, false), ViewMsg::PreviewRemote(_)));
-
-        // Снимок, лежащий каталогом, открывает провайдер: GET по пути каталога
-        // отвечает 404, и растр внутри выбирает он.
-        assert!(matches!(
-            preview_of(&started, "eodata/S1A_X.SAFE", true),
-            ViewMsg::PreviewProduct(_)
-        ));
     }
 }

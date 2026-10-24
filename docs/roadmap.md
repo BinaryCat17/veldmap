@@ -1,1050 +1,1135 @@
-# VeldMap: дорожная карта приведения в порядок
+# VeldMap: Cleanup Roadmap
 
-Рабочий план на осень 2026, составлен 2 сентября 2026 по итогам системной
-ревизии: 30 читателей по подсистемам, документам и тестам, 14 скептиков,
-опровергавших их находки по коду, четыре плана с разных углов (простота,
-документация, тесты, форматы и JPEG 2000), по судье на каждый и синтез.
-Пометка `[C]` — находка подтверждена скептиком чтением кода, `[P]` —
-подтверждена с поправкой масштаба; `file:line` без пометки — прочитано при
-синтезе. Номера строк здесь допустимы: это план с датой, он переписывается по
-мере выполнения шагов и удаляется, когда выполнен; на архитектурные страницы
-docs/ правило «без номеров строк» распространяется, на него — нет.
+A work plan for fall 2026, drawn up on September 2, 2026 after a systematic
+review: 30 readers over subsystems, documents, and tests, 14 skeptics
+refuting their findings against the code, four plans from different angles
+(simplicity, documentation, tests, formats and JPEG 2000), a judge for each,
+and a synthesis. The `[C]` mark means a finding confirmed by a skeptic
+reading the code, `[P]` — confirmed with a scale adjustment; `file:line`
+without a mark was read during synthesis. Line numbers are allowed here: this
+is a dated plan, it is rewritten as steps are completed and deleted when done;
+the "no line numbers" rule applies to the docs/ architecture pages, not to it.
 
-Как пользоваться: раздел «Порядок работ» — единственная очередь; шаг берётся
-целиком вместе со своей проверкой и своими страницами docs/. Раздел «Чего не
-делать» — граница. Первые три раздела объясняют, почему очередь такая.
+How to use: the "Work Order" section is the single queue; a step is taken as a
+whole together with its check and its docs/ pages. The "What Not to Do"
+section is the boundary. The first three sections explain why the queue looks
+the way it does.
 
-## Вердикт об архитектуре
+## Architecture Verdict
 
-**Каркас простоте способствует, и его не трогать.** Одна `schema.yaml` →
-валидатор → стабы и таблица FLOW, строковых топиков в модулях нет [C, SDK].
-Один примитив чтения `RangeSource` + `read(offset, size)`, которым пользуются
-и fs, и network, — читателю диск и сеть неразличимы [C, ядро хоста].
-Wrap-крейты с `#[path]` дают одну реализацию pyramid/tiles/geodesy
-производителю и обоим потребителям [C, разрозненные пути]. Учёт обменов с
-терминальным ответом за упавшего или убитого исполнителя (dispatcher.rs:292-320;
-tasks.rs::begin на всякий запрос [критик §2]) — верная основа для всего, что
-едет долго.
+**The skeleton favors simplicity, and it is not to be touched.** One
+`schema.yaml` → validator → stubs and the FLOW table; there are no string
+topics in modules [C, SDK]. One read primitive `RangeSource` +
+`read(offset, size)` used by both fs and network — to the reader, disk and
+network are indistinguishable [C, host core]. Wrap crates with `#[path]` give
+one implementation of pyramid/tiles/geodesy to the producer and both consumers
+[C, scattered paths]. Exchange accounting with a terminal reply on behalf of a
+crashed or killed executor (dispatcher.rs:292-320; tasks.rs::begin for every
+request [critic §2]) is the right foundation for everything that runs long.
 
-**Надстройка простоте мешает — по четырём причинам, и все четыре одного рода:
-правило записано словами там, где должно быть выведено кодом.**
+**The overhead works against simplicity — for four reasons, and all four are
+of one kind: a rule is written in words where it should be derived by code.**
 
-1. **Цена чтения протекла в протокол.** `Described.reach` (4 варианта),
-   `windowed`, `finest` выводятся из `Kind` в `Info::reach()`
-   (adapters/mod.rs:203-231), а `produce` разбирает те же рукава своим `match`
-   (mod.rs:316-352); согласие держится комментарием «правьте вместе» в трёх
-   местах, `reach()` не тестируется [P, ядро тайлера]. `finest` заполняет
-   один `jp2::finest` (jp2.rs:254-262), и он уже расходится с produce вторым
-   отказом [C].
-2. **Память назначается, а не считается.** 12 констант в 6 файлах плюс
-   `tile-cache.json` и хостовый `POOL_LIMIT` [критик §2]; по слагаемым
-   считает один `netcdf::affordable`; `budget.rs:8-11` сам называет остальное
-   несделанной работой; два числа врут — «666 МиБ» (module.rs:61) и
-   «шестнадцать раз» при срабатывании на 8× (tiff.rs:38-42) [C, числа].
-3. **Одно понятие — несколько представлений.** Конвейер ответов тайлов в
-   image-view и globe — общий скелет с разными эффектами и ключами заказчика
-   [P high: дословны 7 из 25 комментариев в названных диапазонах, не «тот же
-   код»]. Привязка — четыре рода `Binding` (globe/overlay.rs:814-835) при
-   «Привязок три» в шапке файла [критик §2]. Мягкий отказ — пять «вторых
-   полей» в пяти контрактах и два способа узнать договорённый хостом ответ
-   [P, карта событий]. Развилка «библиотека или провайдер» написана четырежды
-   [C, data-browser]. Ритуал записи через fs — трижды с одинаковыми
-   комментариями [C].
-4. **Экран стал интеграционным ядром.** Семь коллекций `State` по ключу
-   продукта, связанных правилами в комментариях; два устройства маршрутизации
-   ответов на один топик [C, data-browser]; квад/габарит, перевод роли и копия
-   UtmFrame решаются в data-browser [P].
+1. **The cost of reading has leaked into the protocol.** `Described.reach`
+   (4 variants), `windowed`, `finest` are derived from `Kind` in
+   `Info::reach()` (adapters/mod.rs:203-231), while `produce` parses the same
+   arms with its own `match` (mod.rs:316-352); the agreement is held by an
+   "edit them together" comment in three places, and `reach()` is not tested
+   [P, tiler core]. `finest` is filled by a single `jp2::finest`
+   (jp2.rs:254-262), and it already diverges from produce by a second refusal
+   [C].
+2. **Memory is assigned, not computed.** 12 constants in 6 files plus
+   `tile-cache.json` and the host `POOL_LIMIT` [critic §2]; only one
+   `netcdf::affordable` computes it from the terms; `budget.rs:8-11` itself
+   calls the rest unfinished work; two numbers lie — "666 MiB" (module.rs:61)
+   and "sixteen times" when it fires at 8× (tiff.rs:38-42) [C, numbers].
+3. **One concept, several representations.** The tile-reply pipeline in
+   image-view and globe is a shared skeleton with different effects and caller
+   keys [P high: 7 of 25 comments in the named ranges are verbatim, not "the
+   same code"]. Binding — four kinds of `Binding` (globe/overlay.rs:814-835)
+   against "There are three bindings" in the file header [critic §2]. Soft
+   failure — five "second fields" in five contracts and two ways to learn the
+   host-acknowledged reply [P, event map]. The "library or provider" fork is
+   written four times [C, data-browser]. The write ritual through fs — three
+   times with identical comments [C].
+4. **The screen has become the integration core.** Seven `State` collections
+   keyed by product, tied by rules in comments; two devices routing replies to
+   one topic [C, data-browser]; quad/extents, role translation, and a copy of
+   UtmFrame are decided in data-browser [P].
 
-Инварианты держатся не тем: BLOCK/WINDOW — в пяти местах текстом [C], 120
-колеса, `.part`, уровни лога, сортировка FLOW, `cap_tiles ≤ MAX_QUERY_TILES`
-— только комментариями [C]; тестом сведены лишь `INSTANCE` ↔ лимит хоста и
-`ZOOM_PER_CLICK × ZOOM_PER_STEP`.
+Invariants are held by the wrong means: BLOCK/WINDOW — in five places as text
+[C], 120 of the wheel, `.part`, log levels, FLOW ordering, `cap_tiles ≤
+MAX_QUERY_TILES` — only by comments [C]; only `INSTANCE` ↔ the host limit and
+`ZOOM_PER_CLICK × ZOOM_PER_STEP` are reconciled by a test.
 
-Ответ хозяину: переписывать нечего; снимать слои над каркасом. Мерка — число
-строк «только комментарий» в ведомости invariants.md (см. «Документация»):
-оно обязано убывать с каждым шагом, иначе шаг не про простоту.
+Reply to the owner: there is nothing to rewrite; take the layers off the
+skeleton. The measure is the number of "comment only" lines in the
+invariants.md ledger (see "Documentation"): it must decrease with every step,
+otherwise the step is not about simplicity.
 
-**Спор 1 — что везёт провод.** «Простота» кладёт `Serve{Tiles|Pass{from}}` по
-уровням вместо трёх скаляров; «форматы» держат таблицу уровней внутри
-производителя и провод не трогают. Решение: **таблица уровней на провод — да,
-но со столбцом цены и последним шагом перестройки тайлера, не первым.**
-Доводы. (а) Судья «простоты» прав: `Serve` без цены даёт многотайловому JP2
-«все Tiles → Exact» и шестиступенчатую лестницу, где грубые ступени стоят
-почти всего файла; строка уровня должна нести три вещи — как обслуживается,
-сколько байт стоит, влезает ли в память. (б) Судья «форматов» прав в другом:
-если таблица живёт только у производителя, у потребителя остаётся матрица
-Reach(4)×pointwise(2) (tiles.rs:698-711), а таблица становится четвёртым
-описанием той же цены. (в) Но менять провод раньше, чем таблица у JP2 станет
-настоящей (после замера гранулы и openjp2), значит проектировать по догадке:
-`Serve::Pass{from: level}` для JP2 под hayro — обещание, которого адаптер не
-держит (второй отказ, jp2.rs:305-313 [C]); а `Meta{reach, finest, windowed}`
-собирают руками тесты обоих потребителей — их правят один раз, не два.
-Порядок: таблица внутри производителя с выводом трёх скаляров и табличным
-тестом (шаг 7) → JP2 в неё (шаги 8–9) → таблица на провод, три скаляра и
-`Reach` сняты (шаг 10).
+**Dispute 1 — what the wire carries.** "Simplicity" puts
+`Serve{Tiles|Pass{from}}` per level instead of three scalars; "formats" keep
+the level table inside the producer and leave the wire alone. Decision: **the
+level table goes on the wire — yes, but with a cost column and as the last
+step of the tiler rebuild, not the first.** Arguments. (a) The "simplicity"
+judge is right: `Serve` without cost gives a multi-tile JP2 "all Tiles →
+Exact" and a six-step ladder where the coarse steps cost almost the whole
+file; a level row must carry three things — how it is served, how many bytes
+it costs, whether it fits in memory. (b) The "formats" judge is right about
+something else: if the table lives only with the producer, the consumer keeps
+the Reach(4)×pointwise(2) matrix (tiles.rs:698-711), and the table becomes a
+fourth description of the same cost. (c) But changing the wire before the JP2
+table becomes real (after measuring the granule and openjp2) means designing
+on guesswork: `Serve::Pass{from: level}` for JP2 under hayro is a promise the
+adapter does not keep (second refusal, jp2.rs:305-313 [C]); while
+`Meta{reach, finest, windowed}` is assembled by hand in the tests of both
+consumers — those are fixed once, not twice. Order: the table inside the
+producer with the three scalars derived and a table test (step 7) → JP2 into
+it (steps 8–9) → the table onto the wire, three scalars and `Reach` removed
+(step 10).
 
-**Спор 2 — `finest`.** «Простота» снимает целиком (шаг 8); её судья и
-«форматы» — выводить из счёта памяти. Решение: **механизм остаётся, снимается
-только ручной `jp2::finest`.** Поле заведено, чтобы потребитель не заказывал
-заведомый отказ; без него крупный JPEG переучивается отказом на каждую ячейку
-— ровно тот цикл, что уже есть у JPEG больше `FULL_DECODE_BUDGET`
-(jpeg.rs:38-43 [C low]). После шага 7 предел детали — это столбец «влезает»
-таблицы уровней, посчитанный одним счётом памяти для всех путей, декодирующих
-кадр целиком (JPEG, однотайловый JP2); у точечных путей он равен нулю сам
-собой. Семь тестов золотой строки «подробнее … не будет» сливаются в один у
-`Meta::capped` (tiles.rs:131-141), не удаляются.
+**Dispute 2 — `finest`.** "Simplicity" removes it entirely (step 8); its
+judge and "formats" — derive it from the memory count. Decision: **the
+mechanism stays, only the manual `jp2::finest` is removed.** The field exists
+so that the consumer does not request a known refusal; without it a large JPEG
+relearns through a refusal on every cell — exactly the cycle that already
+exists for JPEG larger than `FULL_DECODE_BUDGET` (jpeg.rs:38-43 [C low]).
+After step 7 the detail limit is the "fits" column of the level table,
+computed by one memory count for all paths that decode the whole frame (JPEG,
+single-tile JP2); for pointwise paths it equals zero on its own. Seven tests
+of the golden string "more detailed … will not be" merge into one at
+`Meta::capped` (tiles.rs:131-141); they are not deleted.
 
-**Спор 6 — отказ.** Решение: **хелпер — да, контракты — нет.**
-`tiles::undelivered` (tiles.rs:1028-1030: пустая ошибка ∧ `answered_by_host`)
-переезжает в SDK и применяется в download.rs вместо догадки по пустому url, в
-tile-cache и у relay data-provider [P, карта событий]. А
-`ImageryResponse.reason` (types.proto:257-262) и `LocateResponse.answered`
-(:281-289) кодируют другой вопрос — «переспрашивать ли при непустой ошибке»,
-— и хелпером не заменяются; переименование `reason → trouble` свело бы под
-одно слово два правила. Родов «второго поля» остаётся два, и оба называются
-в странице контрактов: `trouble` — подпись рядом с показом, `answered/reason`
-— политика переспроса.
+**Dispute 6 — failure.** Decision: **a helper — yes, contracts — no.**
+`tiles::undelivered` (tiles.rs:1028-1030: empty error ∧ `answered_by_host`)
+moves into the SDK and is used in download.rs instead of guessing by empty
+url, in tile-cache and at the data-provider relay [P, event map]. But
+`ImageryResponse.reason` (types.proto:257-262) and `LocateResponse.answered`
+(:281-289) encode a different question — "whether to re-ask on a non-empty
+error" — and are not replaced by the helper; renaming `reason → trouble`
+would fold two rules under one word. Two kinds of "second field" remain, and
+both are named on the contracts page: `trouble` — the caption next to the
+display, `answered/reason` — the re-ask policy.
 
-## Документация
+## Documentation
 
-**Целевая структура** (английский; в скобках — источник):
+**Target structure** (English; source in parentheses):
 
-- `README.md` (~40 строк) — что это, требования таблицей, две команды, ключи
-  Copernicus через `.env.example`, ссылки в docs/.
-- `CLAUDE.md` (~40) — только процесс: build.py единственная команда, «чего не
-  делать» без гигабайт и секунд, стиль — ссылка на ADR 0001.
-- `docs/glossary.md` — ~15 терминов с одним английским именем каждый
-  (приговор/Sentence, заказчик, договорённый хостом ответ, аренда, носитель,
-  отпечаток, ступень/лестница, привязка); пишется до первой страницы.
-- `docs/architecture/overview.md` — карта репозитория, сервисы, схема как
-  источник истины; список топиков живёт только в schema.yaml.
-- `docs/architecture/bus-and-schema.md` — актор на подписчика, корреляция,
-  snapshot/targeted/cancellable, учёт обменов и терминальный ответ (один раз),
-  что держит валидатор.
-- `docs/architecture/resources.md` — ResourceHandle, RangeSource, окно
-  читателя и блок пула по именам констант (`WINDOW` resource.rs:214, `BLOCK`
-  range.rs:28), аренда, передача владения, блочный пул и разгон.
-- `docs/architecture/tasks.md` — операция в полёте, kill/cancel, трап =
-  потеря состояния; **не уносить** «image-tiler без состояния» (README:507,
-  :820) — memo двух последних разборов есть (module.rs, `MEMO_SLOTS`).
-- `docs/architecture/window-and-render.md` — раннер, кадровый цикл, Viewport,
-  Elm-цикл data-browser. `modules.md` — анатомия модуля и его wrap-крейта,
-  названного по делу: клиентский крейт с двумя назначениями — удобный API там,
-  где кодогена не хватает (билдеры ui-service), и общий код производителя и
-  потребителей через `#[path]` (pyramid, tiles, geodesy, tile); третьего
-  назначения не бывает, публикует всегда потребитель.
-- `docs/architecture/screen.md` — дом для правил экрана (панели,
-  вкладки-синглтоны, подсветка, persist, ужатие имён, роняние колонок):
-  README 584–800/829–900 ↔ state/mod.rs дословно [P], и window-and-render на
-  50 строк их не вместит.
-- `docs/architecture/imagery.md` — продукт → снимок → части, диаграмма топиков,
-  ОДНА таблица «формат → как читается по уровням → что частично → потолок»,
-  отпечаток кэша. Пишется «как есть» по `enum Reach` и `Info::reach()`, не по
-  README:1286-1291: полосный TIFF — Windowed (mod.rs:215-221), не «полный
-  проход».
-- `docs/architecture/viewing-pipeline.md` — потребительская механика пирамиды
-  (want/ladder/Store/Fetch/Passes): дом для README 1217–1276, иначе после
-  удаления README она живёт только в 926 строках комментариев tiles.rs.
-- `docs/architecture/georeference.md` — старшинство по `enum Binding` (четыре
-  рода), кто толкует EPSG, датум как в коде. **МСК-61 — только как ветка,
-  проверенная тестом**: projection.rs:459-470 — коды 63361xx растром прийти не
-  могут, геоключ шестнадцатибитный.
-- `docs/architecture/download.md` — конвейер, `.part`, сидкар, siblings один раз.
-- `docs/architecture/invariants.md` — ведомость «инвариант → держатель» (тип /
-  валидатор / тест по имени / общая константа / pytest-пара / только
-  комментарий); засев: BLOCK=2×WINDOW, 120, `.part`, cap_tiles, reach↔produce,
-  showing ∩ overlays = ∅, рябь ×6 (Rust ↔ WGSL), уровни лога, FLOW; строка
-  DECODE_REV — про «кодек не закреплён ключом вопреки proto» (константа одна,
-  fingerprint.rs:31 [критик §3]).
-- `docs/limitations.md` — единственное место объявления ограничений: фраза,
-  причина в настоящем времени, что снимет; без тени (renderer.rs рисует [C])
-  и без «датумы не переводятся» (projection.rs переводит 284xx [C]).
+- `README.md` (~40 lines) — what this is, requirements in a table, two
+  commands, Copernicus keys via `.env.example`, links into docs/.
+- `CLAUDE.md` (~40) — process only: build.py the single command, "what not to
+  do" without gigabytes and seconds, style — a link to ADR 0001.
+- `docs/glossary.md` — ~15 terms, each with one English name (Sentence,
+  caller, host-acknowledged reply, lease, carrier, fingerprint, step/ladder,
+  binding); written before the first page.
+- `docs/architecture/overview.md` — repository map, services, the schema as
+  the source of truth; the topic list lives only in schema.yaml.
+- `docs/architecture/bus-and-schema.md` — an actor per subscriber,
+  correlation, snapshot/targeted/cancellable, exchange accounting and the
+  terminal reply (once), what the validator holds.
+- `docs/architecture/resources.md` — ResourceHandle, RangeSource, the reader
+  window and the pool block by constant names (`WINDOW` resource.rs:214,
+  `BLOCK` range.rs:28), lease, ownership transfer, block pool and readahead.
+- `docs/architecture/tasks.md` — an operation in flight, kill/cancel, a trap =
+  lost state; **do not carry over** "image-tiler is stateless" (README:507,
+  :820) — the memo of the last two parses exists (module.rs, `MEMO_SLOTS`).
+- `docs/architecture/window-and-render.md` — the runner, frame loop,
+  Viewport, the data-browser Elm loop. `modules.md` — anatomy of a module and
+  its wrap crate, named for what it does: a client crate with two purposes —
+  a convenient API where codegen falls short (the ui-service builders), and
+  shared code of producer and consumers through `#[path]` (pyramid, tiles,
+  geodesy, tile); there is no third purpose, and the consumer always
+  publishes.
+- `docs/architecture/screen.md` — home for the screen rules (panes, singleton
+  tabs, highlighting, persist, name squeezing, dropping columns):
+  README 584–800/829–900 ↔ state/mod.rs verbatim [P], and window-and-render
+  will not fit them in 50 lines.
+- `docs/architecture/imagery.md` — product → scene → parts, a topic diagram,
+  ONE table "format → how it is read by levels → what is partial → ceiling",
+  cache fingerprint. Written "as is" after `enum Reach` and `Info::reach()`,
+  not after README:1286-1291: a striped TIFF is Windowed (mod.rs:215-221),
+  not a "full pass".
+- `docs/architecture/viewing-pipeline.md` — consumer-side pyramid mechanics
+  (want/ladder/Store/Fetch/Passes): home for README 1217–1276, otherwise
+  after deleting README it lives only in 926 lines of tiles.rs comments.
+- `docs/architecture/georeference.md` — precedence by `enum Binding` (four
+  kinds), who interprets EPSG, datum as in the code. **MSK-61 — only as a
+  branch verified by a test**: projection.rs:459-470 — codes 63361xx cannot
+  arrive with a raster, the geokey is sixteen-bit.
+- `docs/architecture/download.md` — the pipeline, `.part`, sidecar, siblings
+  once.
+- `docs/architecture/invariants.md` — a ledger "invariant → holder" (type /
+  validator / test by name / shared constant / pytest pair / comment only);
+  seeding: BLOCK=2×WINDOW, 120, `.part`, cap_tiles, reach↔produce,
+  showing ∩ overlays = ∅, ripple ×6 (Rust ↔ WGSL), log levels, FLOW; the
+  DECODE_REV row — about "the codec is not pinned by the key despite proto"
+  (one constant, fingerprint.rs:31 [critic §3]).
+- `docs/limitations.md` — the single place to declare limitations: a phrase,
+  a reason in present tense, what will lift it; no shadow (renderer.rs draws
+  [C]) and no "datums are not converted" (projection.rs converts 284xx [C]).
 - `docs/operations/{build,diagnostics,ui-tests,configuration}.md` —
-  diagnostics ≤ 80 строк: perf-строки по строке на каждую и три правила
-  чтения; остальное руководство по debug-строкам из CLAUDE.md удалить.
-- `docs/decisions/README.md` — формат: контекст / решение / отвергнуто /
-  следствия, 10–20 строк, статусы open/proposed/accepted/superseded;
-  «Superseded by» — единственная допустимая история.
+  diagnostics ≤ 80 lines: perf strings one line each and three reading rules;
+  the rest — the debug-string guide from CLAUDE.md — is deleted.
+- `docs/decisions/README.md` — format: context / decision / rejected /
+  consequences, 10–20 lines, statuses open/proposed/accepted/superseded;
+  "Superseded by" is the only allowed history.
 
-**Спор 5 — нумерация и структура ADR.** Три плана дали три схемы номеров.
-Решение: **номера по порядку написания, без тематического резерва**; первые
-три фиксированы: `0001-documentation-and-comments` (правила — до любой
-страницы), `0002-jpeg2000-decoder` (заменяет docs/jp2-openjpeg.md, статус
-proposed, подчинён 0003), `0003-raster-reading-model` (таблица уровней и два
-пути производства; open → accepted шагом 7). Дальше — по шагам, меняющим
-форму (счёт памяти, конвейер в wrap, сеть). Планы работ и «состояние дерева»
-в docs/ не лежат.
+**Dispute 5 — ADR numbering and structure.** Three plans produced three
+numbering schemes. Decision: **numbers in order of writing, with no thematic
+reserve**; the first three are fixed: `0001-documentation-and-comments` (rules
+— before any page), `0002-jpeg2000-decoder` (replaces docs/jp2-openjpeg.md,
+status proposed, subordinate to 0003), `0003-raster-reading-model` (the level
+table and the two production paths; open → accepted at step 7). Further — by
+steps that change the shape (memory count, pipeline into wrap, network). Work
+plans and "tree state" do not live in docs/.
 
-**Правило для комментариев** (ADR 0001): `//!` ≤ 10 строк — чем владеет файл,
-какой инвариант держит, где тот проверяется, ссылка на страницу; `///` —
-контракт элемента (входы, единицы, что возвращает); `//` — неочевидная
-механика. Запрещены: контрфактическое эссе длиннее фразы, самозащита («и это
-не X»), номера строк, «те же, что у соседа» вместо общей константы. То же для
-`///` в `.proto` — это контракт провода, и ложь там подтверждена (Ring [C]).
-Отдельного прохода по 176 длинным блокам не делать: они лежат в
-overlay.rs/tiles.rs/netcdf.rs [P], которые перепишет модель чтения; сжимать
-при касании. Дословные дубли сводятся сразу: «отказ валит проход» ×7 → один
-раз у Cascade, siblings ×5 → types.proto, ритуал fs ×3 → хелпер SDK.
+**Rule for comments** (ADR 0001): `//!` ≤ 10 lines — what the file owns, which
+invariant it holds, where that is checked, a link to the page; `///` — the
+contract of an item (inputs, units, what it returns); `//` — non-obvious
+mechanics. Forbidden: a counterfactual essay longer than a phrase,
+self-defense ("and this is not X"), line numbers, "the same as the
+neighbor's" instead of a shared constant. The same for `///` in `.proto` —
+that is the wire contract, and a lie there is confirmed (Ring [C]). No
+separate pass over the 176 long blocks: they live in
+overlay.rs/tiles.rs/netcdf.rs [P], which the reading model will rewrite;
+compress on touch. Verbatim duplicates are folded at once: "a refusal kills
+the pass" ×7 → once at Cascade, siblings ×5 → types.proto, the fs ritual ×3
+→ an SDK helper.
 
-**Числа.** Число живёт в именованной константе либо это внешний факт с
-источником (WGS84, код EPSG); проза называет константу, не значение; замер —
-только в записи решения с датой и способом. Число числом не исправляется
-(«36» → «40»): в константу или удалить. «До трёх раз» — не ложь, а
-`ATTEMPTS = 3` (range.rs:49): назвать константу. «Нельзя» без теста
-(«декодер в тест не занести», «полосное невозможно») снимается тестом либо
-удалением.
+**Numbers.** A number lives in a named constant or it is an external fact with
+a source (WGS84, an EPSG code); prose names the constant, not the value; a
+measurement goes only in a decision record with a date and a method. A number
+is never fixed with a number ("36" → "40"): into a constant or delete. "Up to
+three times" is not a lie but `ATTEMPTS = 3` (range.rs:49): name the constant.
+A "cannot" without a test ("the decoder cannot be put in a test", "striped is
+impossible") is lifted by a test or by deletion.
 
-**Английский.** Ничего не переводится на месте: выжимка правил списком →
-английская страница с бюджетом строк → удаление русского источника в том же
-коммите; 129 «а не» и 113 «бы» README переводить нельзя. Язык комментариев —
-решение хозяина до первой страницы (иначе glossary пишется дважды);
-рекомендация: комментарии остаются русскими и переводятся только при
-переписывании файла по правилу, коммитов-переводов не бывает; смешанный язык
-на месяцы — цена, которую один разработчик выдержит.
+**English.** Nothing is translated in place: a distilled list of rules → an
+English page with a line budget → deletion of the Russian source in the same
+commit; the 129 "rather than" and 113 "would" of the README must not be
+translated. The language of comments is the owner's decision before the first
+page (otherwise the glossary is written twice); the recommendation: comments
+stay Russian and are translated only when a file is rewritten under the rule,
+there are no translation commits; a mixed language for months is a price one
+developer can bear.
 
-**Порядок:** правила + test_docs + ADR 0001/0002 + imagery.md «как есть» —
-сразу (2–3 дня, останавливают гниение); платформенные и эксплуатационные
-страницы — по одной, в том коммите, который и так трогает подсистему
-(SDK/abi → resources; dispatcher/range → bus, tasks; build.py/uitests →
-operations); screen.md — вместе с помощником `open_resource`; georeference —
-после правки привязки JP2; таблица imagery.md и invariants.md обновляются в
-коммитах шагов 7 и 10. README теряет разделы в тех же коммитах; отдельного
-«переписывания README» не существует.
+**Order:** rules + test_docs + ADR 0001/0002 + imagery.md "as is" —
+immediately (2–3 days, they stop the rot); platform and operations pages — one
+at a time, in the commit that already touches the subsystem (SDK/abi →
+resources; dispatcher/range → bus, tasks; build.py/uitests → operations);
+screen.md — together with the `open_resource` helper; georeference — after the
+JP2 binding fix; the imagery.md table and invariants.md are updated in the
+commits of steps 7 and 10. README loses sections in the same commits; a
+separate "README rewrite" does not exist.
 
-`test_docs.py` — три правила о ссылках, с критерием «что считается путём»:
-от корня, без `*` и `<>`, не под .gitignore; нет `file.rs:123` в docs/; нет
-путей вне репозитория. Область — docs/ и CLAUDE.md сразу, README — когда он
-≤ 50 строк. Правила о «каждый адаптер назван» и проверку идентификаторов
-регэкспом не заводить.
+`test_docs.py` — three rules about links, with a criterion for "what counts as
+a path": from the root, without `*` and `<>`, not under .gitignore; no
+`file.rs:123` in docs/; no paths outside the repository. Scope — docs/ and
+CLAUDE.md right away, README once it is ≤ 50 lines. Do not introduce rules
+about "every adapter is named" or identifier checking by regexp.
 
-## Тесты
+## Tests
 
-Тесты не избыточны и почти не искусственны: тавтологий ~10, переписанных
-формул ~6 на 794 [C, оба тест-читателя]. Слабость — направление: путь «байты
-→ describe → produce → тайл» и счёт прочитанных байт не проверяет ни один
-тест; dispatcher.rs — 0 тестов; сборка байт из блоков и Content-Range в
-range.rs — 0; catalog.rs — 0 при пяти асинхронных правилах [C/P]. Причина
-системная: нативные заглушки SDK возвращают нуль (sdk/abi.rs:55-90), и всё,
-что читает ресурс или публикует, нативно не наблюдаемо.
+The tests are not redundant and barely artificial: ~10 tautologies, ~6
+rewritten formulas out of 794 [C, both test readers]. The weakness is
+direction: no test checks the path "bytes → describe → produce → tile" or the
+count of bytes read; dispatcher.rs — 0 tests; assembling bytes from blocks and
+Content-Range in range.rs — 0; catalog.rs — 0 against five asynchronous rules
+[C/P]. The reason is systemic: the native SDK stubs return zero
+(sdk/abi.rs:55-90), and everything that reads a resource or publishes is not
+observable natively.
 
-**Спор 4 — фальшивый хост против счётного источника.** Решение: **один
-механизм — фальшивый хост в нативной ветке `veldsdk::abi`**, «счётный
-источник» — это его журнал чтений, видимый через тот же `ResourceReader`.
-Три условия судьи «тестов» обязательны: (а) кодировка ответа (len≪32|ptr,
-байт-тег, буфер через veld_alloc) делится с хостом одним файлом через
-`#[path]`, а не пишется второй раз — иначе фальшивка докажет согласие SDK с
-собой, а не с хостом [P, SDK: константы провода не закреплены]; (б) контекст
-события — `static Mutex` (abi.rs:311-320) — и фальшивка живут в одном месте:
-оба thread_local в нативной ветке; (в) журнал — это окна по 256 КиБ
-(resource.rs:214), не байты: фикстуры в несколько окон, утверждения «≤ число
-задетых окон», а `Metered` для этого не годится — он хранит дальнюю позицию,
-не сумму (mod.rs:429-433).
+**Dispute 4 — a fake host versus a counting source.** Decision: **one
+mechanism — a fake host in the native branch of `veldsdk::abi`**, and a
+"counting source" is its read log, visible through the same `ResourceReader`.
+The three conditions of the "tests" judge are mandatory: (a) the reply encoding
+(len≪32|ptr, byte tag, buffer via veld_alloc) is shared with the host in one
+file through `#[path]`, not written a second time — otherwise the fake proves
+the SDK agrees with itself, not with the host [P, SDK: wire constants are not
+pinned]; (b) the event context — `static Mutex` (abi.rs:311-320) — and the
+fake live in one place: both thread_local in the native branch; (c) the log is
+windows of 256 KiB (resource.rs:214), not bytes: fixtures spanning several
+windows, assertions "≤ the number of windows touched", and `Metered` does not
+qualify — it keeps the far position, not the sum (mod.rs:429-433).
 
-**Снять / слить.** Сначала починить измерители: вернуть `#[test]` на
-overlay.rs:3848 и снять дубль :3803 [C]; `hash_of` в продакшен вместо
-тестовой копии `of_slices` (fingerprint.rs:100-107) [C]; жёсткий список `-p`
-в build.py:468-471 → `cargo test --workspace` (пять тестов util не бегут)
-[C]; сирот и дубли `#[test]` ловить не регэкспом, а показом предупреждений
-rustc у тестовой цели — компилятор их уже видит, build.py прячет. Слить
-закрепления чисел в правила — Lease ×7, fit() ×6, group() ×8, пояс ×6,
-голосование ×6, золотая строка предела ×7, perf.rs 10 → 3–4, budget.rs:79
-дубль affordable, пять переписанных формул — **только после** переноса
-мутационного харнеса в дерево: 9 из 16 скриптов пишут бэкап в умерший
-каталог, «мерка до/после» без него невозможна; «−60…−70» не обещать до мерки.
-Снять `budget_refuses_native_tci_but_takes_overview` вместе с DECODE_BUDGET;
-тесты `Codestream` оставить, когда его выход что-то решает (шаг 3).
-Regression-пины с историей в doc — переформулировать в настоящем времени, не
-обезглавливать. Золотые списки test_project.py не трогать [P low].
+**Remove / fold.** First fix the gauges: put `#[test]` back on overlay.rs:3848
+and remove the duplicate :3803 [C]; `hash_of` into production instead of the
+test copy of `of_slices` (fingerprint.rs:100-107) [C]; the hard-coded `-p`
+list in build.py:468-471 → `cargo test --workspace` (five util tests do not
+run) [C]; catch orphan and duplicate `#[test]` not by regexp but by showing
+rustc warnings on the test target — the compiler already sees them, build.py
+hides them. Fold the number fixations into rules — Lease ×7, fit() ×6,
+group() ×8, belt ×6, voting ×6, the golden limit string ×7, perf.rs 10 →
+3–4, budget.rs:79 duplicate affordable, five rewritten formulas — **only
+after** moving the mutation harness into the tree: 9 of the 16 scripts write a
+backup into a dead directory, and a "before/after measurement" is impossible
+without it; do not promise "−60…−70" before the measurement. Remove
+`budget_refuses_native_tci_but_takes_overview` together with DECODE_BUDGET;
+keep the `Codestream` tests while its output decides something (step 3).
+Regression pins with history in the doc — rephrase in present tense, do not
+behead them. Do not touch the golden lists of test_project.py [P low].
 
-**Кросс-проводные соглашения** — порядок предпочтения: общая константа
-(wrap, `#[path]`) → строка в единственной таблице pytest-пар → комментарий,
-который считается долгом и виден в invariants.md. Конкретно: `WHEEL_NOTCH`
-константой в раннере вместо литерала `* 120.0` ↔ `RAW_WHEEL_NOTCH` [C];
-`PART_SUFFIX` из network/download.rs:53 ↔ data-library [C]; `ZOOM_PER_CLICK ×
-ZOOM_PER_STEP` — в globe-wrap, куда data-browser уже ходит через `#[path]`;
-удалить test_wheel_step.py целиком и два внутрикрейтовых теста
-test_tiler_budgets.py [C, buildgen]; уровни лога — общим файлом внутри
-воркспейса veldcore, не таблицей (обе стороны — ветки `match`); сортировка
-FLOW — в test_project.py; `cap_tiles ≤ MAX_QUERY_TILES` — одной константой
-через уже существующее включение wrap'а в tile-cache (tile-cache/src/tile.rs
-шапка), а не снятием отказа; рябь ×6 — WGSL-половина константу не импортирует,
-остаётся строкой «комментарий» в ведомости. BLOCK = 2×WINDOW — настройка, не
-инвариант: в тесты не идёт, из прозы снимается.
+**Cross-wire agreements** — order of preference: a shared constant (wrap,
+`#[path]`) → a row in the single pytest-pair table → a comment, which counts
+as a debt and is visible in invariants.md. Specifically: `WHEEL_NOTCH` as a
+constant in the runner instead of the `* 120.0` literal ↔ `RAW_WHEEL_NOTCH`
+[C]; `PART_SUFFIX` from network/download.rs:53 ↔ data-library [C];
+`ZOOM_PER_CLICK × ZOOM_PER_STEP` — into globe-wrap, where data-browser already
+goes through `#[path]`; delete test_wheel_step.py entirely and the two
+in-crate tests of test_tiler_budgets.py [C, buildgen]; log levels — a shared
+file inside the veldcore workspace, not a table (both sides are `match`
+branches); FLOW ordering — in test_project.py; `cap_tiles ≤ MAX_QUERY_TILES`
+— one constant through the already existing wrap inclusion in tile-cache
+(tile-cache/src/tile.rs header), not by removing a refusal; ripple ×6 — the
+WGSL half cannot import the constant, it stays a "comment" row in the ledger.
+BLOCK = 2×WINDOW is a setting, not an invariant: it does not go into tests and
+is removed from prose.
 
-**Добавить по цене ошибки, не по покрытию:** байты тайлера на фикстурах из
-`tiff::encoder` + `DirectoryEncoder` (тайловый IFD — 30–40 строк, не 120):
-describe ≤ окон головы; один тайл ⊆ окна своих чанков; проход читает файл
-один раз; direct == pass на фикстуре с копиями ровно вдвое — тест геометрии
-драйвера, не инвариант формата (копии GDAL так не сойдутся); dispatcher —
-учёт открыт/закрыт/договорён за отсутствующего подписчика, имена из FLOW,
-tokio-рантайм не нужен (publish_from синхронна); range.rs — `read_at` через
-границы блоков, короткий хвост, 200 вместо 206, Content-Range чистой функцией
-— через замыкание `fetch(from, to)`, названное исключение из «никаких трейтов
-для тестов»: у хоста фальшивки SDK нет; catalog.rs ingest на рукотворных
-FsListResponse; `abandon` → `fake::leaked()` пуст. Новый шов принимается с
-мутацией, названной в doc теста одной строкой.
+**Add by cost of error, not by coverage:** tiler bytes on fixtures from
+`tiff::encoder` + `DirectoryEncoder` (a tiled IFD — 30–40 lines, not 120):
+describe ≤ the windows of the head; one tile ⊆ the windows of its chunks; a
+pass reads the file once; direct == pass on a fixture with copies exactly
+halved — a test of the driver geometry, not a format invariant (GDAL copies
+will not match this way); dispatcher — accounting for
+opened/closed/acknowledged on behalf of a missing subscriber, names from FLOW,
+no tokio runtime needed (publish_from is synchronous); range.rs — `read_at`
+across block boundaries, a short tail, 200 instead of 206, Content-Range as a
+pure function — via a `fetch(from, to)` closure, a named exception to "no
+traits for tests": the host has no SDK fake; catalog.rs ingest on hand-made
+FsListResponse; `abandon` → `fake::leaked()` empty. A new seam is accepted
+with a mutation named in the test doc in one line.
 
-**uitests:** сценарий — на действие пользователя, утверждает условие, не
-секунды. Добавить `download.txt` (нужен и для добычи гранулы), `layers.txt`,
-`jp2canvas.txt` (сперва `wait` строки размера, доказывающей уровень 0, потом
-`absent text:не будет`); `remote.txt` — утверждать долю доставленного по
-`network::perf` силами run-uitests.py, как уже ищутся `wgpu:` и «поймал
-трап»; ragged.txt — `#n` вместо паузы; путь лога из services.json. Мутации:
-один харнес `buildgen/mutate.py` + `mutations/<крейт>.txt`, вручную.
-ui-service: три «завести нельзя» снять текстом сейчас, wrap с тестами — по
-желанию.
+**uitests:** a scenario targets a user action and asserts a condition, not
+seconds. Add `download.txt` (also needed for granule mining), `layers.txt`,
+`jp2canvas.txt` (first `wait` for a size line proving level 0, then
+`absent text:will not be`); `remote.txt` — assert the delivered share via
+`network::perf` by run-uitests.py itself, the way `wgpu:` and "trap caught"
+are already searched for; ragged.txt — `#n` instead of a pause; the log path
+from services.json. Mutations: one harness `buildgen/mutate.py` +
+`mutations/<crate>.txt`, by hand. ui-service: lift the three "cannot be
+started" claims with text now, the wrap with tests — as desired.
 
-## Форматы и JP2
+## Formats and JP2
 
-**Что читается «только нужное» сегодня.** Тайловый TIFF с копиями — на всех
-уровнях (`produce_direct`); полосный TIFF — подробные уровни окном, грубые
-проходом (`Reach::Windowed`, mod.rs:215-221 — это три пути, а не «один
-формат из шести»). JP2 — файл целиком на каждый уровень и дважды на показ
-(`read_to_end` jp2.rs:284-286; лестница Coarser = вершина и цель) [C high];
-TCI 10980² не подробнее уровня 2. NetCDF — метаданные по требованию, но
-выбранная величина целиком в f32 ещё в describe и до конца прохода
-(netcdf.rs:292-306) [C high]; `describe` при этом объявлен схемой «быстрым»
-[C]. PNG/JPEG/full — честный полный проход. Ось «полоса/величина» в контракте
-отсутствует [C high]. В сети: один запрос в полёте на читателя и разгон
-только по строго последовательному промаху (range.rs:336-350 `plan`), разгон
-на открытие, а не на объект (range.rs:110-111) [C]; подпись SigV4 выдаётся
-при открытии и после 401/403 не переспрашивается (range.rs:597) — для слоя,
-живущего весь сеанс, это блокер цели «любой размер по сети», и ни один план
-кроме судьи «форматов» его не назвал. `WIRE_PLANE` 96 МиБ советует скачать —
-против цели [C]. «Все форматы» для этого хозяйства — три семейства: JP2
-Sentinel-2, GeoTIFF/COG, NetCDF-4; порядок идёт по ним.
+**What reads "only what is needed" today.** A tiled TIFF with copies — at all
+levels (`produce_direct`); a striped TIFF — detailed levels by window, coarse
+ones by pass (`Reach::Windowed`, mod.rs:215-221 — that is three paths, not
+"one format out of six"). JP2 — the whole file for every level and twice for
+display (`read_to_end` jp2.rs:284-286; the Coarser ladder = apex and target)
+[C high]; a 10980² TCI is no more detailed than level 2. NetCDF — metadata on
+demand, but the selected variable entirely in f32 already at describe and to
+the end of the pass (netcdf.rs:292-306) [C high]; meanwhile `describe` is
+declared "fast" by the schema [C]. PNG/JPEG/full — an honest full pass. The
+"strip/variable" axis is missing from the contract [C high]. In the network:
+one request in flight per reader and readahead only on a strictly sequential
+miss (range.rs:336-350 `plan`), readahead on open rather than on the object
+(range.rs:110-111) [C]; the SigV4 signature is issued at open and is not
+re-asked after 401/403 (range.rs:597) — for a layer living a whole session
+this is a blocker of the "any size over the network" goal, and no plan except
+the "formats" judge named it. `WIRE_PLANE` 96 MiB suggests downloading —
+against the goal [C]. "All formats" for this household means three families:
+Sentinel-2 JP2, GeoTIFF/COG, NetCDF-4; the order follows them.
 
-**Спор 3 — NetCDF.** «Простота» оставляет его `Pass{0}` со ссылкой на
-«блокер hdf5-pure»; «форматы» и судья «простоты» — оконное чтение есть.
-Решение: **NetCDF — реализатор общей модели с окном строк, деградации — строки
-таблицы уровней, не исключение из модели.** `read_raw_rows`/`read_*_rows`
-по первой оси есть (hdf5-pure 0.42 reader.rs:5420-5521); сам netcdf.rs:22-30
-говорит, что OLCI лежит тремя полосами по первой оси и крейт режет по ней, —
-а «пирамиду каскад строит по всей ширине» — ложь, каскад принимает полосы
-[C]. Блокеры — свойства гранул: единичная ведущая ось S5P ([1,y,x]) и
-одночанковый датасет SYNERGY (окно строк = вся плоскость) — таблица честно
-пишет «уровень стоит плоскости». Форк hdf5-pure — только когда без него
-упёрлись. Это третий по порядку формат: главный формат каталога — JP2.
+**Dispute 3 — NetCDF.** "Simplicity" leaves it `Pass{0}` pointing at "the
+hdf5-pure blocker"; "formats" and the "simplicity" judge — windowed reading
+exists. Decision: **NetCDF is an implementer of the shared model with a row
+window; degradations are rows of the level table, not an exception to the
+model.** `read_raw_rows`/`read_*_rows` along the first axis exist (hdf5-pure
+0.42 reader.rs:5420-5521); netcdf.rs:22-30 itself says OLCI lies in three
+strips along the first axis and the crate cuts along it — while "the cascade
+builds the pyramid across the full width" is a lie, the cascade accepts strips
+[C]. The blockers are granule properties: the unit leading axis of S5P
+([1,y,x]) and the single-chunk SYNERGY dataset (row window = the whole plane)
+— the table honestly writes "the level costs the plane". Fork hdf5-pure only
+when stuck without it. This is the third format in order: the main catalogue
+format is JP2.
 
-**docs/jp2-openjpeg.md.** *Важно и верно* (три читателя сходятся): диагноз
-четверти — `estimate = file_len + w·h·24` против `DECODE_BUDGET` даёт
-finest = 2 у 10980² [C]; hayro не умеет ни тайл, ни область и отдаёт только
-f32 [C decisive] — замена на openjp2 нужна любому пути; describe не
-декодирует, `codestream()` разбирает главный заголовок и закреплён тестами
-[C]; обработчик ошибок обязателен, паника = трап; новый uitest с TCI в канве
-нужен при любом варианте (JP2 не открывает ни один сценарий — showsel
-открывает S1 COG). *Второстепенно:* оговорки о крейте (no_std/libc,
-`Stream::new_reader`), спор о переиспользовании кодека, смесь МБ/МиБ —
-заметки исполнителю у unsafe-острова, не docs/. *Неверно или рискованно:* модель «один проход по
-файлу на ступень, Reach остаётся Coarser, wants игнорируется» — байты на
-уровень равны файлу, цель 1 не двигается по собственному признанию документа;
-копия `tiff::produce_pass` в jp2.rs и пятый потолок памяти; `finest = 0`
-трапит однотайловый кодстрим (буфер w·h·3·4 ≈ 1,45 ГБ); память тайла
-занижена вчетверо (tcd — 4 Б/отсчёт); `cascade::bytes(10980²)` = 56 МБ, не
-45 (итог ≈104); 1,91× объяснён добором буфера, размер которого задаёт
-вызывающий; пробник мерил рукотворные кодстримы, не гранулу; `(prec+7)/8`;
-`data_size` заполняется только при заранее выставленном Some; ссылка на
-test_tiler_budgets.py ложна; «windowed не покрыт» — покрыт (tiff.rs:2313);
-«незакоммичено» устарело в момент коммита; config.yaml:33-37 обосновывает
-openjp2 областями, jp2.rs:12-20 обещает «регион в свою фазу», jp2.rs:497-499 —
-«решает способ чтения целиком», а `codestream()` зовётся ради строки лога [C].
-TLM/PLT openjp2 читает и выбрасывает — обход всех SOT есть ограничение крейта,
-не формата [C]; есть ли TLM у гранул — не измерено (.jp2 на диске нет).
+**docs/jp2-openjpeg.md.** *Important and correct* (three readers agree): the
+quarter's diagnosis — `estimate = file_len + w·h·24` against `DECODE_BUDGET`
+gives finest = 2 for 10980² [C]; hayro can do neither tile nor region and
+returns only f32 [C decisive] — the switch to openjp2 is needed by any path;
+describe does not decode, `codestream()` parses the main header and is pinned
+by tests [C]; an error handler is mandatory, panic = trap; a new uitest with a
+TCI in the canvas is needed either way (no scenario opens a JP2 — showsel
+opens an S1 COG). *Secondary:* caveats about the crate (no_std/libc,
+`Stream::new_reader`), the argument about codec reuse, the MB/MiB mix —
+notes for the implementer at the unsafe island, not docs/. *Wrong or risky:*
+the model "one pass over the file per step, Reach stays Coarser, wants are
+ignored" — bytes per level equal the file, goal 1 does not move by the
+document's own admission; a copy of `tiff::produce_pass` in jp2.rs and a fifth
+memory ceiling; `finest = 0` traps a single-tile codestream (buffer w·h·3·4 ≈
+1.45 GB); tile memory understated fourfold (tcd — 4 B/sample);
+`cascade::bytes(10980²)` = 56 MB, not 45 (total ≈104); 1.91× explained by a
+buffer top-up whose size is set by the caller; the probe measured hand-made
+codestreams, not a granule; `(prec+7)/8`; `data_size` is filled only when Some
+is set beforehand; the reference to test_tiler_budgets.py is false; "windowed
+is not covered" — it is covered (tiff.rs:2313); "not committed" was stale at
+the moment of the commit; config.yaml:33-37 justifies openjp2 by regions,
+jp2.rs:12-20 promises "a region in its own phase", jp2.rs:497-499 — "the full
+read method is decided there", while `codestream()` is called for the sake of
+a log line [C]. TLM/PLT openjp2 reads and throws away — the traversal of all
+SOT is a crate limitation, not a format one [C]; whether granules have TLM is
+not measured (there are no .jp2 on disk).
 
-*Делать ли сейчас:* **не как стратегию.** Сейчас — правда в текстах и ADR
-0002 вместо документа (шаг 1) и замер настоящей гранулы своим парсером
-(шаг 3). Декодер — внутри общего драйвера сетки чанков после его извлечения из
-TIFF (шаг 8): JP2 получает точечный путь и память-по-тайлу одним кодом, не
-своим циклом. Выбор пути к тайлу решён уликой дайджеста: после `decode`
-многотайлового потока состояние EOC закрывает повторный `set_decode_area`,
-`get_decoded_tile` переиспользует кодек и рвёт обход сразу после нужного тайла
-— брать его, развилку в код не тащить. Точечное чтение по сети (шаг 9) — по
-результату замера, с тремя исходами, названными вслух: TLM нет (обход SOT, блок
-на тайл-парт); TLM есть, тайл-парты не по разрешениям (гранулярность тайла,
-~1 МБ у TCI); TLM есть с делением (гранулярность уровня). Вырожденные сетки —
-правилом таблицы до кода: чанк ≪ тайла (PVI 8×8) → проход; один тайл на
-холст → предел по памяти тайла на факторе. Попутно в jp2.rs: один обходчик
-боксов вместо трёх, `binding_trouble` заполнять, белый список `easting_first`
-(jp2.rs:92-94) снять — EPSG толкует projection.rs глобуса [C].
+*Whether to do it now:* **not as a strategy.** For now — truth in the texts
+and ADR 0002 instead of the document (step 1) and a measurement of a real
+granule with our own parser (step 3). The decoder — inside the shared chunk
+grid driver after it is extracted from TIFF (step 8): JP2 gets a pointwise
+path and per-tile memory with one piece of code, not its own loop. The choice
+of path to the tile is settled by a clue from the digest: after `decode` of a
+multi-tile stream the EOC state closes a repeated `set_decode_area`,
+`get_decoded_tile` reuses the codec and breaks the traversal right after the
+needed tile — take it, do not drag the fork into the code. Pointwise reading
+over the network (step 9) — by the measurement result, with three outcomes
+named out loud: no TLM (SOT traversal, a block per tile-part); TLM present,
+tile-parts not by resolution (tile granularity, ~1 MB for a TCI); TLM with
+division (level granularity). Degenerate grids — as a table rule before code:
+chunk ≪ tile (PVI 8×8) → pass; one tile on the canvas → limit by tile memory
+on the factor. Along the way in jp2.rs: one box walker instead of three, fill
+`binding_trouble`, remove the `easting_first` whitelist (jp2.rs:92-94) — EPSG
+is interpreted by the globe's projection.rs [C].
 
-**Фундамент под карту мира (цель 2)** — только требования, не работа:
-честные таблицы уровней у каждого источника, `Placement`/решётка как одна
-привязка на входе без отдельного пути UtmFrame, общий `radiometry::Mapping`
-(растяг на файл разойдётся по швам), потолок видимого по всем источникам
-вместе, а не поровну на пирамиду (`cap_tiles`, tiles.rs:244-260 [C]).
-Глобальную тайловую схему в тайлере не строить.
+**Foundation for the world map (goal 2)** — requirements only, not work:
+honest level tables at every source, `Placement`/grid as one binding at the
+input with no separate UtmFrame path, a shared `radiometry::Mapping` (a
+per-file stretch will fray at the seams), the visible ceiling across all
+sources together, not evenly per pyramid (`cap_tiles`, tiles.rs:244-260 [C]).
+Do not build a global tile scheme in the tiler.
 
-## Порядок работ
+## Work Order
 
-Один порядок на четыре угла. S — до двух дней, M — до недели, L — две-три
-недели с ИИ; сумма ≈ 13–15 недель последовательной работы одного человека,
-что сходится с оценками судей (3–4 месяца). Дерево зелёное и полезное после
-каждого шага; документация едет в коммитах шагов, не отдельной полосой.
+One order for the four angles. S — up to two days, M — up to a week, L — two
+to three weeks with AI; the sum is ≈ 13–15 weeks of sequential work by one
+person, which matches the judges' estimates (3–4 months). The tree is green
+and useful after every step; documentation rides in the commits of steps, not
+in a separate lane.
 
-**Спор 7 — сроки и порядок.** Решение: дешёвые правда и замер — первыми;
-тестовая опора — до перестройки, потому что она же критерий равенства
-«до/после»; видимый результат для Sentinel-2 — не раньше страховки, но раньше
-NetCDF и сети; страницы docs — по одной в чужих коммитах, ни одной недели
-документации перед целью 1.
+**Dispute 7 — schedule and order.** Decision: the cheap truth and measurement
+come first; the test support comes before the rebuild, because it is also the
+equality criterion "before/after"; a visible result for Sentinel-2 — not
+before the safety net, but before NetCDF and the network; docs pages — one at
+a time in foreign commits, not a single week of documentation before goal 1.
 
-1. **[S] Правда в текстах и правила** — выполнен 2 сентября 2026: ложные
-   числа и обещания сняты, `docs/decisions/0001-documentation-and-comments.md`,
+1. **[S] Truth in the texts and rules** — done on September 2, 2026: false
+   numbers and promises removed, `docs/decisions/0001-documentation-and-comments.md`,
    `docs/decisions/0002-jpeg2000-decoder.md`, `docs/architecture/imagery.md`,
-   `docs/glossary.md`, `buildgen/tests/test_docs.py`; зависимость openjp2
-   снята до шага 8.
-2. **[S] Измерители и дефект хоста** — выполнен 2 сентября 2026: тесты
-   overlay.rs починены, `hash_of` в продакшене, `cargo test --workspace` со
-   сводкой предупреждений rustc, `buildgen/tests/test_wire_pairs.py`
-   (WHEEL_NOTCH, PART_SUFFIX, INSTANCE), шаг колеса в `globe/src/wheel.rs`
-   через wrap, уровни лога общим файлом `sdk/rust/src/abi/log_level.rs`,
-   сортировка FLOW в test_project, актор без инстанса поднимает его снова и
-   договаривает обмены, `buildgen/mutate.py` с мутациями тайлера,
-   `docs/operations/{build,ui-tests,diagnostics}.md`, CLAUDE.md — процесс.
-3. **[S] Замер гранулы** — выполнен 2 сентября 2026: `jp2::codestream` читает
-   TLM, PLT первого тайл-парта, прогрессию и слои COD; строка описания в
-   trace.log; замер трёх файлов гранулы записан в ADR 0002 (TLM по тайлу на
-   тайл-парт, PLT есть, LRCP с одним слоем — гранулярность тайла, а внутри
-   тайла по PLT и уровня); `uitests/fixtures/s2-tci.txt` качает TCI один раз,
-   `uitests/jp2canvas.txt` открывает его в канве, ждёт тайлы, приближает до
-   предела детали; предел прогона run-uitests растёт с `timeout` сценария, а
-   снятый прогон уносит с собой окно.
-4. **[M] Фальшивый хост в SDK** — выполнен 2 сентября 2026:
+   `docs/glossary.md`, `buildgen/tests/test_docs.py`; the openjp2 dependency
+   removed before step 8.
+2. **[S] Gauges and the host defect** — done on September 2, 2026: overlay.rs
+   tests fixed, `hash_of` in production, `cargo test --workspace` with a rustc
+   warning summary, `buildgen/tests/test_wire_pairs.py` (WHEEL_NOTCH,
+   PART_SUFFIX, INSTANCE), the wheel step in `globe/src/wheel.rs` through the
+   wrap, log levels via the shared file `sdk/rust/src/abi/log_level.rs`, FLOW
+   ordering in test_project, an actor without an instance raises it again and
+   negotiates the exchanges, `buildgen/mutate.py` with tiler mutations,
+   `docs/operations/{build,ui-tests,diagnostics}.md`, CLAUDE.md — process.
+3. **[S] Granule measurement** — done on September 2, 2026: `jp2::codestream`
+   reads TLM, the PLT of the first tile-part, the progression and COD layers;
+   a description line in trace.log; the measurement of three granule files is
+   recorded in ADR 0002 (TLM one tile per tile-part, PLT present, LRCP with a
+   single layer — tile granularity, and inside the tile by PLT and level);
+   `uitests/fixtures/s2-tci.txt` downloads the TCI once,
+   `uitests/jp2canvas.txt` opens it in the canvas, waits for tiles, zooms to
+   the detail limit; the run-uitests run limit grows with the scenario
+   `timeout`, and a stopped run takes the window with it.
+4. **[M] Fake host in the SDK** — done on September 2, 2026:
    `veldsdk::fake::{install, mount, reads, published, logged, leaked, owner,
-   readers}` под `not(wasm32)`; нативные заглушки ABI отвечают из него, без
-   `install` — прежние нули; кодировка ответа — общий с хостом файл
-   `abi/wire.rs` (через `#[path]`), ответы лежат в арене-«линейной памяти»;
-   контекст события нативно `thread_local`; тесты читателя (окна ровно
-   [0, len), окно начинается с места чтения), владения, публикации, лога;
-   мутации `buildgen/mutations/veldsdk.txt`; `docs/architecture/resources.md`
-   вместо раздела README.
-5. **[M] Метрика цели 1 и швы хоста как тесты** — выполнен 3 сентября 2026:
-   фикстуры TIFF из энкодера крейта (тайловый с копиями — руками через
-   `DirectoryEncoder`, полосный — `ImageEncoder`) в `adapters/reads.rs`;
-   четыре свойства на журнале окон (описание — только шапка и окрестности
-   IFD; тайл — свой чанк; проход — файл один раз; direct == pass на копиях
-   вдвое) и таблица `reach() ↔ рукав produce`; диспетчер — открыт/закрыт/
-   договорён за отсутствующего, адресная публикация, права на убийство;
-   range.rs — поход в сеть замыканием `fetch`, статусы и `Content-Range`
-   чистыми функциями, `read_at` через границы, хвост, разгон, попадания,
-   повторы; каталог библиотеки на рукотворном листинге; `abandon` наложения
-   → `leaked()` пуст. Мутации всех четырёх крейтов в `buildgen/mutations/`.
-   Docs: bus-and-schema.md, tasks.md; README без трёх разделов.
-6. **[S] Три хелпера клея** — выполнен 3 сентября 2026:
-   `veldsdk::reply::undelivered` (из tiles.rs; `answered_by_host` перестал быть
-   публичной дверью), им же `accept` называет договорённый ответ — это и есть
-   tile-cache с relay data-provider/data-library, — а download.rs зовёт его
-   вместо `url.is_empty()`; `veldsdk::resource::{region_of, read_whole}` вместо
-   трёх ритуалов записи и трёх чтений целиком (persist получил `LAYOUT_CAP`);
-   сборка `ResourceOpened` — общий файл `resource/opened.rs`, host/util включает
-   его через `#[path]`; data-browser `handlers::open_resource(identifier, local,
-   &correlation)` в пяти местах, учёт ожидания у зовущего — хелпер без `state`,
-   потому что журналы у превью и наложения разные. Docs: screen.md,
-   download.md, README без двух разделов; мутации veldsdk.
-7. **[L] Общий драйвер сетки чанков и один счёт памяти** — выполнен
-   3 сентября 2026 двумя коммитами. Драйвер `adapters/grid.rs`: `Grid` (базовый
-   чанк, копии, глубина сэмпла), выбор копии и правило окна (`footprint`),
-   геометрия области, кэш чанков, трейт `Chunked` и циклы `direct`/`pass`; от
-   TIFF остался чанк (`tiff::Chunks`). Таблица уровней `adapters/table.rs`:
-   `Serve {Pointwise, Pass{from}}`, `Level {serve, pixels, peak, fits}`; из неё
-   выводятся `reach`/`windowed`/`finest` и рукав `produce`, «правьте вместе»
-   нет; поле `Info.finest` и ручной `jp2::finest` сняты, `finest` JPEG — из
-   счёта. `budget::Peak` (слагаемые именами, `admit()` против `free()`);
-   `CHUNK_CACHE = free()/8`, `REGION_CAP` — половина кэша в пикселях, BAND_CAP
-   снят (проход и чанк меряются суммой), `MIN_CHUNK_PIXELS` — правило
-   вырожденных сеток; `frame_fits` общий для таблицы и путей кадра целиком;
-   `produce` сверяет пик со следом лёгкого memo соседа; описание отказывает,
-   если не влезает ни один уровень. Сдвиги поведения: кэш 128→116 МиБ и
-   REGION_CAP 16,8→15,2 Мпикс (тайловый без копий со стороной около 4096
-   теряет окно на вершине), TIFF без окна отвечает `Pyramid`, а не `Windowed`,
-   `Exact` не требует `random_access`; счёт чанка учитывает сырые сэмплы (u16-
-   и f32-полосные файлы, которые раньше проходили под BAND_CAP молча, теперь
-   считаются честно). ADR 0003 accepted; imagery.md, invariants.md (заведён),
-   glossary. Замер окон на IFD у настоящих COG не сделан — остаётся в «Дальше».
-   Проверка: 51 тест tiff.rs и свойства reads.rs без правки ожиданий; grep
-   «правьте вместе» пуст; таблица на настоящих размерах влезает (table.rs);
-   мутации тайлера 10/10; uitests preview/shown/remote.
-8. **[L] JP2 на openjp2 внутри драйвера** — выполнен 3 сентября 2026.
-   Unsafe-остров один — `adapters/codec.rs`: поток поверх читателя ресурса
-   через C-колбэки, обработчик ошибок, кодек выброшен после отказа, strict;
-   чанк — тайл кодстрима на факторе (`get_decoded_tile`), копии — уровни
-   разрешения, пока тайл делится на два; `Kind::Jp2(jp2::Layout)`, строки
-   таблицы как у TIFF, память — счёт шага 7 с `SAMPLE_BYTES` на отсчёт; начало
-   холста не в нуле — отказ описания; ноль прозрачен только у файла с GML;
-   растяг шире байта — по выборке самой мелкой копии. hayro, `DECODE_BUDGET`,
-   `key_margins`, `ladder_level` сняты. Фикстура — энкодер openjp2 в тестах
-   острова; тесты чтения: описание — только голова, тайл читает свой тайл-парт
-   и заголовки SOT (до него — по окну на каждый, на первом тайле кодека — все
-   после до EOC: проверка числа тайл-партов OpenJPEG, снимается индексом
-   шага 9), вырожденная сетка 8×8 — проход без потерь. На грануле TCI предел
-   детали ноль, `uitests/jp2canvas.txt` ждёт `absent text:не будет`; wasm
-   2 842 418 → 3 122 098 байт (ADR 0002 accepted). Попутно найдено и починено
-   в SDK: модуль — реактор WASI без `_start`, и musl'овский
-   `pthread_key_delete` вешал первый `thread_local!` (у T1 openjp2) — ключи
-   thread-local теперь свои, однопоточные (`veldcore/sdk/rust/src/tsd.rs`).
-   Не сделано: сравнение с hayro на 5/3 и 9/7 (hayro снят; вместо него —
-   обратимый круг «энкодер openjp2 → декодер» байт в байт); старт модуля не
-   замерен; обходчиков боксов по-прежнему три (`header_dims`, `codestream_at`,
-   `gml_text`); `easting_first` и `binding_trouble` у JP2 не тронуты —
-   georeference.md написана по коду как есть; критерий «байты на тайл уровня
-   0 ≪ файла» не выполнен: тайл стоит своего тайл-парта и по окну читателя на
-   каждый SOT после него (на 16-тайловой фикстуре — около трети файла, у TCI
-   по сети — блок на тайл-парт, около половины файла) на каждый `produce`,
-   пока индекс тайл-партов шага 9 не уберёт обход; растяг 12-битной полосы
-   проверен фикстурой, не гранулой. Проверка: тесты codec/jp2/reads,
-   мутации тайлера 13/13, uitests jp2canvas/preview/shown/remote.
-9. **[M] JP2 по сети точечно** — выполнен 3 сентября 2026. Свой индекс
-   тайл-партов по TLM и выдержка на тайл (`adapters/excerpt.rs`): главный
-   заголовок с коробками, тайл-парты тайла, EOC — кодеку нечего обходить,
-   кодек на тайл. При PLT и прогрессии с разрешением во внешнем цикле
-   (LRCP с одним слоем, RLCP, RPCL) тайл-парт режется после пакетов нужного
-   разрешения по счёту прецинктов (B.6), недостающие пакеты дописываются
-   пустыми, Psot и TNsot переписываются в копии заголовка; резать можно
-   только при равенстве счёта пакетов и записей PLT, иначе тайл-парты целиком.
-   Три исхода (ADR 0004): без TLM — обход SOT кодеком, как было; TLM —
-   гранулярность тайла; TLM с PLT — гранулярность уровня: первое решает
-   описание, второе — сборка выдержки на каждом тайле. Проба тайл-парта
-   64 КиБ несёт заголовок и у гранулы два грубейших разрешения — три грубейших
-   уровня пирамиды. Замер гранулы
-   (Kakadu 7.4, TLM на 121 тайл-парт, PLT везде, LRCP/1 слой, прецинкты 256²,
-   без SOP/EPH/COC/POC): префикс тайл-парта на факторе 4 — 9 КиБ (сумма по
-   грануле 1,02 МиБ), на факторе 3 — 35 КиБ (3,9 МиБ), на 2 — 134 КиБ
-   (15 МиБ), на 1 — 476 КиБ (54 МиБ), на 0 — весь файл (129 МиБ); счёт
-   пакетов сошёлся с PLT у всех 121. Строка описания называет путь чтения.
-   Фикстуры энкодера (`Addressing`: TLM, PLT, прецинкты, контейнер JP2):
-   выдержка декодируется байт в байт как весь файл на всех раскладках;
-   журнал: тайл уровня 0 читает только свой тайл-парт, самый грубый уровень
-   — по пробе на тайл и меньше восьмой файла, TLM без PLT — целыми
-   тайл-партами. Прогон: верб `delivered N` —
-   ручательство за провод, которое run-uitests.py сверяет по `network::perf`
-   в trace.log (копия `<имя>.trace.log` остаётся у сценария; ручательство
-   без единой строки сети не сдержано), кэш тайлов на время прогона
-   откладывается — каждый сценарий холодный; `uitests/jp2remote.txt`
-   открывает по сети соседнюю нескачанную гранулу T31TGK (129 МиБ): самый
-   грубый уровень 75,0 с, к его концу доставлено 109,6 МиБ (84 %) за 64
-   запроса по 1,71 МиБ, четыре уровня приближения — из пула, закрыт на
-   115,6 МиБ (89 %), весь сценарий 141 с. jp2canvas на холодном кэше 23,3 с
-   (15,0 с на тёплом). Не сделано: «доставлено ≪ файла» по сети не выполнено
-   — самому грубому уровню нужен от файла 1 МиБ, просит модуль 121 пробу по
-   64 КиБ (7,6 МиБ), а сеть привозит 84 %: разгон
-   упреждающего чтения удваивает запрос на промахе ровно за концом прошлого,
-   и заголовки тайл-партов через два блока (BLOCK 512 КиБ) выглядят для него
-   последовательным проходом; сценарий ручается за 95 % (файл не привозится
-   дважды), ужесточение — шаг 12 с этими числами. Тайл из нескольких
-   тайл-партов платит пробу за каждый, без PLT в каждом читается целыми
-   тайл-партами, а через декодер не проверен вовсе — только сборка на байтах:
-   энкодер крейта с `tp_on` кладёт в каждый тайл-парт все пакеты тайла и один
-   Psot, фикстуры третьего исхода из него не получить. Файл с PPM описание не отвергает, хотя случайный доступ к
-   тайлу с PPM у openjp2 сломан на обоих путях (один бегущий указатель
-   заголовков пакетов). `codestream()` и `Index::of` идут одним обходчиком
-   сегментов, но обходчиков боксов по-прежнему три, а разборов SIZ/COD два.
-   Проверка: тесты excerpt/jp2/reads, мутации тайлера 20/20, uitests
-   jp2canvas/jp2remote/remote/preview/shown на холодном кэше.
-10. **[M] Таблица уровней на провод** — выполнен 3 сентября 2026.
-    `Described.levels: repeated Level {serve, from, bytes, fits}` — та же
-    таблица, по которой `produce` выбирает рукав; `reach`, `windowed`,
-    `finest` и `enum Reach` сняты с провода (номера полей reserved). Wrap
-    `tiles.rs`: `Meta { rows }`, `finest()` — первая влезающая строка,
-    `pointwise(level)` — строка, `ladder(target)` — из столбца обслуживания:
-    ступень грубее цели берётся, если она точечная, того же прохода, что и
-    цель, либо вершина своим проходом (JPEG); `describe` отвергает проход
-    подробнее своего уровня; `want(sharpest, &meta, cap, …)`. Поведение
-    против прежнего `Reach` изменилось в одном: полосный TIFF над точечной
-    целью берёт свои точечные ступени, над проходной — все уровни того же
-    прохода (было — только цель). `MAX_QUERY_TILES` — в общем
-    `tile-cache/src/tile.rs`, включённом и в wrap тайлера; `cap_tiles`
-    режется им. Золотая строка «подробнее … не будет» целиком — один тест у
-    `Meta::capped`, остальные места сверяются с `capped()`.
-    Крупный JPEG (12000², сгенерирован PIL в scratch-сценарии, фикстура не
-    заведена): описание «уровней 6, проход со своего уровня на 0–5, подробнее
-    6000×6000 из 12000×12000 не будет», отказов в host.log ноль. README —
-    50 строк указателей; разделы разошлись по docs/: новые overview,
-    modules (с ABI), window-and-render, viewing-pipeline, globe,
-    limitations, operations/configuration; дописаны imagery (радиометрия,
-    выбор величины NetCDF, раскладка продукта, набор наложений) и
-    georeference (переписана по коду: теги, узлы, посадка, отступ, датум с
-    тестами, разворот долгот, Rough, рёбра). Устаревшее из README не
-    перенесено, а названо в отчётах авторов (числа без держателя, тень,
-    датум, WebP, порядок величин, манифест). Попутно сняты устаревшие
-    комментарии: «полосный TIFF полным проходом» в README, `thread_local` у
-    `ModuleState` в SDK. Не сделано: `bytes` строки таблицы на проводе
-    читает только лог (пик в строке описания `Meta::note`), решений по нему
-    потребитель не принимает; постоянного сценария с крупным JPEG нет
-    (бинарные фикстуры запрещены), проверка сделана scratch-сценарием.
-    Проверка: grep `Reach::` в потребителях пуст; тесты
-    wrap/тайлера/потребителей, мутации wrap 4/4 и тайлера 20/20 (мутация про
-    `reach()` заменена строкой таблицы), pytest 170, все сценарии uitests,
-    крупный JPEG с приближением до родного масштаба.
-11. **[L] NetCDF реализатором** — сделано 5 сентября 2026. Величина —
-    источник драйвера сетки чанков: `netcdf::Layout { grid, path, dtype, fill,
-    mapping }`, чанк — окно строк во всю ширину (`rows_of`: связка чанков файла
-    не длиннее TILE; единичная нулевая ось и чанк во всю высоту — окно ростом с
-    плоскость), `Chunks` реализует `Chunked` через `read_{u8,u16,i16,f32}_rows`
-    в `Samples`; таблица уровней у NetCDF — тот же `chunked(grid)`, что у TIFF и
-    JP2. describe — по выборке до четырёх окон вразброс (шаг взаимно прост с
-    шириной), однотонная запоминается с раскладкой; плоскость не держится ни в
-    разборе, ни в memo. Умерли WIRE_PLANE, PROBE_BUDGET, `affordable`,
-    `strip_bytes`, `Source`, `holds_samples`, тяжёлый/лёгкий memo (теперь два
-    слота LRU без веса), `near` в трёх proto (reserved) и четырёх модулях;
-    `total_bytes` прогресса — размер файла у всех; прогресс NetCDF — из дальней
-    позиции чтения ресурса. Отклонения: деградации не «строки-исключения», а
-    честный счёт той же сетки — окно-плоскость даёт точечный нулевой уровень
-    ценой всей плоскости (`pixels == w·h`), и describe с produce читают её
-    дважды (по сети — из блочного пула); величину не более чем в четыре окна
-    (OLCI: три чанка по 5026 строк) выборка тоже читает целиком, по окну за
-    раз — бережёт память, не байты; окно допускается до чтения той же меркой
-    свежего чанка, что у TIFF. Не сделано: величина с данными только
-    вне окон выборки пройдёт как пустая (цена выборки, записана в
-    limitations.md); окно по названной оси у крейта нет — единичная ведущая
-    ось стоит плоскости (снято шагом 13); постоянного сценария с NetCDF-produce нет
-    (ragged/remote заводят слой, подробный растр OLCI при их масштабе не
-    заказывается). *Проверка:* фикстуры писателем hdf5-pure в reads.rs —
-    чанкованная 200×12000 (описание сверх окна шапки читает 4 окна по 5
-    чанков, ≤ пятой части отсчётов; тайл читает только свои 10 чанков; окно ==
-    проход), `[1, h, w]` и одночанковая (окно — плоскость, `pixels == w·h`,
-    задет каждый чанк), пустая уступает измеренной, однотонная — последняя и
-    читается один раз; тесты тайлера 205, мутации image-tiler 27/27 (+7 про
-    NetCDF), pytest 173, все 18 сценариев; на диске: S5P CO 215×372 — «окно 372
-    строк, уровней 1, точечно 0, пик 119 МБ», прямой доступ 1 чанк; OLCI LRR
-    1217×15076 (GIFAPAR u8, чанк файла 5026 строк) — «окно 5026 строк, точечно
-    0–4, проход с 0 на 5, пик 191 МБ», привязка из соседнего файла 77×15076.
-12. **[M] Сеть** — сделано и промерено по проводу 5 сентября 2026. `veld_resource_prefetch(id, ranges)` на обеих сторонах ABI и
-    `RangeSource::prefetch`; сеть тянет недостающие блоки сериями подряд
-    идущих (`runs_of`: серия ≤ READAHEAD, заказ ≤ PREFETCH_CAP = половина
-    пула) по IN_FLIGHT = 4 запроса в полёте, разгон не трогает;
-    `Chunked::prefetch` — драйвер заказывает чанки под тайлами до чтения: TIFF
-    по тегам смещений и длин, JP2 с TLM — пробы тайл-партов и куски выдержки.
-    Разгон удваивается только у дочитанного до конца запроса
-    (`Readahead::consumed`) и принадлежит объекту (в `Blocks` по ключу
-    владения). Потолок одного чтения у хоста — INSTANCE_MEMORY_LIMIT. ADR
-    0005; resources.md, modules.md, limitations.md, imagery.md. Presign адреса
-    на неделю опробован и отвергнут хранилищем (`InvalidAccessKeyId` при любом
-    сроке, замер в ADR) — подпись осталась в заголовках на четверть часа;
-    переподпись по 401/403 не сделана и остаётся следующей сетевой задачей
-    (протокол network ↔ data-provider). Не сделано: NetCDF чанки наперёд не
-    называет; куски выдержки JP2 заказываются по тайлу — четыре в полёте у
-    подробных уровней не используются; заказ синхронный — первый тайл ждёт
-    весь заказ; BLOCK/READAHEAD/POOL_LIMIT не тронуты (по правилу) — и теперь есть число
-    против этого: проба в 64 КиБ покупает блок в 512 КиБ, 121 проба — 68 МиБ
-    из 129, тогда как просит модуль 7,6 МиБ, а нужен ему мегабайт; следующий
-    сетевой ход — блок по размеру названного заказа. *Проверка
-    сделанная:* чистые тесты склейки серий, разгона (окна, пробы, длинное
-    чтение, два открытия, закрытие соседа), prefetch (серии, попадания,
-    параллель); reads.rs — TIFF и JP2 называют ровно свои чанки; s3 —
-    подпись в заголовках; мутации network 7/7, image-tiler 29/29. *По
-    проводу (ADR 0005):* jp2remote — самый грубый уровень 68 МиБ (52 %) при
-    115 запросах за 59–84 с (два прогона) против 109,6 МиБ (84 %) при 64 за
-    75 с (один прогон 3 сентября); ресурс закрыт на 62 % против 89 %; байты и
-    запросы детерминированы, время в разбросе сети; `delivered` ужат до 70. COG Sentinel-1 по
-    сети: 6 чанков под 12 тайлов — один запрос, 12 под 40 — три, вся
-    лестница 25 МиБ из 382 за 11 запросов. Слой дольше четверти часа — не
-    проверяется, пока нет переподписи. Найдено при прогоне: запрос reqwest
-    заводит таймеры при сборке future, и собранный вне `block_on` в потоке
-    prefetch падал «no reactor running» — с `panic = "abort"` уносил хост;
-    запрос собирается внутри `block_on`.
+   readers}` under `not(wasm32)`; the native ABI stubs answer from it, without
+   `install` — the old zeros; the reply encoding — the file shared with the
+   host `abi/wire.rs` (via `#[path]`), replies lie in an arena of "linear
+   memory"; the event context is `thread_local` natively; reader tests
+   (windows exactly [0, len), a window starts at the read position),
+   ownership, publishing, logging; mutations `buildgen/mutations/veldsdk.txt`;
+   `docs/architecture/resources.md` instead of the README section.
+5. **[M] Metric of goal 1 and host seams as tests** — done on September 3,
+   2026: TIFF fixtures from the crate encoder (tiled with copies — by hand
+   through `DirectoryEncoder`, striped — `ImageEncoder`) in
+   `adapters/reads.rs`; four properties on the window log (describe — only the
+   head and the IFD neighborhood; a tile — its own chunk; a pass — the file
+   once; direct == pass on copies exactly halved) and the table
+   `reach() ↔ the produce arm`; dispatcher — opened/closed/acknowledged on
+   behalf of a missing one, addressed publishing, the right to kill; range.rs
+   — the network trip via a `fetch` closure, statuses and `Content-Range` as
+   pure functions, `read_at` across boundaries, tail, readahead, hits,
+   retries; the library catalogue on a hand-made listing; `abandon` of an
+   overlay → `leaked()` empty. Mutations of all four crates in
+   `buildgen/mutations/`. Docs: bus-and-schema.md, tasks.md; README without
+   three sections.
+6. **[S] Three glue helpers** — done on September 3, 2026:
+   `veldsdk::reply::undelivered` (from tiles.rs; `answered_by_host` stopped
+   being a public door), with the same `accept` naming the acknowledged reply
+   — that is tile-cache with the data-provider/data-library relay — while
+   download.rs calls it instead of `url.is_empty()`;
+   `veldsdk::resource::{region_of, read_whole}` instead of three write rituals
+   and three whole-file reads (persist got `LAYOUT_CAP`); assembling
+   `ResourceOpened` — the shared file `resource/opened.rs`, host/util includes
+   it through `#[path]`; data-browser `handlers::open_resource(identifier,
+   local, &correlation)` in five places, wait accounting at the caller — a
+   helper without `state`, because the logs of the preview and the overlay
+   differ. Docs: screen.md, download.md, README without two sections;
+   mutations of veldsdk.
+7. **[L] Shared chunk grid driver and one memory count** — done on
+   September 3, 2026 in two commits. The driver `adapters/grid.rs`: `Grid`
+   (base chunk, copies, sample depth), copy choice and the window rule
+   (`footprint`), region geometry, chunk cache, the `Chunked` trait and the
+   `direct`/`pass` loops; from TIFF only the chunk remains (`tiff::Chunks`).
+   The level table `adapters/table.rs`: `Serve {Pointwise, Pass{from}}`,
+   `Level {serve, pixels, peak, fits}`; `reach`/`windowed`/`finest` and the
+   `produce` arm are derived from it, "edit them together" is gone; the
+   `Info.finest` field and the manual `jp2::finest` are removed, JPEG `finest`
+   — from the count. `budget::Peak` (terms by name, `admit()` against
+   `free()`); `CHUNK_CACHE = free()/8`, `REGION_CAP` — half the cache in
+   pixels, BAND_CAP removed (pass and chunk are measured by the sum),
+   `MIN_CHUNK_PIXELS` — the rule for degenerate grids; `frame_fits` shared by
+   the table and the whole-frame paths; `produce` checks the peak against the
+   footprint of the neighbor's light memo; describe refuses if no level fits.
+   Behavior shifts: cache 128→116 MiB and REGION_CAP 16.8→15.2 Mpx (a tiled
+   file without copies with a side around 4096 loses its window at the apex),
+   a TIFF without a window answers `Pyramid`, not `Windowed`, `Exact` no
+   longer requires `random_access`; the chunk count now includes raw samples
+   (u16- and f32-striped files that used to slip past BAND_CAP silently are
+   now counted honestly). ADR 0003 accepted; imagery.md, invariants.md
+   (created), glossary. Measuring windows on IFD in real COGs is not done — it
+   stays in "Next". Check: 51 tiff.rs tests and the reads.rs properties with
+   no expectation edits; grep "edit them together" is empty; the table fits on
+   real sizes (table.rs); tiler mutations 10/10; uitests preview/shown/remote.
+8. **[L] JP2 on openjp2 inside the driver** — done on September 3, 2026.
+   One unsafe island — `adapters/codec.rs`: a stream over the resource reader
+   through C callbacks, an error handler, the codec is dropped after a
+   refusal, strict; the chunk — a codestream tile on the factor
+   (`get_decoded_tile`), copies — resolution levels, while a tile splits in
+   two; `Kind::Jp2(jp2::Layout)`, table rows as for TIFF, memory — the step 7
+   count with `SAMPLE_BYTES` per sample; a canvas origin not at zero — a
+   describe refusal; zero is transparent only for a file with GML; a stretch
+   wider than a byte — by the sample of the smallest copy. hayro,
+   `DECODE_BUDGET`, `key_margins`, `ladder_level` removed. The fixture — the
+   openjp2 encoder in the island tests; read tests: describe — head only, a
+   tile reads its own tile-part and the SOT headers (before it — one window
+   each, on the first codec tile — everything after up to EOC: a check of the
+   OpenJPEG tile-part count, lifted by the step 9 index), a degenerate 8×8
+   grid — a pass without loss. On the TCI granule the detail limit is zero,
+   `uitests/jp2canvas.txt` waits for `absent text:will not be`; wasm
+   2,842,418 → 3,122,098 bytes (ADR 0002 accepted). Along the way found and
+   fixed in the SDK: a module is a WASI reactor without `_start`, and the musl
+   `pthread_key_delete` hung the first `thread_local!` (at openjp2 T1) —
+   thread-local keys are now our own, single-threaded
+   (`veldcore/sdk/rust/src/tsd.rs`). Not done: comparison with hayro on 5/3
+   and 9/7 (hayro is gone; instead — a reversible round trip "openjp2 encoder
+   → decoder" byte for byte); module startup not measured; still three box
+   walkers (`header_dims`, `codestream_at`, `gml_text`); `easting_first` and
+   `binding_trouble` for JP2 untouched — georeference.md is written after the
+   code as it is; the criterion "bytes for a level 0 tile ≪ the file" is not
+   met: a tile costs its tile-part plus one reader window per SOT after it (on
+   a 16-tile fixture — about a third of the file, for a TCI over the network —
+   a block per tile-part, about half the file) for every `produce`, until the
+   step 9 tile-part index removes the traversal; the 12-bit strip stretch is
+   verified by a fixture, not a granule. Check: codec/jp2/reads tests, tiler
+   mutations 13/13, uitests jp2canvas/preview/shown/remote.
+9. **[M] Pointwise JP2 over the network** — done on September 3, 2026. Its
+   own tile-part index over TLM and an excerpt per tile
+   (`adapters/excerpt.rs`): the main header with boxes, the tile's tile-parts,
+   EOC — the codec has nothing to traverse, the codec works per tile. With PLT
+   and a progression whose resolution is in the outer loop (LRCP with one
+   layer, RLCP, RPCL) the tile-part is cut after the packets of the needed
+   resolution by the precinct count (B.6), missing packets are appended empty,
+   Psot and TNsot are rewritten in the header copy; cutting is allowed only
+   when the packet count matches the PLT entries, otherwise whole tile-parts.
+   Three outcomes (ADR 0004): no TLM — SOT traversal by the codec, as before;
+   TLM — tile granularity; TLM with PLT — level granularity: the first decides
+   describe, the second — assembling the excerpt on every tile. A 64 KiB
+   tile-part probe carries the header and, for a granule, the two coarsest
+   resolutions — the three coarsest pyramid levels. Granule measurement
+   (Kakadu 7.4, TLM over 121 tile-parts, PLT everywhere, LRCP/1 layer, 256²
+   precincts, no SOP/EPH/COC/POC): tile-part prefix at factor 4 — 9 KiB (sum
+   over the granule 1.02 MiB), at factor 3 — 35 KiB (3.9 MiB), at 2 — 134 KiB
+   (15 MiB), at 1 — 476 KiB (54 MiB), at 0 — the whole file (129 MiB); the
+   packet count matched the PLT for all 121. The description line names the
+   read path. Encoder fixtures (`Addressing`: TLM, PLT, precincts, JP2
+   container): the excerpt decodes byte for byte like the whole file on all
+   layouts; the log: a level 0 tile reads only its own tile-part, the coarsest
+   level — one probe per tile and under an eighth of the file, TLM without PLT
+   — whole tile-parts. The run: the `delivered N` verb — a guarantee for the
+   wire that run-uitests.py checks against `network::perf` in trace.log (a
+   copy `<name>.trace.log` stays with the scenario; the guarantee is not kept
+   without a single network line), the tile cache is put off for the duration
+   of the run
+   — every scenario is cold; `uitests/jp2remote.txt` opens the neighboring
+   un-downloaded T31TGK granule (129 MiB) over the network: the coarsest level
+   75.0 s, by its end 109.6 MiB (84 %) delivered in 64 requests of 1.71 MiB
+   each, four zoom levels — from the pool, closed at 115.6 MiB (89 %), the
+   whole scenario 141 s. jp2canvas on a cold cache 23.3 s (15.0 s warm). Not
+   done: "delivered ≪ the file" over the network is not achieved — the
+   coarsest level needs 1 MiB of the file, the module asks for 121 probes of
+   64 KiB (7.6 MiB), and the network brings 84 %: readahead doubles the
+   request on a miss right past the end of the previous one, and tile-part
+   headers every two blocks (BLOCK 512 KiB) look to it like a sequential pass;
+   the scenario guarantees 95 % (the file is not fetched twice), tightening —
+   step 12 with these numbers. A tile made of several tile-parts pays a probe
+   for each, without PLT in each it is read in whole tile-parts, and through
+   the decoder it is not checked at all — only the byte-level assembly: the
+   crate encoder with `tp_on` puts all the tile's packets and one Psot into
+   every tile-part, so fixtures for the third outcome cannot be obtained from
+   it. A file with PPM is not rejected by describe, although random access to
+   a tile with PPM in openjp2 is broken on both paths (a single running
+   pointer of packet headers). `codestream()` and `Index::of` go through one
+   segment walker, but there are still three box walkers, and two SIZ/COD
+   parses. Check: excerpt/jp2/reads tests, tiler mutations 20/20, uitests
+   jp2canvas/jp2remote/remote/preview/shown on a cold cache.
+10. **[M] The level table onto the wire** — done on September 3, 2026.
+    `Described.levels: repeated Level {serve, from, bytes, fits}` — the same
+    table by which `produce` chooses its arm; `reach`, `windowed`, `finest`
+    and `enum Reach` removed from the wire (field numbers reserved). Wrap
+    `tiles.rs`: `Meta { rows }`, `finest()` — the first row that fits,
+    `pointwise(level)` — the row, `ladder(target)` — from the serving column:
+    a step coarser than the target is taken if it is pointwise, of the same
+    pass as the target, or the apex with its own pass (JPEG); `describe`
+    rejects a pass finer than its level; `want(sharpest, &meta, cap, …)`.
+    Behavior versus the old `Reach` changed in one place: a striped TIFF over
+    a pointwise target takes its pointwise steps, over a pass target — all
+    levels of the same pass (before — only the target). `MAX_QUERY_TILES` — in
+    the shared `tile-cache/src/tile.rs`, included into the tiler wrap as well;
+    `cap_tiles` is cut by it. The golden string "more detailed … will not be"
+    in full — one test at `Meta::capped`, the other places are checked against
+    `capped()`. A large JPEG (12000², generated by PIL in a scratch scenario,
+    no fixture created): describe says "6 levels, pass from its level over
+    0–5, more detailed than 6000×6000 out of 12000×12000 will not be", zero
+    refusals in host.log. README — 50 lines of pointers; the sections moved
+    into docs/: new overview, modules (with ABI), window-and-render,
+    viewing-pipeline, globe, limitations, operations/configuration; imagery
+    extended (radiometry, NetCDF variable choice, product layout, overlay set)
+    and georeference (rewritten after the code: tags, nodes, seating, offset,
+    datum with tests, longitude unwrapping, Rough, edges). The stale parts of
+    README were not carried over but named in the authors' reports (numbers
+    without a holder, shadow, datum, WebP, order of magnitude, manifest).
+    Along the way, stale comments removed: "a striped TIFF with a full pass" in
+    README, `thread_local` on `ModuleState` in the SDK. Not done: the `bytes`
+    of a table row on the wire is read only by the log (the peak in the
+    describe line `Meta::note`), the consumer makes no decisions from it;
+    there is no permanent scenario with a large JPEG (binary fixtures are
+    forbidden), the check was done with a scratch scenario. Check: grep
+    `Reach::` in consumers is empty; wrap/tiler/consumer tests, wrap mutations
+    4/4 and tiler 20/20 (the mutation about `reach()` replaced by a table
+    row), pytest 170, all uitests scenarios, the large JPEG zoomed to native
+    scale.
+11. **[L] NetCDF as an implementer** — done on September 5, 2026. The variable
+    is a source for the chunk grid driver: `netcdf::Layout { grid, path, dtype,
+    fill, mapping }`, the chunk — a row window across the full width
+    (`rows_of`: the file's chain of chunks no longer than TILE; a unit leading
+    axis and a chunk of the full height — a window as large as the plane),
+    `Chunks` implements `Chunked` through `read_{u8,u16,i16,f32}_rows` into
+    `Samples`; the level table for NetCDF — the same `chunked(grid)` as for
+    TIFF and JP2. describe — by a sample of up to four scattered windows (step
+    coprime with the width), a uniform one is remembered along with the layout;
+    the plane is held neither in the parse nor in the memo. WIRE_PLANE,
+    PROBE_BUDGET, `affordable`, `strip_bytes`, `Source`, `holds_samples`, the
+    heavy/light memo died (now two unweighted LRU slots), `near` in three
+    protos (reserved) and four modules; `total_bytes` of progress — the file
+    size for everyone; NetCDF progress — from the far read position of the
+    resource. Deviations: the degradations are not "exception rows" but an
+    honest count of the same grid — a plane window gives a pointwise zero
+    level at the price of the whole plane (`pixels == w·h`), and describe with
+    produce read it twice (over the network — from the block pool); a variable
+    of no more than four windows (OLCI: three chunks of 5026 rows) the sample
+    also reads whole, one window at a time — it saves memory, not bytes; a
+    window is admitted before reading by the same fresh-chunk gauge as TIFF.
+    Not done: a variable with data only outside the sample windows passes as
+    empty (the price of the sample, recorded in limitations.md); the crate has
+    no window over a named axis — a unit leading axis costs the plane (lifted
+    by step 13); there is no permanent scenario with NetCDF produce
+    (ragged/remote bring up a layer, the detailed OLCI raster is not requested
+    at their scale). *Check:* fixtures written with the hdf5-pure writer in
+    reads.rs — chunked 200×12000 (describe beyond the head window reads 4
+    windows of 5 chunks, ≤ a fifth of the samples; a tile reads only its own
+    10 chunks; window == pass), `[1, h, w]` and a single-chunk one (window —
+    the plane, `pixels == w·h`, every chunk touched), the empty one yields to
+    the measured one, the uniform one is last and read once; tiler tests 205,
+    image-tiler mutations 27/27 (+7 about NetCDF), pytest 173, all 18
+    scenarios; on disk: S5P CO 215×372 — "window 372 rows, 1 level, pointwise
+    0, peak 119 MB", direct access 1 chunk; OLCI LRR 1217×15076 (GIFAPAR u8,
+    file chunk 5026 rows) — "window 5026 rows, pointwise 0–4, pass from 0 over
+    5, peak 191 MB", binding from the neighboring file 77×15076.
+12. **[M] Network** — done and measured over the wire on September 5, 2026.
+    `veld_resource_prefetch(id, ranges)` on both sides of the ABI and
+    `RangeSource::prefetch`; the network pulls missing blocks in runs of
+    consecutive ones (`runs_of`: run ≤ READAHEAD, order ≤ PREFETCH_CAP = half
+    the pool) over IN_FLIGHT = 4 requests in flight, readahead untouched;
+    `Chunked::prefetch` — the driver orders the chunks under the tiles before
+    reading: TIFF from the offset and length tags, JP2 with TLM — tile-part
+    probes and excerpt pieces. Readahead doubles only on a request consumed to
+    the end (`Readahead::consumed`) and belongs to the object (in `Blocks` by
+    the ownership key). The host's ceiling for a single read —
+    INSTANCE_MEMORY_LIMIT. ADR 0005; resources.md, modules.md, limitations.md,
+    imagery.md. Week-long presigned URLs were tried and rejected by the storage
+    (`InvalidAccessKeyId` for any term, measurement in the ADR) — the signature
+    stayed in the headers for a quarter of an hour; re-signing on 401/403 is
+    not done and remains the next network task (the network ↔ data-provider
+    protocol). Not done: NetCDF does not name its chunks ahead of time; JP2
+    excerpt pieces are ordered per tile — the four in flight are unused at
+    detailed levels; the order is synchronous — the first tile waits for the
+    whole order; BLOCK/READAHEAD/POOL_LIMIT untouched (by the rule) — and now
+    there is a number against it: a 64 KiB probe buys a 512 KiB block, 121
+    probes — 68 MiB out of 129, while the module asks for 7.6 MiB and needs a
+    megabyte; the next network move — a block sized to the named order. *Check
+    done:* clean tests of run splicing, readahead (windows, probes, long read,
+    two opens, closing the neighbor), prefetch (runs, hits, parallel);
+    reads.rs — TIFF and JP2 name exactly their chunks; s3 — the signature in
+    headers; network mutations 7/7, image-tiler 29/29. *Over the wire (ADR
+    0005):* jp2remote — the coarsest level 68 MiB (52 %) in 115 requests over
+    59–84 s (two runs) versus 109.6 MiB (84 %) in 64 over 75 s (one run on
+    September 3); the resource closed at 62 % versus 89 %; bytes and requests
+    are deterministic, time within network spread; `delivered` tightened to
+    70. Sentinel-1 COG over the network: 6 chunks under 12 tiles — one
+    request, 12 under 40 — three, the whole ladder 25 MiB out of 382 in 11
+    requests. A layer older than a quarter of an hour is not verified until
+    re-signing exists. Found during the run: a reqwest request starts timers
+    when the future is built, and one built outside `block_on` in the prefetch
+    thread crashed with "no reactor running" — with `panic = "abort"` it took
+    the host down; the request is now built inside `block_on`.
 
-**Дальше, в этом порядке:** конвейер в wrap (`Pipeline<K>` → `Vec<Action>`,
-честный L — вытяжка с абстракцией «заказчик в силе», не перенос; сценарный
-тест общий обоим по построению); слияние закреплений чисел по мерке харнеса;
-ось `band` в контракте для всех форматов и в отпечатке; `Binding::Named`/
-UtmFrame — только после ответа шага 3 о GML у PVI и B* и с названным
-разменом (Named — единственная привязка до describe; без неё гранула секунды
-лежит по контуру каталога); семь коллекций и два маршрутизатора data-browser
-— после конвейера в wrap, который и убирает из экрана бо́льшую часть
-оркестрации. GeoPoint в core.proto не заводить. Wrap-крейты: globe-wrap
-существует только ради геометрии контура в data-browser (footprint.rs) и
-пустеет вместе с её переездом; билдеры ui-service (1103 строки, три
-представления модели виджетов) сокращать генерацией сеттеров из proto — только
-после первого теста на этот wrap, иначе сокращение нечем проверить. Найдено
-при замере гранулы (шаг 3): в одном прогоне выход из приложения во время
-чтения удалённого JP2 ждал до предела прогона (в других — мгновенный); с шага
-22 поход в полёте возвращается по объявлению гашения, а не по своим таймаутам
-и повторам, но сам тот случай не воспроизводился. Там же (шаг 22) один раз
-хост умер SIGILL на подъёме модулей — переход по адресу посреди инструкции в
-регистровом аллокаторе Cranelift (`regalloc2::ion::Env::init`), не `ud2` из
-кода; в тот же день rustc падал SIGSEGV и дважды ICE «unstable fingerprints» —
-всё под параллельной нагрузкой. Повторится — кэш wasmtime или компиляция
-модулей по одному, и проверить машину. `globevar` берёт свежайшую гранулу
-S5P, а у короткой (десятки строк, ночная) CO в выборке пуст и лежит другая
-величина — сценарию нужна гранула с данными, а не первая по дате. Прогон
-без окна открывает параллельный прогон по нескольку сценариев разом (память
-хоста ~0,5 ГБ на запуск): хостам нужны свои `runtime/` — логи, состояние
-окна, кэш тайлов, — а сценариям с записью в библиотеку (`download`) — очередь;
-`runtime_dir` у хоста уже родитель каталога конфигов, так что развести их
-можно каталогами. Отбор по
-имени в списках не заглядывает внутрь раскрытых папок (файл гранулы не найти
-по имени, пока не раскрыт его путь) — отдельная задача экрана, после
-`open_resource` шага 6. Окно читателя не смотрит назад, и каталог, лежащий
-после данных (так пишет энкодер крейта `tiff`, не GDAL: у COG все IFD в голове
-файла), стоит трёх окон на IFD (тест `describing_reads_the_header_and_the_ifds_only`)
-— цена у настоящих COG другая, замерить на них прежде, чем давать читателю
-память назад (не сделано в шаге 7).
+**Next, in this order:** the pipeline into wrap (`Pipeline<K>` → `Vec<Action>`,
+an honest L — an extraction with the abstraction "the caller is in force", not
+a move; the scenario test is shared by both by construction); merging the
+number fixations per the harness gauge; the `band` axis in the contract for
+all formats and in the fingerprint; `Binding::Named`/UtmFrame — only after
+the step 3 answer about GML for PVI and B* and with the named trade-off (Named
+— the only binding before describe; without it a seconds-long granule lies by
+the catalogue outline); the seven collections and two routers of data-browser
+— after the pipeline into wrap, which also removes most of the orchestration
+from the screen. Do not introduce GeoPoint in core.proto. Wrap crates:
+globe-wrap exists only for the outline geometry in data-browser (footprint.rs)
+and empties out along with its move; the ui-service builders (1103 lines,
+three representations of the widget model) to be cut by generating setters
+from proto — only after the first test on that wrap, otherwise the cut cannot
+be checked. Found while measuring the granule (step 3): in one run quitting
+the application during a remote JP2 read waited up to the run limit (in others
+— instantly); since step 22 a trip in flight returns on the shutdown
+announcement, not on its own timeouts and retries, but that very case did not
+reproduce. In the same place (step 22) once the host died with SIGILL while
+bringing up modules — a jump to an address in the middle of an instruction in
+the Cranelift register allocator (`regalloc2::ion::Env::init`), not a `ud2`
+from code; the same day rustc crashed with SIGSEGV and twice with the ICE
+"unstable fingerprints" — all under parallel load. If it repeats — the
+wasmtime cache or compiling modules one at a time, and check the machine.
+`globevar` takes the freshest S5P granule, while a short one (tens of rows,
+nightly) has CO empty in the sample and another variable lying there — the
+scenario needs a granule with data, not the first by date. The headless run
+opens the door to running several scenarios in parallel (host memory ~0.5 GB
+per launch): hosts need their own `runtime/` — logs, window state, tile cache
+— and scenarios that write into the library (`download`) a queue; the host's
+`runtime_dir` is already the parent of the config directory, so they can be
+split by directories. Name filtering in the lists does not look inside
+expanded folders (a granule file cannot be found by name until its path is
+expanded) — a separate screen task, after the `open_resource` of step 6. The
+reader window does not look back, and a catalogue lying after the data (this
+is how the crate encoder for `tiff` writes, not GDAL: for a COG all IFDs are
+in the file head) costs three windows per IFD (the test
+`describing_reads_the_header_and_the_ifds_only`) — real COGs cost differently,
+measure on them before giving the reader memory backwards (not done in step
+7).
 
-13. **[S] Окно NetCDF регионом** — сделано 5 сентября 2026 на форке hdf5-pure.
-    Крейту предложен регион по всем осям `read_*_region(start, count)`
-    (upstream issue #465, PR #466: CI зелёный, 23 проверки; ждёт автора);
-    image-tiler зависит от коммита PR в форке `BinaryCat17/hdf5-pure`
-    (fa5dfc64521dfe1d554b9f1cffee836c873718ff) до релиза, после него —
-    `version` в config.yaml. Окно строк режется регионом по оси строк
-    плоскости, где бы файл её ни держал (`Layout::region`, `rows_of` без
-    ведущей оси); единичная ведущая ось S5P окна не расширяет. Окно-плоскость
-    остаётся у одночанковой величины (чанк распаковывается целиком) и у
-    величины не выше TILE. *Проверка:* фикстура `[1, 6000, 450]` чанками по
-    100 строк — окно 500 строк, выборка 20 чанков из 60, тайл нулевого уровня
-    10 из 60; `регион_окна_ложится_по_осям_плоскости`; тесты тайлера 208,
-    мутации image-tiler 30/30 (+2 про оси региона), pytest 177, все 18
-    сценариев; на диске S5P NRTI CO 215×372 не выше тайла — окно по-прежнему
-    вся величина, «уровней 1, точечно 0, пик 119 МБ» без изменений;
-    полноорбитной OFFL-гранулы (4172 строки), где окно стало бы 0,46 МБ вместо
-    плоскости 7,5 МБ, на диске нет — не замерено.
+13. **[S] NetCDF window as a region** — done on September 5, 2026 on a fork of
+    hdf5-pure. A region over all axes `read_*_region(start, count)` was
+    proposed to the crate (upstream issue #465, PR #466: CI green, 23 checks;
+    waiting on the author); image-tiler depends on the PR commit in the fork
+    `BinaryCat17/hdf5-pure`
+    (fa5dfc64521dfe1d554b9f1cffee836c873718ff) until the release, after it —
+    `version` in config.yaml. The row window is cut by a region along the row
+    axis of the plane, wherever the file holds it (`Layout::region`, `rows_of`
+    without a leading axis); the unit leading axis of S5P does not widen the
+    window. A plane window remains for a single-chunk variable (the chunk is
+    inflated whole) and for a variable no larger than TILE. *Check:* a fixture
+    `[1, 6000, 450]` chunked in rows of 100 — a window of 500 rows, the sample
+    reads 20 chunks out of 60, the level-zero tile 10 out of 60;
+    `window_region_lands_on_plane_axes`; tiler tests 208, image-tiler
+    mutations 30/30 (+2 about the region axes), pytest 177, all 18 scenarios;
+    on disk S5P NRTI CO 215×372 is not larger than a tile — the window is
+    still the whole variable, "1 level, pointwise 0, peak 119 MB" unchanged; a
+    full-orbit OFFL granule (4172 rows), where the window would be 0.46 MB
+    instead of the 7.5 MB plane, is not on disk — not measured.
 
-14. **[S] Блок сети по размеру заказа** — сделано и промерено по проводу
-    5 сентября 2026. `BLOCK` 64 КиБ — зерно пула и заказа, ровно проба JPEG 2000
-    и край отпечатка: заказ наперёд покупает блоки под своими диапазонами и
-    ничего сверх, проба со случайного смещения задевает два; чтение называет
-    сети свою длину, и её блоки едут одним запросом (`Readahead::plan(index,
-    total, needed)`), разгон удваивает поверх до `READAHEAD`. Заказ JP2 в два
-    хода: пробы всех заказанных тайлов, затем куски выдержек всех тайлов одним
-    заказом (`Chunks::planned`), а не по тайлу за раз. ADR 0005 дополнен
-    датированным разделом. *Проверка:* тесты сети (длинное чтение одним
-    запросом и продолжение разгона [12, 24]; проба со смещением — два блока;
-    удвоение до потолка без зашитого числа), мутации veldmap-host-network 8/8,
-    image-tiler 31/31; все 18 сценариев. По проводу (jp2remote, T31TGK
-    129,0 МиБ, холодный кэш тайлов, два прогона, байты сошлись до единицы):
-    грубый уровень 15,4 МиБ (11 %) в 122 запросах за 26–30 с против 68,0 МиБ
-    (52 %) в 115 за 59 с; уровень 2 медленнее (23–24 с против 17,8: его куски
-    прежде лежали в блоках проб), уровень 1 быстрее (14–16 против 21);
-    закрытие 31,0 МиБ (24 %) и 255 запросов через 70–77 с против 81,0 МиБ
-    (62 %), 141 и 108 с; без второго хода те же байты стоили 123–126 с — 133
-    заказа по тайлу подряд. `delivered` 70 → 35; пара BLOCK = PROBE = SAMPLE в
-    test_wire_pairs.py.
-    Не сделано: COG Sentinel-1 по сети не перемерен (скретч-сценарий пропал с
-    /tmp; ожидание — те же серии чанков, байт не больше 24,6 МиБ); `IN_FLIGHT`
-    оставлен 4 — грубый уровень это 122 запроса по четыре, восемь потоков —
-    отдельный замер.
+14. **[S] Network block sized to the order** — done and measured over the wire
+    on September 5, 2026. `BLOCK` 64 KiB — the grain of the pool and of an
+    order, exactly a JPEG 2000 probe and the edge of the fingerprint: a
+    pre-order buys the blocks under its ranges and nothing more, a probe from
+    a random offset touches two; a read names its own length to the network,
+    and its blocks ride in one request (`Readahead::plan(index, total,
+    needed)`), readahead doubles on top up to `READAHEAD`. The JP2 order in two
+    passes: probes of all ordered tiles, then the excerpt pieces of all tiles
+    in one order (`Chunks::planned`), not one tile at a time. ADR 0005
+    extended with a dated section. *Check:* network tests (a long read in one
+    request and the readahead continuation [12, 24]; an offset probe — two
+    blocks; doubling to the ceiling with no baked-in number), veldmap-host-network
+    mutations 8/8, image-tiler 31/31; all 18 scenarios. Over the wire
+    (jp2remote, T31TGK 129.0 MiB, cold tile cache, two runs, bytes matched to
+    one): coarse level 15.4 MiB (11 %) in 122 requests over 26–30 s versus
+    68.0 MiB (52 %) in 115 over 59 s; level 2 slower (23–24 s versus 17.8: its
+    pieces used to lie in the probe blocks), level 1 faster (14–16 versus 21);
+    closing 31.0 MiB (24 %) and 255 requests after 70–77 s versus 81.0 MiB
+    (62 %), 141 and 108 s; without the second pass the same bytes cost
+    123–126 s — 133 per-tile orders in a row. `delivered` 70 → 35; the pair
+    BLOCK = PROBE = SAMPLE in test_wire_pairs.py. Not done: the Sentinel-1 COG
+    over the network not re-measured (the scratch scenario vanished from /tmp;
+    expectation — the same chunk runs, no more than 24.6 MiB of bytes);
+    `IN_FLIGHT` left at 4 — the coarse level is 122 requests in fours, eight
+    threads — a separate measurement.
 
-15. **[M] Ранг сетки, запасные растры, решётки строками узлов** — сделано
-    6 сентября 2026 (plan-detail-and-quality.md, шаги 2 и 7). Отбор подробного
-    растра по именам получил пятым доводом густоту сетки Sentinel-3
-    (`grid_rank`: `a b c` прежде `i f` прежде `t`, надир прежде косого;
-    алфавит — шестой): у гранулы SLSTR L1 верх берёт полукилометровый
-    `S1_radiance_an.nc`, а не километровый `F1_BT_fn.nc` по алфавиту.
-    Провайдер называет за выбранным запасные (`Scan.alternates`, `spares`) —
-    лучший файл каждой сетки грубее, без опорной, — потому что имя не видит
-    пустоты: ночная гранула держит видимые каналы сплошным «нет данных».
-    Запасные едут теми же `ImageryDetailed`-растрами по порядку; браузер
-    пар координаты с растром по номеру в ответе (`paired`), глобус складывает
-    их в `Raster::spares` и после отказа описания ставит следующий на то же
-    место (`next_spare`). Полукилометровой сетке привязка — её поотсчётный
-    `geodetic_<tag>.nc`, километровой — опорная `tx`, как раньше. Решётки
-    координат тайлер читает строками узлов регионом в одну строку (`Rows`),
-    а не плоскостью, набором, открытым один раз с кэшем чанков под строку
-    чанков через плоскость (у полукилометровой сетки два чанка по 1,6 МБ —
-    кэш крейта по умолчанию их не удержал бы, и каждая строка узлов
-    распаковывала бы их заново): бюджет привязки `TIES_BUDGET` с его пиком
-    снят, неудача чтения строки кэшируется и называется своим словом.
-    *Проверка:* тесты провайдера (RBT с настоящими именами: S1_radiance_an,
-    запасной F1_BT_fn, без полукилометровых — F1_BT_fn, OLCI без запасных;
-    geolocation по сетке), браузера (`paired` — запасные каждый со своими
-    координатами), глобуса (`next_spare`), тайлера (`ties_read_the_rows_of_
-    their_nodes_not_the_plane`: сетка 300×600 строками по чанку — 21 строка из
-    600 у широты и у долготы, 441 узел; `a_coordinate_chunk_is_inflated_once…`:
-    чанки 267×1500 f32 читаются по разу на 21 строку узлов); мутации
-    data-provider 2/2, image-tiler 32/32; все 18 сценариев, после правок по
-    скептику — scratch RBT, ragged, remote. На диске (RBT 24 августа, ночная):
-    выбран `S1_radiance_an` — пуст (0 из 1 599 000 в выборке) — запасной
-    `F1_BT_fn` 1500×266 описался, привязка из `geodetic_tx` 441 узел, строк
-    прочитано 42; подробный не подробнее превью 2422 — квиклук лежит по
-    решётке, слой жив (без запасных слой снимался: «контур каталога сложный»).
-    Не сделано: дневной гранулы SLSTR на диске нет — выигрыш полукилометрового
-    канала над квиклуком (3000 против 2422) не показан на шаре, и посадка
-    поотсчётного `geodetic_an.nc` строками узлов на шаре не бежала (только
-    фикстурой); «назвать
-    выбранное» на экране (шаг 3 плана) и выбор величины (§4) не тронуты.
+15. **[M] Grid rank, spare rasters, grids by rows of nodes** — done on
+    September 6, 2026 (plan-detail-and-quality.md, steps 2 and 7). The choice
+    of the detailed raster by names gained a fifth argument — the density of
+    the Sentinel-3 grid (`grid_rank`: `a b c` before `i f` before `t`, nadir
+    before slanted; alphabet — sixth): for an SLSTR L1 granule the top takes
+    the half-kilometer `S1_radiance_an.nc`, not the kilometer `F1_BT_fn.nc`
+    by alphabet. The provider names spares after the chosen one
+    (`Scan.alternates`, `spares`) — the best file of each coarser grid, without
+    the reference one — because a name cannot see emptiness: a nightly granule
+    holds the visible channels as solid "no data". The spares ride as the same
+    `ImageryDetailed` rasters in order; the browser pairs coordinates with a
+    raster by number in the reply (`paired`), the globe folds them into
+    `Raster::spares` and after a describe refusal puts the next one in the same
+    place (`next_spare`). The half-kilometer grid gets its binding from its
+    per-sample `geodetic_<tag>.nc`, the kilometer one — the reference `tx`, as
+    before. The coordinate grids the tiler reads as rows of nodes, a region of
+    one row (`Rows`), not as a plane — a set opened once with a chunk cache
+    under a row of chunks across the plane (for the half-kilometer grid two
+    chunks of 1.6 MB — the crate's default cache would not hold them, and every
+    row of nodes would inflate them again): the binding budget `TIES_BUDGET`
+    with its peak is removed, a failed row read is cached and named in its own
+    words. *Check:* provider tests (RBT with real names: S1_radiance_an, the
+    spare F1_BT_fn, without half-kilometer ones — F1_BT_fn, OLCI without
+    spares; geolocation by grid), browser (`paired` — spares each with their
+    own coordinates), globe (`next_spare`), tiler
+    (`ties_read_the_rows_of_their_nodes_not_the_plane`: a 300×600 grid read in
+    rows of one chunk — 21 rows out of 600 for latitude and for longitude, 441
+    nodes; `a_coordinate_chunk_is_inflated_once…`: 267×1500 f32 chunks read
+    once per 21 rows of nodes); mutations data-provider 2/2, image-tiler
+    32/32; all 18 scenarios, after the skeptic's fixes — scratch RBT, ragged,
+    remote. On disk (RBT of August 24, nightly): `S1_radiance_an` was chosen —
+    empty (0 out of 1,599,000 in the sample) — the spare `F1_BT_fn` 1500×266
+    described itself, binding from `geodetic_tx` 441 nodes, 42 rows read; the
+    detailed is no more detailed than the 2422 preview — the quicklook lies on
+    the grid, the layer lives (without spares the layer was dropped: "the
+    catalogue outline is complex"). Not done: there is no daytime SLSTR granule
+    on disk — the gain of the half-kilometer channel over the quicklook (3000
+    versus 2422) is not shown on the globe, and the seating of the per-sample
+    `geodetic_an.nc` by rows of nodes has not run on the globe (only as a
+    fixture); "name the chosen one" on the screen (step 3 of the plan) and the
+    variable choice (§4) untouched.
 
-16. **[S] Назвать лежащий подробным файл** — сделано 6 сентября 2026
-    (plan-detail-and-quality.md, шаг 3). Глобус имён не знает: растр несёт
-    номер приславшего (`OverlayRaster.ordinal`), и номер лежащего подробным
-    едет назад в `OverlayProgress.detailed`; браузер помнит ключи ответа
-    провайдера по номеру (`OverlayState.files`) и ставит имя файла перед
-    словами о нём и только перед ними: глобус делит подпись на сказанное о
-    подробном (его отказ, его предел — `OverlayProgress.detailed_trouble`) и
-    остальное (предел превью, отказ привязки), иначе предел превью под именем
-    подробного файла читался бы как сказанное о нём. Имя и слова режутся по
-    отдельности («F1_BT_fn.nc · не подробнее превью: подробны…», целиком — в
-    подсказке); сам приговор переставлен так, чтобы суть шла первой. С
-    запасными растрами имя меняется вместе с файлом — номер переходит к
-    запасному (`next_spare`). Попутно
-    разобран сидкар `.origin` без файла из очереди шага 12: это не дефект, а
-    запись о намерении (`LIB_PAUSED`, «Продолжить»); сценарий download тогда
-    исходил из чистой библиотеки. *Проверка:* тесты глобуса (номер переходит
-    с запасным), браузера (`лежащий_подробным_называется_именем_файла`: номер →
-    имя, пустой номер и номер вне ответа — без имени; `paired` с номерами);
-    мутации data-browser 2/2, globe 2/2; новый постоянный сценарий
-    `uitests/slstr.txt` (гранула RBT на диске): ждёт `F1_BT_fn.nc` в строке
-    слоя — сразу и запасной, и имя, 44 с; все 19 сценариев.
+16. **[S] Name the file lying as detailed** — done on September 6, 2026
+    (plan-detail-and-quality.md, step 3). The globe knows no names: a raster
+    carries the number of whoever sent it (`OverlayRaster.ordinal`), and the
+    number of the one lying as detailed rides back in
+    `OverlayProgress.detailed`; the browser remembers the provider reply keys
+    by number (`OverlayState.files`) and puts the file name before the words
+    about it and only before them: the globe splits the caption into what is
+    said about the detailed one (its refusal, its limit —
+    `OverlayProgress.detailed_trouble`) and the rest (the preview limit, the
+    binding refusal), otherwise the preview limit under the detailed file's
+    name would read as something said about it. The name and the words are cut
+    separately ("F1_BT_fn.nc · no more detailed than the preview: detailed…",
+    in full — in the tooltip); the sentence itself is rearranged so the gist
+    comes first. With spare rasters the name changes along with the file — the
+    number moves to the spare (`next_spare`). Along the way, the `.origin`
+    sidecar without a file from the step 12 queue was examined: this is not a
+    defect but an intention record (`LIB_PAUSED`, "Resume"); the download
+    scenario then started from a clean library. *Check:* globe tests (the
+    number moves with the spare), browser
+    (`the_one_made_detailed_is_named_by_the_file_name`: number → name, an
+    empty number and a number outside the reply — no name; `paired` with
+    numbers); mutations data-browser 2/2, globe 2/2; a new permanent scenario
+    `uitests/slstr.txt` (the RBT granule on disk): waits for `F1_BT_fn.nc` in
+    the layer line — both the spare and the name at once, 44 s; all 19
+    scenarios.
 
-17. **[S] Назвать показанную величину** — сделано 6 сентября 2026
-    (plan-detail-and-quality.md, §4, первый подшаг). Файл NetCDF несёт
-    десятки величин, показывается одна — по правилам CF её выбирает тайлер
-    (`netcdf::preferred`), и смотрящему выбор был виден только в журнале.
-    Теперь выбор назван: `Info.variable` → `Described.variable` (путь в файле,
-    `long_name`/`standard_name`, `units` как записано; сравнения с CF ведутся
-    своей копией в нижнем регистре) →
-    `Meta.variable` у обоих потребителей → `ViewState.variable` канвы и
-    `OverlayProgress.detailed_variable` глобуса (величина лежащего подробным,
-    а не превью). Браузер называет её словами (`format::variable`: имя,
-    единицы, слова файла) первой в полосе свойств канвы — в остаток ширины
-    панели от прочих фактов и места под ход показа, слова файла только если
-    влезают целиком — и в строке слоя за
-    именем файла, пока о файле нечего сказать хуже; подсказка строки — одна
-    строка на имя файла, величину и беду, поделённая так, что короткие части
-    целы (`format::share`). Выбор по-прежнему тайлера:
-    `DescribeRequest`/`ProduceRequest` величины не несут (limitations.md).
-    *Проверка:* тесты тайлера (выбранная, не первая; единицы как записаны,
-    сравнения с CF без регистра), wrap (`Meta.variable` едет и называется в
-    журнале), канвы (`ViewState.variable`), глобуса (величина подробного, не
-    превью), браузера (величина за именем до слов о беде; подсказка делится;
-    `format::variable`, `format::share`); мутации: новая image-tiler 1/1,
-    globe 5/5 и data-browser 6/6 целиком; новый постоянный сценарий
-    `uitests/s5p.txt` (гранула L2__CO на диске): ждёт
-    `carbonmonoxide_total_column` в полосе свойств — на экране через 5 с после
-    старта сценария (s5p.log); все 20 сценариев.
+17. **[S] Name the displayed variable** — done on September 6, 2026
+    (plan-detail-and-quality.md, §4, first sub-step). A NetCDF file carries
+    dozens of variables, one is displayed — by the CF rules the tiler chooses
+    it (`netcdf::preferred`), and the choice was visible to the viewer only in
+    the log. Now the choice is named: `Info.variable` → `Described.variable`
+    (path in the file, `long_name`/`standard_name`, `units` as written;
+    comparisons with CF use its own lower-case copy) → `Meta.variable` at both
+    consumers → `ViewState.variable` of the canvas and
+    `OverlayProgress.detailed_variable` of the globe (the variable of the one
+    lying as detailed, not of the preview). The browser names it in words
+    (`format::variable`: name, units, file words) first in the properties strip
+    of the canvas — into the remaining panel width from the other facts and
+    the space for the display progress, file words only if they fit whole —
+    and in the layer line after the file name, until there is something worse
+    to say about the file; the line tooltip — one line for the file name, the
+    variable, and the trouble, split so that the short parts stay whole
+    (`format::share`). The choice is still the tiler's:
+    `DescribeRequest`/`ProduceRequest` carry no variable (limitations.md).
+    *Check:* tiler tests (the chosen one, not the first; units as written, CF
+    comparisons case-insensitive), wrap (`Meta.variable` rides and is named in
+    the log), canvas (`ViewState.variable`), globe (the variable of the
+    detailed one, not the preview), browser (the variable after the name,
+    before the words about the trouble; the tooltip splits; `format::variable`,
+    `format::share`); mutations: new image-tiler 1/1, globe 5/5 and
+    data-browser 6/6 in full; a new permanent scenario `uitests/s5p.txt` (the
+    L2__CO granule on disk): waits for `carbonmonoxide_total_column` in the
+    properties strip — on screen 5 s after the scenario starts (s5p.log); all
+    20 scenarios.
 
-18. **[S] Список величин файла** — сделано 6 сентября 2026
-    (plan-detail-and-quality.md, §4, второй подшаг). Тайлер отдаёт в описании
-    всех кандидатов в своём порядке предпочтения (`Described.variables`, по
-    заголовкам — пустая или однотонная в списке есть), wrap кладёт их в
-    `Meta.variables`, канва — в `ViewState.variables`. В полосе свойств канвы
-    величина стала кнопкой: под ней список из чего выбирали, показанная с
-    галочкой и всегда среди перечисленных, длинный список обрезан числом
-    (`VARIABLES_LISTED` = 16, примечание «и ещё N» — не пункт). Только
-    список: пункт закрывает панель, выбора за ним нет — запросы тайлера
-    величины не несут (limitations.md). Безразмерная единица CF «1» в подписи
-    не называется («qa_value — data quality value»). *Проверка:* тесты тайлера
-    (список — все кандидаты в порядке, с пустой), wrap и канвы (список едет
-    как есть), браузера (`variable_items`: порядок, галочка, обрезка;
-    `format::variable` без «1»; сообщение `preview_variables` в обходе);
-    мутации: image-tiler новая 1/1, data-browser 8/8 и globe 5/5 целиком;
-    сценарий `s5p` раскрывает список и ждёт `qa_value`; все 20 сценариев на
-    итоговой сборке.
+18. **[S] The file's variable list** — done on September 6, 2026
+    (plan-detail-and-quality.md, §4, second sub-step). The tiler returns in
+    the description all candidates in its own order of preference
+    (`Described.variables`, by headers — an empty or uniform one is present in
+    the list), the wrap puts them into `Meta.variables`, the canvas into
+    `ViewState.variables`. In the canvas properties strip the variable became
+    a button: under it the list of what was chosen from, the displayed one
+    checked and always among those listed, a long list truncated by number
+    (`VARIABLES_LISTED` = 16, an "and N more" note — not an item). List only:
+    an item closes the panel, there is no choice behind it — tiler requests
+    carry no variable (limitations.md). The dimensionless CF unit "1" is not
+    named in the caption ("qa_value — data quality value"). *Check:* tiler
+    tests (the list — all candidates in order, with the empty one), wrap and
+    canvas (the list rides as-is), browser (`variable_items`: order, check
+    mark, truncation; `format::variable` without "1"; the `preview_variables`
+    message in the walk-through); mutations: new image-tiler 1/1, data-browser
+    8/8 and globe 5/5 in full; the `s5p` scenario opens the list and waits for
+    `qa_value`; all 20 scenarios on the final build.
 
-19. **[M] Выбор величины в канве** — сделано 6 сентября 2026
-    (plan-detail-and-quality.md, §4, третий подшаг). Пункт списка под кадром
-    называет величину канве (`VariableRequest`), канва описывает тот же
-    ресурс заново с ней (`ShowRequest.variable`, `DescribeRequest.variable`,
-    `ProduceRequest.variable`); тайлер проверяет названную той же выборкой,
-    что и свою (пустая — отказ словами, однотонная показывается, не из списка
-    — отказ по имени; у снимка — отказ: величина одна), разбор в memo и
-    отпечаток ключуются величиной (`fingerprint::hash_of`: в свёртку, не в
-    текст ключа; пустая не входит — кэш прежних показов цел, `DECODE_REV` не
-    поднят). Выбор — вкладки (`PreviewState.variable`), пишется в
-    `SavedTab::Preview`, когда канва его показывает (отвергнутая не пишется —
-    открылась бы тем же отказом без списка), и открывается с ней; список
-    величин хранится от последнего отчёта с ним, и после отказа названной
-    кнопка с ним остаётся, галочки в нём нет. Камера остаётся, пока плоскость
-    величины та же (`View::plane_changed`), иначе кадр вписывается заново. Шар
-    выбора не знает (limitations.md). *Проверка:* тесты тайлера (названная
-    показана/отвергнута по выборке/по имени, у снимка — отказ; отпечаток —
-    величина в свёртке, пустая — как без неё; memo — та же величина свой
-    разбор, другая — сосед), канвы (плоскость та же — камера цела), браузера
-    (выбор запоминается, показанная по умолчанию не называется заново; список
-    переживает отказ; подтверждённая величина переживает запись, отвергнутая
-    не пишется, старая запись читается; сообщение `preview_variable` в
-    обходе); мутации: image-tiler 6/6 по фильтру «величин» (три новые),
-    data-browser 10/10, image-view 1/1 (новый набор), globe 5/5; сценарий
-    `s5p` выбирает `qa_value` и ждёт её в полосе без прежней; все 20
-    сценариев (в одном из трёх полных прогонов `remote` вышел ненулевым кодом
-    при закрытии удалённого ресурса — к шагу не относится, в очереди).
+19. **[M] Variable choice in the canvas** — done on September 6, 2026
+    (plan-detail-and-quality.md, §4, third sub-step). A list item under the
+    frame names the variable to the canvas (`VariableRequest`), the canvas
+    re-describes the same resource with it (`ShowRequest.variable`,
+    `DescribeRequest.variable`, `ProduceRequest.variable`); the tiler checks
+    the named one with the same sample as its own (empty — a refusal in words,
+    uniform — displayed, not from the list — a refusal by name; for a scene —
+    a refusal: there is one variable), the parse in the memo and the
+    fingerprint are keyed by the variable (`fingerprint::hash_of`: into the
+    hash, not into the key text; an empty one does not enter — the cache of
+    past displays is intact, `DECODE_REV` not bumped). The choice belongs to
+    the tab (`PreviewState.variable`), it is written into `SavedTab::Preview`
+    when the canvas displays it (a rejected one is not written — it would open
+    with the same refusal and no list), and it opens with it; the variable list
+    is kept from the last report that carried it, and after a refusal of the
+    named one the button keeps it, with no check mark in it. The camera
+    survives while the plane of the variable is the same
+    (`View::plane_changed`), otherwise the frame is fitted anew. The globe
+    knows nothing of the choice (limitations.md). *Check:* tiler tests (the
+    named one displayed/rejected by sample/by name, for a scene — a refusal;
+    fingerprint — the variable in the hash, empty — as without it; memo — the
+    same variable its own parse, a different one — the neighbor), canvas (the
+    same plane — the camera intact), browser (the choice is remembered, the
+    displayed one by default is not re-named; the list survives a refusal; a
+    confirmed variable survives the write, a rejected one is not written, an
+    old record reads; the `preview_variable` message in the walk-through);
+    mutations: image-tiler 6/6 under the "variable" filter (three new),
+    data-browser 10/10, image-view 1/1 (new set), globe 5/5; the `s5p`
+    scenario chooses `qa_value` and waits for it in the strip without the old
+    one; all 20 scenarios (in one of the three full runs `remote` exited with
+    a non-zero code when closing a remote resource — unrelated to the step, in
+    the queue).
 
-20. **[M] Выбор величины на шаре** — сделано 6 сентября 2026
-    (plan-detail-and-quality.md, §4, четвёртый подшаг; закрыты четыре шаровых
-    места плана). Подпись слоя «На просмотре» у файла многих величин —
-    кнопка со списком (тот же `components::variables`, что под канвой; список
-    едет в `OverlayProgress.detailed_variables` от последнего описания, его
-    назвавшего). Пункт называет величину шару: набор пересылается с
-    `OverlayRaster.variable` у растра своего номера, глобус узнаёт прежнее
-    наложение по ресурсам и описывает растр заново с ней на месте
-    (`Overlay::revariabled`: прежний проход отпущен, тайлы под новым
-    отпечатком, запасные остаются). Отказ названной величине — жалоба растра
-    словами тайлера: запасной на его место не встаёт, слой не хоронится,
-    список остаётся. Названное держится за файлом по номеру и снимается,
-    когда подробным лёг запасной; выбор слоя не сохраняется (limitations.md).
-    *Проверка:* тесты глобуса (заново описывается только растр с другой
-    величиной, не запасной; список переживает отказ), браузера (величина едет
-    растру своего номера, снимается с запасным, список хранится; сообщения в
-    обходе), общего списка (порядок, галочка, обрезка, без показанной —
-    без галочки), глобуса нативно (тот же набор с другой величиной описывает
-    заново только этот растр; `Raster::refused` — отказ названной оставляет
-    файл и запасные; `Overlay::doomed` — отвергнутый выбор слой не хоронит);
-    мутации globe 9/9 (четыре новые) и data-browser 11/11 целиком; новый
-    сценарий `uitests/globevar.txt` (сеть: S5P CO на шар, выбор `qa_value` в
-    строке слоя, 22 с); все 21 сценарий на итоговой сборке — трижды.
+20. **[M] Variable choice on the globe** — done on September 6, 2026
+    (plan-detail-and-quality.md, §4, fourth sub-step; four globe items of the
+    plan closed). The layer caption "On view" for a multi-variable file is a
+    button with a list (the same `components::variables` as under the canvas;
+    the list rides in `OverlayProgress.detailed_variables` from the last
+    description that named it). An item names the variable to the globe: the
+    set is resent with `OverlayRaster.variable` on the raster of its number,
+    the globe recognizes the previous overlay by resources and re-describes the
+    raster with it in place (`Overlay::revariabled`: the previous pass is
+    released, tiles under the new fingerprint, spares remain). A refusal of the
+    named variable — the raster complains in the tiler's words: a spare does
+    not take its place, the layer is not buried, the list stays. What is named
+    sticks to the file by number and is removed when a spare becomes the
+    detailed one; the layer's choice is not saved (limitations.md). *Check:*
+    globe tests (only the raster with a different variable is re-described, not
+    the spare; the list survives a refusal), browser (the variable rides to the
+    raster of its number, is removed with the spare, the list is stored;
+    messages in the walk-through), the shared list (order, check mark,
+    truncation, without a displayed one — no check mark), globe natively (the
+    same set with a different variable re-describes only that raster;
+    `Raster::refused` — a refusal of the named one keeps the file and spares;
+    `Overlay::doomed` — a rejected choice does not bury the layer); mutations
+    globe 9/9 (four new) and data-browser 11/11 in full; a new scenario
+    `uitests/globevar.txt` (network: S5P CO onto the globe, choosing
+    `qa_value` in the layer line, 22 s); all 21 scenarios on the final build —
+    three times.
 
-21. **[S] Положить на шар этим файлом** — сделано 6 сентября 2026
-    (plan-detail-and-quality.md, §4, последний пункт). У файла внутри снимка
-    в меню строки — «На шар этим файлом» (`Msg::GlobeFile`): растры слоя
-    спрашиваются у провайдера с названным файлом (`ImageryRequest.wanted`),
-    провайдер кладёт его подробным, а свой выбор и его запасные — за ним
-    запасными (`imagery::preferring`); не растр или не из продукта — как не
-    названный, с записью в журнал. Лежащему слою растры спрашиваются заново
-    (глобус заменяет набор по ресурсам), слою в сборке просьба ждёт её конца,
-    отсутствующему — ждёт продукта из каталога (`State::file_wishes`), а
-    отменённый показ, отказ каталога и снятый слой её уносят. Отказ
-    названному (нет в продукте, не растр по имени, квиклук) — словами в
-    ответе (`ImageryResponse.wanted_refused`) и в строке состояния, просьба
-    снята; растр ли файл на деле, скажет тайлер. Ключи файлов ответа
-    ложатся в слой вместе с растрами (`Assembly.files`): до замены набора
-    глобус отчитывается о прежнем. Строка слоя называет описанный первым
-    файл. *Проверка:* тесты провайдера (`preferring`: названный первым,
-    выбор раскладки первым запасным, тот же выбор не дублируется; манифест,
-    чужой файл и квиклук — отказ словами), браузера (`imagery_request`
-    несёт просьбу; просьба ждёт сборки, ждёт продукта, уходит с отменой и со
-    снятым слоем; тот же файл — нечего делать; продукт под рукой — сразу;
-    сообщение `globe_file` в обходе); мутации data-provider 3/3 и
-    data-browser 12/12 целиком; новый постоянный сценарий
-    `uitests/slstrfile.txt` (гранула RBT на диске: раскрыть снимок, меню
-    файла F2_BT_in.nc → «На шар этим файлом» → строка слоя называет
-    F2_BT_in.nc, 18 с); все 22 сценария.
+21. **[S] Put on the globe with this file** — done on September 6, 2026
+    (plan-detail-and-quality.md, §4, last item). For a file inside a scene the
+    row menu has "On the globe with this file" (`Msg::GlobeFile`): the layer's
+    rasters are requested from the provider with the named file
+    (`ImageryRequest.wanted`), the provider puts it as detailed, and its own
+    choice and its spares — behind it as spares (`imagery::preferring`); not a
+    raster or not from the product — as if unnamed, with a log entry. For a
+    layer already in place the rasters are requested anew (the globe replaces
+    the set by resources), for a layer being assembled the request waits for
+    its end, for an absent one — waits for the product from the catalogue
+    (`State::file_wishes`), while a cancelled display, a catalogue refusal, and
+    a dropped layer carry it away. A refusal of the named one (not in the
+    product, not a raster by name, a quicklook) — in words in the reply
+    (`ImageryResponse.wanted_refused`) and in the status line, the request is
+    dropped; whether the file is really a raster, the tiler will say. The file
+    keys of the reply go into the layer along with the rasters
+    (`Assembly.files`): before replacing the set the globe reports on the old
+    one. The layer line names the first described file. *Check:* provider tests
+    (`preferring`: the named one first, layout choice as the first spare, the
+    same choice is not duplicated; manifest, a foreign file, and a quicklook —
+    a refusal in words), browser (`imagery_request` carries the request; the
+    request waits for the assembly, waits for the product, leaves with a
+    cancellation and with a dropped layer; the same file — nothing to do; the
+    product at hand — at once; the `globe_file` message in the walk-through);
+    mutations data-provider 3/3 and data-browser 12/12 in full; a new
+    permanent scenario `uitests/slstrfile.txt` (the RBT granule on disk:
+    expand the scene, the menu of the file F2_BT_in.nc → "On the globe with
+    this file" → the layer line names F2_BT_in.nc, 18 s); all 22 scenarios.
 
-22. **[S] Падение на выходе при открытом удалённом ресурсе** — сделано
-    6 сентября 2026. Сценарий `remote` трижды за день кончался «не сошёлся»
-    в полных прогонах — без паники в stderr и без строки о закрытии ресурса в
-    логе. Паники не было видно потому, что лаунчер сливал stderr хоста в свой
-    stdout, а прогон шлёт stdout в никуда: ловля паники прогоном (шаг 12) под
-    прогоном не работала ни разу, и её тест держался за код 250 — остаток от
-    `sys.exit(-6)`. Теперь лаунчер оставляет потоки хоста своими, смерть от
-    сигнала отдаёт как оболочка (128+N), прогон называет сигнал в вердикте
-    («НЕ СОШЁЛСЯ (SIGABRT)»), слово паники в stderr считает хостовым только при
-    SIGABRT (паника гостя пишется туда же через WASI, а хост её переживает
-    трапом), даёт хосту `RUST_BACKTRACE` и хранит `<имя>.stderr` у не
-    сошедшегося. С этим падение воспроизвелось словами: «A Tokio 1.x context
-    was found, but it is being shutdown» — `Runtime::drop` разбирает драйвер
-    таймеров раньше, чем дожидается blocking-потоков, а на blocking-потоке
-    сидит оконное чтение удалённого ресурса в `block_on` реквеста, чей опрос
-    первым трогает таймер `read_timeout`; флаг гашения (шаг 12) закрывал
-    только поход, начатый после объявления, не тот, что в полёте. Гашение
-    стало флагом с уведомлением и счётом походов (`core::Shutdown`): поход
-    ждёт объявления наравне с ответом сервера и по нему бросает запрос, не
-    опросив таймера (`range::awaited`, `biased`), раннер объявляет гашение и
-    из `exiting`, и после цикла событий при любом его исходе, и до разборки
-    рантайма ждёт возврата походов в полёте (`Shutdown::settled`, до 2 с) —
-    чтобы поток, вытесненный посреди опроса запроса, не докончил его на
-    разобранном драйвере. *Проверка:* воспроизведение до правки хоста, уже с
-    пойманным stderr, — временный сценарий с выходом через секунду после
-    открытия ресурса: 1 из 6 «НЕ СОШЁЛСЯ (SIGABRT) + ПАНИКА ХОСТА: A Tokio
-    1.x context was found, but it is being shutdown» (поток tokio,
-    entry.rs:539); после правки — 16 из 16 и ещё 10 из 10 на итоговой
-    сборке, в каждом логе чтение в полёте вернулось отказом «хост
-    завершается» и ресурс закрыт штатно. Тесты: сети (поход в полёте
-    бросается гашением, после объявления — без похода, гашение считает
-    поход до возврата), ядра (объявление будит ждущего и видно спросившему
-    после; ожидание походов до возврата и до предела), buildgen (лаунчер
-    оставляет stderr хоста своим и отдаёт 128+N; вердикт называет сигнал,
-    убитого посредника, панику только при SIGABRT). Мутации: veldmap-host-core
-    5/5 (новый файл к двум прежним мутациям диспетчера), veldmap-host-network
-    11/11 (три новые). Сценарий выхода стал постоянным — `uitests/remoteexit.txt`
-    (сеть, 15 с). Полные прогоны на итоговой сборке: 23 сценария сошлись, но
-    не одним прогоном — в одном `slstrfile` кончился «НЕ СОШЁЛСЯ (SIGILL)» на
-    подъёме модулей до первого шага (адрес сбоя — середина инструкции в
-    регистровом аллокаторе Cranelift, к выходу не относится, см. «Дальше»), в
-    другом `keepscroll` не дождался ухода строки (поодиночке сразу сошёлся);
-    прежний прогон, без правки хоста, — все 22.
+22. **[S] Crash on exit with an open remote resource** — done on September 6,
+    2026. The `remote` scenario ended "did not converge" three times a day in
+    full runs — with no panic in stderr and no line about closing the resource
+    in the log. The panic was invisible because the launcher merged the host's
+    stderr into its own stdout, while the run sends stdout nowhere: the run's
+    panic catching (step 12) never worked under the run, and its test held on
+    to code 250 — a leftover of `sys.exit(-6)`. Now the launcher keeps the
+    host's streams its own, death by signal is returned like the shell
+    (128+N), the run names the signal in the verdict ("DID NOT CONVERGE
+    (SIGABRT)"), a panic word in stderr counts as host-side only on SIGABRT (a
+    guest panic goes to the same place through WASI, and the host survives it
+    with a trap), gives the host `RUST_BACKTRACE` and keeps `<name>.stderr`
+    for the non-converged one. With this the crash reproduced in words: "A
+    Tokio 1.x context was found, but it is being shutdown" — `Runtime::drop`
+    tears down the timer driver before waiting for the blocking threads, while
+    the windowed read of the remote resource sits on a blocking thread in the
+    `block_on` of the request whose poll first touches the `read_timeout`
+    timer; the shutdown flag (step 12) closed only trips started after the
+    announcement, not the one in flight. Shutdown became a flag with a
+    notification and a trip count (`core::Shutdown`): a trip waits for the
+    announcement on equal terms with the server reply and on it drops the
+    request without polling the timer (`range::awaited`, `biased`), the runner
+    announces shutdown both from `exiting` and after the event loop whatever
+    its outcome, and before tearing down the runtime it waits for in-flight
+    trips to return (`Shutdown::settled`, up to 2 s) — so that a thread
+    preempted mid-poll does not finish the request on a torn-down driver.
+    *Check:* reproduction before the host fix, already with captured stderr —
+    a temporary scenario exiting one second after opening the resource: 1 out
+    of 6 "DID NOT CONVERGE (SIGABRT) + HOST PANIC: A Tokio 1.x context was
+    found, but it is being shutdown" (tokio thread, entry.rs:539); after the
+    fix — 16 out of 16 and another 10 out of 10 on the final build, in every
+    log the read in flight returned with a "host is shutting down" refusal and
+    the resource closed normally. Tests: network (a trip in flight is dropped
+    by shutdown, after the announcement — no trip, shutdown counts the trip
+    until it returns), core (the announcement wakes a waiter and is visible to
+    the one asking afterwards; waiting for trips until return and until the
+    limit), buildgen (the launcher keeps the host's stderr its own and returns
+    128+N; the verdict names the signal, the killed middleman, and the panic
+    only on SIGABRT). Mutations: veldmap-host-core 5/5 (a new file on top of
+    the two previous dispatcher mutations), veldmap-host-network 11/11 (three
+    new). The exit scenario became permanent — `uitests/remoteexit.txt`
+    (network, 15 s). Full runs on the final build: 23 scenarios converged, but
+    not in one run — in one `slstrfile` ended "DID NOT CONVERGE (SIGILL)" on
+    module bring-up before the first step (the fault address — the middle of
+    an instruction in the Cranelift register allocator, unrelated to the exit,
+    see "Next"), in another `keepscroll` did not wait for the line to leave
+    (alone it converged at once); the previous run, without the host fix — all
+    22.
 
-23. **[S] Прогон сценариев без окна** — сделано 6 сентября 2026 по слову
-    хозяина: прогоны «мешают работать, выскакивая окнами и беря фокус».
-    Окно раннеру нужно ради свопчейна и ввода с мыши, а в прогоне ввод
-    синтетический и снимок делается со своей текстуры (`capture::shoot`).
-    Под `run-uitests.py` (`VELDMAP_HEADLESS=1`) хост окна не создаёт
-    (`Screen::Offscreen`): модули рисуют в свои текстуры как прежде, тик
-    кадра даёт свой час в 60 Гц вместо vsync (`Pace`: не чаще периода,
-    просроченный — сразу, следующий от факта), блит в свопчейн и показ
-    пропускаются, формат кадра назначен (`Bgra8UnormSrgb` — тот же, что
-    свопчейн Vulkan отдаёт первым среди sRGB); без сценария хост без окна не
-    стартует. Посмотреть сценарий глазами — запуск руками с окном.
-    *Проверка:* тест часов (`frames_keep_the_period_and_do_not_catch_up`),
-    мутации veldmap-host-gui 2/2 (новый файл); полный прогон без окна на
-    итоговой сборке — 22 из 23 за 7,8 мин, ни одного окна на экране;
-    снимки против оконного прогона того же дня совпали байт в байт у 21 из 27
-    (различны шесть: выдача каталога по времени — search, remote,
-    unviewable; снимок в полёте камеры — jp2canvas-zoom, jp2remote-zoom,
-    globe). Не сошёлся `globevar`, и дважды: у свежайших гранул часа
-    (0,8–1,3 МБ, 46 и 107 строк) величина CO в выборке пуста («годных 0 из
-    9890», трасса тайлера), и лежит `solar_azimuth_angle` — данные, не окно;
-    сценарий держится за свежайшую гранулу, и это его слабость (см.
-    «Дальше»). Память хоста за прогон (раз в секунду по всем запускам): пик
-    566 МБ, средний пик 437 МБ.
+23. **[S] Running scenarios without a window** — done on September 6, 2026 on
+    the owner's word: the runs "get in the way by popping up windows and
+    taking focus". The runner needs a window for the swapchain and mouse
+    input, while in a run the input is synthetic and the screenshot is taken
+    from its own texture (`capture::shoot`). Under `run-uitests.py`
+    (`VELDMAP_HEADLESS=1`) the host creates no window (`Screen::Offscreen`):
+    modules draw into their own textures as before, the frame tick gets its own
+    60 Hz clock instead of vsync (`Pace`: no more often than the period, an
+    overdue one — immediately, the next one from the fact), the blit to the
+    swapchain and the presentation are skipped, the frame format is assigned
+    (`Bgra8UnormSrgb` — the same one the Vulkan swapchain offers first among
+    sRGB); without a scenario the host does not start without a window. To
+    watch a scenario with your own eyes — run it by hand with a window.
+    *Check:* the clock test (`frames_keep_the_period_and_do_not_catch_up`),
+    veldmap-host-gui mutations 2/2 (a new file); a full headless run on the
+    final build — 22 out of 23 in 7.8 min, not a single window on screen; the
+    screenshots against the windowed run of the same day matched byte for byte
+    for 21 out of 27 (six differ: catalogue output by time — search, remote,
+    unviewable; a screenshot mid-camera-flight — jp2canvas-zoom,
+    jp2remote-zoom, globe). `globevar` did not converge, twice: for the
+    freshest granules of the hour (0.8–1.3 MB, 46 and 107 rows) the CO
+    variable is empty in the sample ("0 valid out of 9890", the tiler trace),
+    and `solar_azimuth_angle` lies there — data, not a window; the scenario
+    clings to the freshest granule, and that is its weakness (see "Next").
+    Host memory per run (once a second across all launches): peak 566 MB,
+    average peak 437 MB.
 
-24. **[S] Подпись заново на 401/403, квад углами растра, `globevar` на
-    гранулу с данными** — сделано 6 сентября 2026, последним шагом этой
-    полосы. Посылка шага — «подпись SigV4 в заголовках живёт четверть часа, и
-    слой на шаре после неё слеп» — оказалась правилом AWS, а не этого
-    хранилища: замер 6 сентября (GET двух байт с `x-amz-date`, отодвинутой на
-    14 минут … 30 дней) — 206 всякий раз, и два прогона со слоем старше
-    шестнадцати минут отказа не видели (ADR 0005). Переподпись всё же
-    сделана — страховкой на хранилище с проверкой срока и на отозванный
-    ключ: 401/403 посреди чтения теперь свой исход
-    (`Attempt::Unsigned`), на который сеть просит подписать объект заново
-    того, у кого ключи — `network/on_resign` широковещательно,
-    `data-provider/on_resigned` с адресом ключом (`s3::resign`: только свой
-    хост и только по TLS), — ждёт до десяти секунд, заменяет заголовки, общие
-    с походом, и повторяет тот же запрос один раз; пусто — прежний отказ.
-    Проба открытия и докачка не обновляются (limitations.md, ADR 0005
-    дополнен). Квад запасной привязки из контура каталога едет углами растра
-    (`oriented`: север вверху, верхний левый первым, долготы развёрнуты к
-    первой вершине), а не порядком вершин каталога, от которого снимок мог
-    лечь зеркально или повёрнуто (наблюдённого случая нет — механизм назван
-    ревизией); полоса, скошенная сильнее сорока пяти градусов, остаётся как
-    перечислена, а квиклук Sentinel-1 в геометрии съёмки под допущение
-    «север вверху» попадает непроверенным.
-    `globevar` ищет OFFL-гранулу, а не свежайшую NRTI: у короткой ночной CO в
-    выборке пуст, и тайлер клал другую величину. Из трёх дефектов привязки
-    (память ревизии, 1 сентября) два оказались уже закрытыми шагами 9–12:
-    GMLJP2 читается (`gml_placement`), незнакомая проекция называется словами
-    в строке слоя («EPSG:N, а такой системы мы не знаем — привязка остаётся по
-    контуру»); новых семейств проекций не добавлено — EPSG:3035, полярные и
-    EASE-Grid хозяйству не встречаются, а проверить их формулы без опорных
-    точек нечем. *Проверка:* тесты сети (истёкшая подпись выдаётся заново и
-    чтение продолжается, живая не спрашивается; без годной новой — отказ без
-    повторов, с негодной — ровно один повтор и слово о ней; очередь по адресу
-    будит всех и снимается), провайдера (`resign`: тот же адрес, только свой
-    хост и TLS), браузера (квад с нижнего левого против часовой и с верхнего
-    правого по часовой ложится верхним левым вперёд, скошенная полоса — как
-    перечислена, через антимеридиан — запад на 170°); мутации
-    veldmap-host-network 13/13 (две новые), data-provider 4/4 (одна),
-    data-browser 13/13 (одна); скептик — цикл `Arc` (замыкание держало
-    контекст, а тот через реестр носитель: ресурс не закрывался на выходе)
-    — слабая ссылка; полный прогон без окна 23/23 (`globevar` на OFFL —
-    58 с), после правок скептика `jp2remote`, `remoteexit`, `globevar` —
-    сошлись, строка о закрытии ресурса на месте. Три временных сценария со
-    слоем старше шестнадцати минут (S5P дважды, JP2 в канве с приближением)
-    сошлись; переподпись при этом не срабатывала ни разу: хранилище приняло
-    старую подпись, и живого 401/403 путь не видел — он держится тестами.
+24. **[S] Re-sign on 401/403, quad by raster corners, `globevar` on a granule
+    with data** — done on September 6, 2026, the last step of this lane. The
+    step's premise — "a SigV4 signature in the headers lives a quarter of an
+    hour, and the globe layer is blind after it" — turned out to be an AWS
+    rule, not this storage's: the measurement of September 6 (GET of two bytes
+    with `x-amz-date` pushed back by 14 minutes … 30 days) — 206 every time,
+    and two runs with a layer older than sixteen minutes saw no refusal (ADR
+    0005). Re-signing is done anyway — as insurance for a storage with expiry
+    checking and for a revoked key: a 401/403 mid-read now has its own outcome
+    (`Attempt::Unsigned`), on which the network asks whoever holds the keys to
+    sign the object again — `network/on_resign` broadcast,
+    `data-provider/on_resigned` keyed by address (`s3::resign`: its own host
+    only and TLS only) — waits up to ten seconds, replaces the headers shared
+    with the trip, and repeats the same request once; empty — the old refusal.
+    The open probe and the resumed download are not refreshed (limitations.md,
+    ADR 0005 extended). The quad of the fallback binding from the catalogue
+    outline now rides by the raster's corners (`oriented`: north up, upper-left
+    first, longitudes unwrapped toward the first vertex), not by the vertex
+    order of the catalogue, from which the scene could land mirrored or rotated
+    (no observed case — the mechanism was named by the review); a strip skewed
+    more than forty-five degrees stays as listed, and a Sentinel-1 quicklook in
+    acquisition geometry slips past the "north up" assumption unchecked.
+    `globevar` looks for an OFFL granule, not the freshest NRTI: for a short
+    nightly one CO is empty in the sample, and the tiler put another variable
+    there. Of the three binding defects (the review memo, September 1), two
+    turned out to be already closed by steps 9–12: GMLJP2 is read
+    (`gml_placement`), an unknown projection is named in words in the layer
+    line ("EPSG:N, and we do not know such a system — the binding stays by the
+    outline"); no new projection families were added — EPSG:3035, polar, and
+    EASE-Grid do not occur in this household, and their formulas cannot be
+    checked without reference points. *Check:* network tests (an expired
+    signature is re-issued and the reading continues, a live one is not asked
+    for; without a usable new one — a refusal with no retries, with a bad one
+    — exactly one retry and a word about it; the by-address queue wakes
+    everyone and is torn down), provider (`resign`: the same address, its own
+    host and TLS only), browser (a quad from the lower-left counterclockwise
+    and from the upper-right clockwise lands upper-left first, a skewed strip
+    — as listed, across the antimeridian — west at 170°); mutations
+    veldmap-host-network 13/13 (two new), data-provider 4/4 (one),
+    data-browser 13/13 (one); the skeptic — an `Arc` cycle (the closure held
+    the context, and the context held the carrier through the registry: the
+    resource did not close on exit) — a weak reference; a full headless run
+    23/23 (`globevar` on OFFL — 58 s), after the skeptic's fixes `jp2remote`,
+    `remoteexit`, `globevar` — converged, the resource-closing line in place.
+    Three temporary scenarios with a layer older than sixteen minutes (S5P
+    twice, JP2 in the canvas with zooming) converged; re-signing never fired:
+    the storage accepted the old signature, and the live 401/403 path was
+    never seen — it is held by tests.
 
-## Чего не делать
+## What Not to Do
 
-- Не принимать docs/jp2-openjpeg.md как модель чтения JP2 (свой цикл «ряд
-  тайлов → полоса», потолок по `data_size`, `finest = 0`); не делать JP2 до
-  извлечения драйвера «а потом уложить» — порядок 3 → 5 → 7 → 8 держать; не
-  решать про области до замера гранулы; не форкать openjp2/hdf5-pure раньше,
-  чем без форка упёрлись.
-- Не снимать `finest`/`Meta::capped` и подпись предела; не оставлять `Reach`
-  и три скаляра на проводе «для совместимости» после шага 10.
-- Не переименовывать `ImageryResponse.reason` и не снимать
-  `LocateResponse.answered`; не делать describe отменяемым вместо быстрого.
-- Не трогать BLOCK/READAHEAD/POOL_LIMIT и ключи пула без чисел большого
-  удалённого чтения; не заводить параллельные запросы «на всякий случай».
-- Не добавлять поле в `Described` под новый формат, не заводить тринадцатый
-  потолок в адаптере, не делать селектор полосы только для NetCDF.
-- Не переписывать шину, схему с кодогенерацией, реестр ресурсов, актор-модель;
-  не сливать relay в новую службу; не строить глобальную тайловую схему.
-- Не заводить второй тестовый путь (трейты «для тестов» в адаптерах, копии
-  продакшен-функций, регэксп-стражи поверх rustc), фреймворки, правки
-  rustflags/profile, бинарные фикстуры; не превращать настройки в инварианты.
-- Не переводить README «как есть», не делать коммитов-переводов, не держать
-  README на двух языках; не исправлять число числом; не класть планы,
-  «состояние дерева», ссылки на каталоги вне репозитория и CHANGELOG в docs/; не заводить
-  генераторы документации и метрики длины; не делать отдельного прохода по
-  176 длинным комментариям.
-- Не описывать МСК-61 как работающую и полосный TIFF как полный проход.
-- Не чистить target/ и generated/; после .proto — только
+- Do not accept docs/jp2-openjpeg.md as the JP2 reading model (its own loop
+  "a row of tiles → strip", a ceiling by `data_size`, `finest = 0`); do not
+  do JP2 before extracting the driver "and lay it in later" — keep the order
+  3 → 5 → 7 → 8; do not decide about regions before measuring the granule; do
+  not fork openjp2/hdf5-pure before being stuck without a fork.
+- Do not remove `finest`/`Meta::capped` and the limit caption; do not leave
+  `Reach` and the three scalars on the wire "for compatibility" after step 10.
+- Do not rename `ImageryResponse.reason` and do not remove
+  `LocateResponse.answered`; do not make describe cancellable instead of fast.
+- Do not touch BLOCK/READAHEAD/POOL_LIMIT and the pool keys without numbers
+  from a large remote read; do not introduce parallel requests "just in case".
+- Do not add a field to `Described` for a new format, do not introduce a
+  thirteenth ceiling in an adapter, do not make a strip selector for NetCDF
+  only.
+- Do not rewrite the bus, the schema with codegen, the resource registry, the
+  actor model; do not merge the relay into a new service; do not build a
+  global tile scheme.
+- Do not introduce a second test path (traits "for tests" in adapters, copies
+  of production functions, regexp guards over rustc), frameworks, edits to
+  rustflags/profile, binary fixtures; do not turn settings into invariants.
+- Do not translate the README "as is", do not make translation commits, do
+  not keep the README in two languages; do not fix a number with a number; do
+  not put plans, "tree state", links to directories outside the repository,
+  and CHANGELOG into docs/; do not introduce documentation generators and
+  length metrics; do not make a separate pass over the 176 long comments.
+- Do not describe MSK-61 as working and a striped TIFF as a full pass.
+- Do not clean target/ and generated/; after .proto — only
   `veldcore/target/release/incremental`.

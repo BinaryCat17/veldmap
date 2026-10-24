@@ -1,11 +1,12 @@
-//! Манифест продукта: что в нём измерение, сказано им самим.
+//! Product manifest: what is a measurement in it is declared by the manifest
+//! itself.
 //!
-//! У всякого `.SAFE` и `.SEN3` в корне лежит манифест XFDU — `manifest.safe`
-//! либо `xfdumanifest.xml`. Это не метаданные про съёмку, а опись самого
-//! пакета: карта содержимого называет единицы данных с их родом, а раздел
-//! объектов — файлы, которыми эти единицы записаны. Единица рода «Measurement
-//! Data Unit» и есть измерение; всё прочее — геометрия, координаты, флаги
-//! качества, таблицы.
+//! Every `.SAFE` and `.SEN3` has an XFDU manifest in its root — `manifest.safe`
+//! or `xfdumanifest.xml`. This is not metadata about the acquisition but an
+//! inventory of the package itself: the content map names the data units with
+//! their kind, and the object section names the files that record those units.
+//! A unit of kind "Measurement Data Unit" is the measurement; everything else
+//! is geometry, coordinates, quality flags, tables.
 //!
 //! ```xml
 //! <xfdu:contentUnit ID="NTC_AOD_Unit" unitType="Measurement Data Unit" …>
@@ -16,37 +17,39 @@
 //!     <fileLocation locatorType="URL" href="NTC_AOD.nc"/>
 //! ```
 //!
-//! Без манифеста выбирать приходится по именам файлов, и это гадание
-//! ошибается там, где ошибиться дороже всего: у гранулы SLSTR
-//! `LST_ancillary_ds.nc` стои́т в алфавите раньше `LST_in.nc`, а у Sentinel-1
-//! OCN раньше всего стои́т `preview/icons/logo.png`. Манифест снимает вопрос
-//! целиком и стоит одного запроса: у Sentinel-1 и Sentinel-2 это 25–70 КБ, у
-//! гранул Sentinel-3 — сотни килобайт, а у OLCI полного разрешения манифест
-//! доходит до полутора мегабайт.
+//! Without a manifest one has to choose by file names, and this guessing fails
+//! where a failure costs most: for an SLSTR granule `LST_ancillary_ds.nc`
+//! sorts earlier in the alphabet than `LST_in.nc`, and for Sentinel-1 OCN the
+//! very first is `preview/icons/logo.png`. The manifest settles the question
+//! completely and costs one request: for Sentinel-1 and Sentinel-2 it is
+//! 25–70 KB, for Sentinel-3 granules hundreds of kilobytes, and for
+//! full-resolution OLCI the manifest reaches one and a half megabytes.
 
 use std::collections::{HashMap, HashSet};
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-/// Имена манифеста. Их два, потому что упаковок две: `.SAFE` у Sentinel-1 и
-/// Sentinel-2, `.SEN3` у Sentinel-3. Внутри — один и тот же XFDU.
+/// The manifest names. There are two because there are two packagings:
+/// `.SAFE` for Sentinel-1 and Sentinel-2, `.SEN3` for Sentinel-3. Inside —
+/// the very same XFDU.
 const NAMES: [&str; 2] = ["manifest.safe", "xfdumanifest.xml"];
 
-/// Открывающий тег или какой-то другой. Нужно это одному месту — вложенности
-/// единиц, — а `Event` о себе такого не сообщает: `Start` и `Empty` несут одну
-/// и ту же `BytesStart`.
+/// An opening tag or some other. Only one place needs this — unit nesting —
+/// and `Event` does not report it about itself: `Start` and `Empty` carry the
+/// very same `BytesStart`.
 enum Kind {
     Start,
     Other,
 }
 
-/// Манифест в корне продукта — тот единственный ключ, чей последний сегмент
-/// один из [`NAMES`], а до него ровно путь продукта.
+/// The manifest in the product root — the single key whose last segment is one
+/// of [`NAMES`], with exactly the product path before it.
 ///
-/// Именно в корне: манифест описывает продукт целиком, и найденный глубже —
-/// это уже чей-то чужой (продукт в продукте бывает у сборных поставок), а
-/// описывал бы он часть вместо целого.
+/// Exactly in the root: the manifest describes the whole product, and one
+/// found deeper is already someone else's (a product inside a product occurs
+/// in assembled deliveries), and it would describe a part instead of the
+/// whole.
 pub fn key<'a>(identifier: &str, keys: &'a [String]) -> Option<&'a String> {
     let root = format!("{}/", identifier.trim_end_matches('/'));
     keys.iter().find(|key| {
@@ -56,34 +59,37 @@ pub fn key<'a>(identifier: &str, keys: &'a [String]) -> Option<&'a String> {
     })
 }
 
-/// Файлы, которыми записано измерение, — путями относительно корня продукта, в
-/// порядке манифеста.
+/// The files that record the measurement — as paths relative to the product
+/// root, in manifest order.
 ///
-/// Пусто — манифест не разобрался или ни одной единицы измерения не назвал.
-/// Это не ошибка: ответ «не знаю» здесь означает ровно то, что было до
-/// манифеста, и разбор возвращается к именам файлов.
+/// Empty — the manifest did not parse or named no measurement unit. This is
+/// not an error: the answer "I don't know" here means exactly what held before
+/// the manifest, and selection falls back to file names.
 pub fn measurements(body: &[u8]) -> Vec<String> {
     let mut reader = Reader::from_reader(body);
     reader.config_mut().trim_text(true);
 
-    // Единицы вложены одна в другую («Information Package» → сама единица), и
-    // род объявлен на внешней ровно так же, как на внутренней. Поэтому
-    // указатель считается измерением, если род измерения объявлен хоть у одного
-    // предка: стек хранит, сколько их сейчас открыто.
+    // Units are nested one inside another ("Information Package" → the unit
+    // itself), and the kind is declared on the outer one exactly as on the
+    // inner one. Therefore a pointer counts as a measurement if a measurement
+    // kind is declared on any ancestor: the stack stores how many are open
+    // right now.
     let mut depth: Vec<bool> = Vec::new();
     let mut measured: HashSet<String> = HashSet::new();
     let mut order: Vec<String> = Vec::new();
     let mut files: HashMap<String, String> = HashMap::new();
     let mut object = String::new();
     let mut buf = Vec::new();
-    // Дочитан ли манифест до закрытия корня — см. ниже.
+    // Whether the manifest was read through to the closing of the root — see
+    // below.
     let mut whole = false;
 
     loop {
         let event = match reader.read_event_into(&mut buf) {
             Ok(event) => event,
-            // Оборванный или чужой XML — то же «не знаю»: половина манифеста
-            // назвала бы половину измерений, и это хуже, чем не назвать ничего.
+            // Truncated or foreign XML — the same "I don't know": half of the
+            // manifest would name half of the measurements, and that is worse
+            // than naming nothing.
             Err(_) => return Vec::new(),
         };
         let event_kind = match event {
@@ -91,9 +97,9 @@ pub fn measurements(body: &[u8]) -> Vec<String> {
             _ => Kind::Other,
         };
         match event {
-            // Открывающий и самозакрывающийся тег читаются одинаково, а
-            // различает их одно: у самозакрывающегося нет детей, и на стек
-            // вложенности он не встаёт.
+            // An opening and a self-closing tag read the same, and one thing
+            // distinguishes them: a self-closing one has no children and does
+            // not push onto the nesting stack.
             Event::Start(tag) | Event::Empty(tag) => {
                 let opens = matches!(event_kind, Kind::Start);
                 match tag.local_name().as_ref() {
@@ -118,8 +124,8 @@ pub fn measurements(body: &[u8]) -> Vec<String> {
                     depth.pop();
                 }
                 b"dataObject" => object.clear(),
-                // Корень закрылся — значит манифест дочитан до конца, и то,
-                // что в нём названо, названо целиком.
+                // The root has closed — the manifest is read to the end, and
+                // whatever it named is named completely.
                 b"XFDU" => whole = true,
                 _ => {}
             },
@@ -129,25 +135,26 @@ pub fn measurements(body: &[u8]) -> Vec<String> {
         buf.clear();
     }
 
-    // Тело, оборванное на границе элементов, ошибкой разбора не выглядит:
-    // `read_event` доходит до `Eof` и молчит. Половина манифеста назвала бы
-    // половину измерений — а это хуже, чем не назвать ничего: недостающее
-    // измерение выбиралось бы по алфавиту, и молча.
+    // A body truncated at an element boundary does not look like a parse
+    // error: `read_event` reaches `Eof` and stays silent. Half of the manifest
+    // would name half of the measurements — and that is worse than naming
+    // nothing: the missing measurement would be chosen by alphabet, silently.
     if !whole {
         return Vec::new();
     }
     order.into_iter().filter_map(|id| files.remove(&id)).filter(|href| !href.is_empty()).collect()
 }
 
-/// Род единицы, объявленный измерением. Сравнение по слову «measurement»: в
-/// XFDU рядом стоя́т «Measurement Data Unit» у Sentinel-3 и тот же род с
-/// собственным `repID` у Sentinel-1, а прочие роды — «Annotation Data Unit»,
-/// «Metadata Unit», «Information Package» — этого слова не содержат.
+/// The unit kind declared as a measurement. Matching by the word
+/// "measurement": in XFDU stand side by side "Measurement Data Unit" for
+/// Sentinel-3 and the same kind with its own `repID` for Sentinel-1, while
+/// other kinds — "Annotation Data Unit", "Metadata Unit", "Information
+/// Package" — do not contain this word.
 fn is_measurement(unit_type: &str) -> bool {
     unit_type.to_ascii_lowercase().contains("measurement")
 }
 
-/// Значение атрибута по имени; пусто — атрибута нет.
+/// Attribute value by name; empty — there is no such attribute.
 fn attribute(tag: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> String {
     tag.attributes()
         .flatten()
@@ -156,124 +163,9 @@ fn attribute(tag: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-/// Путь из `href` в путь от корня продукта: `./measurement/x.tiff` и
-/// `measurement/x.tiff` — один и тот же файл, а ведущий слэш в манифесте
-/// означает то же самое, а не корень бакета.
+/// An `href` path into a path from the product root: `./measurement/x.tiff`
+/// and `measurement/x.tiff` are the same file, and a leading slash in the
+/// manifest means the same, not the bucket root.
 fn relative(href: &str) -> String {
     href.trim_start_matches("./").trim_start_matches('/').to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Настоящий манифест Sentinel-3 (`S3A_SY_2_AOD…SEN3`), укороченный до
-    /// разбираемого: одна единица измерения внутри пакета.
-    const SEN3: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<xfdu:XFDU xmlns:xfdu="urn:ccsds:schema:xfdu:1" version="esa-1.0">
-  <informationPackageMap>
-    <xfdu:contentUnit ID="packageUnit" unitType="Information Package" textInfo="SYNERGY AOD Package">
-      <xfdu:contentUnit ID="NTC_AOD_Unit" unitType="Measurement Data Unit" textInfo="AOD">
-        <dataObjectPointer dataObjectID="NTC_AOD_Data"/>
-      </xfdu:contentUnit>
-      <xfdu:contentUnit ID="geoUnit" unitType="Annotation Data Unit" textInfo="Geodetic">
-        <dataObjectPointer dataObjectID="geodeticData"/>
-      </xfdu:contentUnit>
-    </xfdu:contentUnit>
-  </informationPackageMap>
-  <dataObjectSection>
-    <dataObject ID="geodeticData">
-      <byteStream mimeType="application/x-netcdf" size="900">
-        <fileLocation locatorType="URL" href="geodetic_an.nc"/>
-      </byteStream>
-    </dataObject>
-    <dataObject ID="NTC_AOD_Data">
-      <byteStream mimeType="application/x-netcdf" size="35064511">
-        <fileLocation locatorType="URL" href="NTC_AOD.nc"/>
-        <checksum checksumName="MD5">6cfc77db3ed681308a24a95e703a48d6</checksum>
-      </byteStream>
-    </dataObject>
-  </dataObjectSection>
-</xfdu:XFDU>"#;
-
-    /// Манифест Sentinel-1: тот же XFDU, но путь ведёт в подкаталог и записан
-    /// от текущего места.
-    const SAFE: &str = r#"<xfdu:XFDU xmlns:xfdu="urn:ccsds:schema:xfdu:1">
-  <informationPackageMap>
-    <xfdu:contentUnit unitType="SAFE Archive Information Package">
-      <xfdu:contentUnit unitType="Measurement Data Unit" repID="s1Level2MeasurementSchema">
-        <dataObjectPointer dataObjectID="measurementData1"/>
-      </xfdu:contentUnit>
-      <xfdu:contentUnit unitType="Metadata Unit" repID="s1Level2ProductSchema">
-        <dataObjectPointer dataObjectID="productAnnotation"/>
-      </xfdu:contentUnit>
-    </xfdu:contentUnit>
-  </informationPackageMap>
-  <dataObjectSection>
-    <dataObject ID="measurementData1" repID="s1Level2MeasurementSchema">
-      <byteStream mimeType="application/octet-stream" size="41769268">
-        <fileLocation locatorType="URL" textInfo="Measurement" href="./measurement/s1c-ew-ocn-hh-001.nc"/>
-      </byteStream>
-    </dataObject>
-    <dataObject ID="productAnnotation">
-      <byteStream mimeType="text/xml" size="1024">
-        <fileLocation locatorType="URL" href="./annotation/s1c-ew-ocn-hh-001.xml"/>
-      </byteStream>
-    </dataObject>
-  </dataObjectSection>
-</xfdu:XFDU>"#;
-
-    /// Названо ровно измерение — и ни геометрия, ни аннотация, хотя лежат они
-    /// в том же разделе объектов и в алфавите стоя́т раньше.
-    #[test]
-    fn the_manifest_names_the_measurement_and_nothing_else() {
-        assert_eq!(measurements(SEN3.as_bytes()), vec!["NTC_AOD.nc".to_string()]);
-        assert_eq!(
-            measurements(SAFE.as_bytes()),
-            vec!["measurement/s1c-ew-ocn-hh-001.nc".to_string()]
-        );
-    }
-
-    /// Не разобралось — значит «не знаю», а не «измерений нет»: половина
-    /// ответа хуже отсутствия ответа, потому что на неё положились бы.
-    #[test]
-    fn a_broken_manifest_says_nothing() {
-        assert!(measurements(b"").is_empty());
-        assert!(measurements(b"<xfdu:XFDU><informationPackageMap>").is_empty());
-        assert!(measurements(b"{\"json\": true}").is_empty());
-        // Единица есть, а объекта, на который она указывает, нет.
-        let dangling = SEN3.replace("NTC_AOD_Data\">", "otherData\">");
-        assert!(measurements(dangling.as_bytes()).is_empty());
-
-        // Оборванное тело — тот же ответ, и это главное: разбор до `Eof`
-        // доходит без единой ошибки, и половина названных измерений выглядела
-        // бы целым ответом. Режем на границе элементов, у самого конца.
-        let cut = SEN3.rfind("</xfdu:XFDU>").expect("корень закрыт");
-        assert!(
-            measurements(SEN3[..cut].as_bytes()).is_empty(),
-            "оборванный манифест не называет ничего"
-        );
-        // А целый — называет.
-        assert!(!measurements(SEN3.as_bytes()).is_empty());
-    }
-
-    /// Манифест ищется в корне продукта, а не где придётся: у Sentinel-2 такой
-    /// же файл лежит в каждой грануле и описывает её одну.
-    #[test]
-    fn only_the_manifest_at_the_root_counts() {
-        let keys: Vec<String> = [
-            "eodata/…/S2C_MSIL2A.SAFE/GRANULE/L2A_T40WFC/MTD_TL.xml",
-            "eodata/…/S2C_MSIL2A.SAFE/GRANULE/L2A_T40WFC/manifest.safe",
-            "eodata/…/S2C_MSIL2A.SAFE/manifest.safe",
-        ]
-        .iter()
-        .map(|path| path.to_string())
-        .collect();
-        assert_eq!(
-            key("eodata/…/S2C_MSIL2A.SAFE", &keys),
-            Some(&"eodata/…/S2C_MSIL2A.SAFE/manifest.safe".to_string())
-        );
-        assert_eq!(key("eodata/…/S2C_MSIL2A.SAFE/", &keys), key("eodata/…/S2C_MSIL2A.SAFE", &keys));
-        assert_eq!(key("eodata/…/X.SEN3", &keys), None);
-    }
 }

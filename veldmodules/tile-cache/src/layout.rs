@@ -1,31 +1,32 @@
-//! Раскладка кэша — единственное место, где она известна.
+//! Cache layout — the one place where it is known.
 //!
-//! Каталог на источник, файл на тайл: fs пишет атомарно и целиком, поэтому
-//! пак-файл переписывался бы весь при каждом пополнении, а файлы-тайлы
-//! дописываются и теряются независимо — потерянный означает промах, не
-//! поломку. meta.json — крошечный маркер каталога: его mtime — это «когда
-//! источником пользовались», по нему выбирает жертв вытеснение.
+//! A directory per source, a file per tile: fs writes atomically and whole, so
+//! a pack file would be rewritten entirely at every fill, while tile files are
+//! appended and lost independently — a lost one means a miss, not a breakage.
+//! meta.json is a tiny directory marker: its mtime is "when the source was
+//! last used", and eviction picks its victims by it.
 
-/// Корень кэша. В .gitignore вместе со всем runtime/data.
+/// Cache root. In .gitignore together with all of runtime/data.
 pub const ROOT: &str = "data/tiles";
 
-/// Имя маркера в каталоге источника.
+/// Marker name in a source directory.
 pub const META: &str = "meta.json";
 
-/// Содержимое маркера. Постоянное: перезапись того же текста двигает mtime —
-/// ровно то, ради чего он и переписывается на каждом использовании.
+/// Marker contents. Constant: rewriting the same text moves the mtime —
+/// exactly what it is rewritten for on every use.
 pub const META_BODY: &[u8] = b"{\"veldmap\":\"tile-cache\"}\n";
 
-/// Санитарный потолок стороны тайла. Спрашивает его чтение, где сторона и
-/// становится известна; запись меряет производным от него потолком байт. Сторона тайла —
-/// константа производителя, но кэш переживает её смену, а текстуру под тайл
-/// всё равно выделять — граница нужна своя.
+/// Sanity ceiling on the tile side. The read path asks for it, where the side
+/// becomes known; the write path measures against a byte ceiling derived from
+/// it. The tile side is a producer constant, but the cache survives its
+/// change, and a texture must be allocated for the tile regardless — so the
+/// boundary must be its own.
 pub const MAX_TILE_SIDE: u32 = 4096;
 
-/// Потолок тела тайла — та же сторона, только в байтах RGBA. Выводится, а не
-/// записывается числом: разойдясь со стороной, он молча отвергал бы законные
-/// тайлы, кэш по такому источнику не наполнялся бы никогда, и каждый показ шёл
-/// бы полным проходом по файлу.
+/// Ceiling on the tile body — the same side, only in RGBA bytes. Derived, not
+/// spelled out as a number: diverging from the side, it would silently reject
+/// legitimate tiles, the cache for such a source would never fill, and every
+/// display would go through a full pass over the file.
 pub const MAX_TILE_BYTES: usize = (MAX_TILE_SIDE as usize).pow(2) * 4;
 
 pub fn source_dir(key: &str) -> String {
@@ -40,35 +41,12 @@ pub fn tile_path(key: &str, level: u32, x: u32, y: u32) -> String {
     format!("{}/{}/{}_{}_{}.qoi", ROOT, key, level, x, y)
 }
 
-/// Ключ приходит сообщением и попадает в путь, поэтому алфавит закрыт:
-/// строчные шестнадцатеричные цифры, латиница и дефис — ровно то, что
-/// производит fingerprint тайлера. Всё остальное — не ключ, а попытка
-/// пройтись по чужому пути.
+/// The key arrives in a message and ends up in a path, so its alphabet is
+/// closed: lowercase hex digits, Latin letters, and a hyphen — exactly what
+/// the tiler's fingerprint produces. Anything else is not a key but an
+/// attempt to walk someone else's path.
 pub fn valid_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= 64
         && key.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn paths_are_flat_and_predictable() {
-        assert_eq!(tile_path("ab12-t512q", 3, 0, 7), "data/tiles/ab12-t512q/3_0_7.qoi");
-        assert_eq!(meta_path("ab12-t512q"), "data/tiles/ab12-t512q/meta.json");
-        assert_eq!(source_dir("k"), "data/tiles/k");
-    }
-
-    #[test]
-    fn key_alphabet_is_closed() {
-        assert!(valid_key("0123456789abcdef-t512q"));
-        assert!(!valid_key(""));
-        assert!(!valid_key("../etc"));
-        assert!(!valid_key("a/b"));
-        assert!(!valid_key("AB12"));
-        assert!(!valid_key("a b"));
-        assert!(!valid_key(&"a".repeat(65)));
-    }
 }

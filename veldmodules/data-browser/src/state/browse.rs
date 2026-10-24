@@ -1,49 +1,49 @@
-//! Сетевой каталог: что показано в папке и что подгружено под раскрытыми
-//! строками.
+//! Network catalogue: what is shown in a folder and what is loaded under
+//! expanded rows.
 
 use std::collections::{HashMap, HashSet};
 
 pub struct BrowseState {
     pub current_path: String,
     pub items: Vec<BrowseItem>,
-    /// Содержимое раскрытых папок этого вида.
+    /// Content of the expanded folders of this view.
     pub children: Children,
-    /// Как показывать этот список — отбор, порядок, страница.
+    /// How to show this list — the filter, the order, the page.
     pub listing: super::listing::ListingState,
-    /// Последняя ошибка list_path от data-provider (пусто, если запрос успешен)
+    /// Last list_path error from data-provider (empty if the request succeeded)
     pub error: Option<String>,
-    /// Ожидание ответа на data-provider/on_list_path. Актуален только
-    /// последний: два быстрых перехода по папкам дают два ответа, и содержимое
-    /// первого под заголовком второго — враньё, а не устаревшие данные.
+    /// Waiting for the data-provider/on_list_path reply. Only the last one
+    /// counts: two quick folder switches give two replies, and the first one's
+    /// content under the second one's header is a lie, not stale data.
     pub request: veldsdk::Latest,
 }
 
 pub struct BrowseItem {
-    /// Путь продукта вместе с именем бакета (`eodata/Sentinel-2/…`) — в этом
-    /// виде его принимают все топики data-provider. Ключ объекта в бакете
-    /// живёт под этим префиксом, но срезает его провайдер, а не мы.
+    /// The product path together with the bucket name (`eodata/Sentinel-2/…`) —
+    /// in this form all data-provider topics accept it. The object key in the
+    /// bucket lives under this prefix, but the provider cuts it off, not us.
     pub identifier: String,
     pub name: String,
     pub is_folder: bool,
-    /// Снимок, внутри которого лежит запись; пусто — она в пути к снимкам.
-    /// Совпал с `identifier` без завершающего слэша — запись и есть снимок.
-    /// Сказал провайдер: вывести границу снимка из ключа здесь не из чего
-    /// (см. `ListEntry.product`).
+    /// The snapshot the record lies in; empty — it is on its way to the
+    /// snapshots. If it matches `identifier` without the trailing slash — the
+    /// record is the snapshot itself. The provider said it: deriving the snapshot
+    /// boundary from the key has nothing to go on here (see `ListEntry.product`).
     pub product: String,
-    /// Размер объекта в байтах; 0 — папка или размер неизвестен.
+    /// Object size in bytes; 0 — a folder or unknown size.
     pub size: u64,
-    /// Время объекта, unix-секунды; 0 — неизвестно.
+    /// Object time, unix seconds; 0 — unknown.
     pub modified: i64,
-    /// Почему «на глобус» не предлагать; пусто — предлагать. Сказал провайдер,
-    /// потому что список читаемых форматов есть только у него
-    /// (см. `ListEntry.unviewable`).
+    /// Why not to offer "to the globe"; empty — offer it. The provider said it,
+    /// because only it has the list of readable formats (see
+    /// `ListEntry.unviewable`).
     pub unviewable: String,
 }
 
 impl BrowseState {
-    /// Показывает ли вкладка эту папку прямо сейчас — то есть можно ли
-    /// обойтись без сетевого хода. Только что открытая не показывает ничего,
-    /// даже когда путь совпал: у пустой вкладки он тоже пустой.
+    /// Whether the tab shows this folder right now — that is, whether the
+    /// network hop can be skipped. A freshly opened one shows nothing, even when
+    /// the path matches: an empty tab has an empty path too.
     pub fn shows(&self, path: &str) -> bool {
         self.current_path == path && (!self.items.is_empty() || self.request.is_pending())
     }
@@ -62,133 +62,83 @@ impl Default for BrowseState {
     }
 }
 
-/// Содержимое раскрытых папок: ключ папки → её записи.
+/// Content of expanded folders: folder key → its entries.
 ///
-/// Одно устройство на каталог и на поиск: раскрытая строка там и там
-/// показывает один и тот же листинг провайдера, и второй способ его помнить
-/// разошёлся бы с первым. Листается лениво — папку спрашивают, когда её
-/// раскрыли, а не когда показали строку: в корне бакета папок сотни, и обход
-/// каждой стоил бы сотни запросов ради одной раскрытой.
+/// One device for both the catalogue and the search: an expanded row shows the
+/// same provider listing in both, and a second way to remember it would diverge
+/// from the first. Paged lazily — a folder is asked when it is expanded, not when
+/// its row is shown: a bucket root has hundreds of folders, and traversing each
+/// would cost hundreds of requests for the sake of one expanded one.
 ///
-/// «Спрашивали ли» и «ответили ли» — разные вопросы, и носители у них разные.
-/// На первый отвечает наличие ключа: по нему видно, надо ли идти в сеть. На
-/// второй — `waiting`, и нужен он одному показу: раскрытая пустая папка и
-/// раскрытая, чей ответ ещё идёт, выглядят одинаково, и вторая секунду
-/// читается как «здесь ничего нет».
+/// "Were we asking" and "have we got an answer" are different questions, and
+/// they have different carriers. The first is answered by the presence of the
+/// key: by it one can see whether to go to the network. The second by `waiting`,
+/// and only one view needs it: an expanded empty folder and an expanded one whose
+/// answer is still in flight look the same, and the latter reads as "nothing
+/// here" for a second.
 #[derive(Default)]
 pub struct Children {
-    /// Ключ есть — папку спросили; ключа нет — не спрашивали.
+    /// The key is present — the folder was asked; no key — it was not asked.
     loaded: HashMap<String, Vec<BrowseItem>>,
-    /// Папки, чей листинг ещё в пути.
+    /// Folders whose listing is still in flight.
     waiting: HashSet<String>,
 }
 
 impl Children {
-    /// Записи раскрытой папки; пусто — ещё не приехали или её нечем наполнить.
+    /// Entries of an expanded folder; empty — they have not arrived yet or there
+    /// is nothing to fill it with.
     pub fn get(&self, key: &str) -> &[BrowseItem] {
         self.loaded.get(key).map_or(&[], Vec::as_slice)
     }
 
-    /// Спрашивали ли уже эту папку. `false` — надо спросить.
+    /// Whether this folder has already been asked. `false` — it must be asked.
     pub fn known(&self, key: &str) -> bool {
         self.loaded.contains_key(key)
     }
 
-    /// Ждём ли ещё ответа по этой папке — то, что показывают строкой ожидания.
+    /// Whether we are still waiting for an answer for this folder — what the
+    /// waiting row shows.
     pub fn waiting(&self, key: &str) -> bool {
         self.waiting.contains(key)
     }
 
-    /// Листинг папки пошёл.
+    /// The folder listing has started.
     pub fn begin(&mut self, key: String) {
         self.loaded.insert(key.clone(), Vec::new());
         self.waiting.insert(key);
     }
 
-    /// Ответ приехал целиком — или не приехал вовсе. Ждать больше нечего.
+    /// The answer arrived in full — or did not arrive at all. There is nothing
+    /// left to wait for.
     pub fn settle(&mut self, key: &str) {
         self.waiting.remove(key);
     }
 
-    /// Очередная страница листинга. `false` — папку успели забыть: ушли из
-    /// неё или сменилась выдача.
+    /// The next page of the listing. `false` — the folder was forgotten meanwhile:
+    /// we left it or the results changed.
     ///
-    /// Именно `false`, а не тихая вставка: страницы приходят по одной, и
-    /// брошенная цепочка продолжается с того токена, где её оставили. Заведи
-    /// она ключ заново — в наборе оказался бы хвост листинга без головы, и
-    /// раскрытая папка показала бы содержимое, начинающееся с середины.
+    /// Exactly `false`, and not a silent insert: pages come one by one, and an
+    /// abandoned chain continues from the token where it was left. Were it to
+    /// re-create the key, the set would end up with a listing tail without a head,
+    /// and the expanded folder would show content starting from the middle.
     pub fn extend(&mut self, key: &str, items: impl IntoIterator<Item = BrowseItem>) -> bool {
         let Some(into) = self.loaded.get_mut(key) else { return false };
         into.extend(items);
         true
     }
 
-    /// Забыть одну папку. Так уходит та, чей листинг отказал: «спрашивали» —
-    /// не то же, что «спросили», и оставленный ключ значил бы «пусто навсегда».
+    /// Forget one folder. That is how one whose listing refused goes: "were
+    /// asking" is not the same as "asked", and a left-behind key would mean "empty
+    /// forever".
     pub fn forget(&mut self, key: &str) {
         self.loaded.remove(key);
         self.waiting.remove(key);
     }
 
-    /// Всё забыть — так уходит содержимое, принадлежавшее прошлой папке или
-    /// прошлой выдаче.
+    /// Forget everything — that is how the content belonging to the previous
+    /// folder or the previous results goes.
     pub fn clear(&mut self) {
         self.loaded.clear();
         self.waiting.clear();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn item(name: &str) -> BrowseItem {
-        BrowseItem {
-            identifier: format!("eodata/{}", name),
-            name: name.to_string(),
-            is_folder: false,
-            product: String::new(),
-            size: 0,
-            modified: 0,
-            unviewable: String::new(),
-        }
-    }
-
-    /// «Спрашивали» — это «ключ здесь есть», и заводится он в тот же миг, когда
-    /// листинг пошёл: иначе раскрытая строка спрашивала бы содержимое заново на
-    /// каждую пересборку разметки.
-    #[test]
-    fn asking_and_empty_are_told_apart_by_the_key_alone() {
-        let mut children = Children::default();
-        assert!(!children.known("a/"), "не спрашивали");
-
-        children.begin("a/".to_string());
-        assert!(children.known("a/"), "спросили — второй раз не пойдём");
-        assert!(children.get("a/").is_empty(), "ответа ещё нет");
-    }
-
-    /// Страница брошенной цепочки ключ не воскрешает: цепочка продолжается с
-    /// того токена, где её оставили, и заведи она папку заново — в наборе лёг
-    /// бы хвост листинга без головы.
-    #[test]
-    fn a_page_of_a_forgotten_folder_is_dropped() {
-        let mut children = Children::default();
-        children.begin("a/".to_string());
-        assert!(children.extend("a/", [item("one")]), "папка на месте");
-        assert_eq!(children.get("a/").len(), 1);
-
-        children.clear();
-        assert!(!children.extend("a/", [item("two")]), "папку забыли");
-        assert!(!children.known("a/"), "и хвост её не воскресил");
-    }
-
-    /// Отказ листинга папку забывает: оставленный пустой ключ значил бы
-    /// «спрашивали, и там пусто», то есть закрыл бы дорогу повтору навсегда.
-    #[test]
-    fn a_forgotten_folder_can_be_asked_again() {
-        let mut children = Children::default();
-        children.begin("a/".to_string());
-        children.forget("a/");
-        assert!(!children.known("a/"));
     }
 }

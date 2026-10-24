@@ -1,9 +1,9 @@
-//! Ресурсы устройства и запись кадра.
+//! Device resources and frame recording.
 //!
-//! Поделены надвое по тому, от чего зависят: [`Device`] — геометрия, пайплайны
-//! и буфер камеры, которым размер места безразличен; [`Target`] — view чужой
-//! текстуры и буфер глубины под неё, которые размером и определяются. Владелец
-//! перевыделяет место — пересобирается только второе.
+//! Split in two by what they depend on: [`Device`] — geometry, pipelines and
+//! the camera buffer, which the target size does not affect; [`Target`] — a view
+//! of someone else's texture and the depth buffer for it, which the size does
+//! determine. The owner reallocates the target — only the second is rebuilt.
 
 use veldsdk::abi::{resource_alloc_texture, resource_write};
 use veldsdk::graphics::{
@@ -22,22 +22,22 @@ use crate::module::geodesy::World;
 use crate::module::mesh::{Mesh, Vertex};
 use crate::module::outlines::Outlines;
 
-/// Формат буфера глубины. Один на оба пайплайна и на саму текстуру — иначе
-/// расхождение вскрылось бы только на первой отрисовке.
+/// Depth buffer format. One for both pipelines and the texture itself —
+/// otherwise the mismatch would surface only at the first draw.
 const DEPTH_FORMAT: TextureFormat = TextureFormat::TexDepth32Float;
 
-/// То, что уезжает в шейдер каждый кадр. Раскладка обязана совпадать со
-/// `struct Camera` в globe.wgsl: матрица по столбцам, за ней позиция глаза
-/// половинами, каждая выровненная на 16 байт, и размер кадра в пикселях.
+/// What goes to the shader every frame. The layout must match `struct Camera`
+/// in globe.wgsl: the matrix column by column, then the eye position in halves,
+/// each aligned to 16 bytes, and the frame size in pixels.
 ///
-/// Матрица **без переноса**: глаз стои́т в начале координат, а вычитают его в
-/// шейдере, из позиции вершины. Иначе перенос — число порядка единицы — сам
-/// уезжал бы сюда в `f32`, и вершина, сколь угодно точная, теряла бы всё в
-/// умножении на него (см. `geodesy::parts`).
+/// The matrix is **translation-free**: the eye sits at the origin and the
+/// shader subtracts it from the vertex position. Otherwise the translation — a
+/// number of order one — would travel here in `f32`, and a vertex, however
+/// precise, would lose everything in multiplying by it (see `geodesy::parts`).
 ///
-/// Размер кадра нужен лентам контуров: их ширина экранная, и перевести
-/// пиксели в доли отсечения можно только зная, сколько их в кадре
-/// (см. `vs_ribbon`).
+/// The frame size is needed by the outline ribbons: their width is in screen
+/// pixels, and pixels convert to clip fractions only knowing how many of them
+/// are in the frame (see `vs_ribbon`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CameraUniform {
@@ -47,67 +47,73 @@ struct CameraUniform {
     eye_low: World,
     _pad2: f32,
     viewport: [f32; 2],
-    /// Фаза ряби в долях её периода, 0..1, и её сила, 0..1 — то, чем помечено
-    /// грузящееся место снимка (см. `fs_overlay`).
+    /// Ripple phase as a fraction of its period, 0..1, and its strength, 0..1 —
+    /// what marks the still-loading place of the image (see `fs_overlay`).
     ///
-    /// Сила здесь, а не в вершине, потому что она величина слоя, а не ячейки:
-    /// положенная в вершину, она звала бы пересобирать всю варп-сетку на
-    /// каждое движение прочитанных байт. Ячейка приносит только признак —
-    /// рябит она или нет.
+    /// The strength lives here, not in the vertex, because it is a property of
+    /// the layer, not of the cell: put into the vertex, it would call for
+    /// rebuilding the whole warp mesh on every movement of the read bytes. The
+    /// cell carries only a flag — whether it ripples or not.
     phase: f32,
     ripple: f32,
 }
 
-/// Рябь на грузящихся ячейках: где волна стои́т сейчас и насколько заметна.
+/// Ripple on loading cells: where the wave stands now and how visible it is.
 ///
-/// Обеими величинами сразу, потому что порознь они бессмысленны: фаза без силы
-/// двигает невидимое, сила без фазы рисует неподвижное пятно. Считает их
-/// кадровый тик, а не отрисовка: фаза меряется временем, а времени у неё нет.
+/// Both values at once, because separately they are meaningless: phase without
+/// strength moves something invisible, strength without phase draws a standing
+/// patch. The frame tick computes them, not the drawing: phase is measured in
+/// time, and the drawing has no time.
 #[derive(Clone, Copy, Default)]
 pub struct Ripple {
-    /// Доля периода волны, 0..1.
+    /// Fraction of the wave period, 0..1.
     pub phase: f32,
-    /// Сила, 0..1: чем ближе ступень к концу, тем заметнее. Ноль — рябить
-    /// нечему, и тогда кадр от прежнего не отличается вовсе.
+    /// Strength, 0..1: the closer the step is to its end, the more visible.
+    /// Zero — nothing to ripple, and then the frame is no different from the
+    /// previous one at all.
     pub strength: f32,
 }
 
-/// Вершина ленты выделенного контура: точка поверхности с нормалью, её соседи
-/// по обходу и сторона, в которую эту копию вершины отводит шейдер.
+/// Vertex of the selected outline's ribbon: a surface point with a normal, its
+/// neighbors along the traversal, and the side the shader shifts this copy of
+/// the vertex toward.
 ///
-/// Соседи здесь потому, что направление ленты считается на экране, а не в мире:
-/// в мире оно у одного и того же звена разное на разном приближении.
+/// The neighbors are here because the ribbon direction is computed on screen,
+/// not in the world: in the world the same link has a different one at
+/// different zoom levels.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RibbonVertex {
     pub position: World,
     pub position_low: World,
     pub normal: World,
-    /// Смещения к соседям, а не их позиции: у соседних вершин контура старшие
-    /// половины совпадают, и разность их, посчитанная в шейдере, дала бы ноль
-    /// там, где до соседа полсотни метров (см. `geodesy::offset`).
+    /// Offsets to the neighbors, not their positions: adjacent outline vertices
+    /// share the high halves, and their difference computed in the shader would
+    /// be zero where the neighbor is fifty meters away (see `geodesy::offset`).
     pub prev: World,
     pub next: World,
-    /// −1 — левый край ленты, +1 — правый.
+    /// −1 — the left edge of the ribbon, +1 — the right one.
     pub side: f32,
 }
 
-/// С чего начинаются буферы контуров. Экран найденного — это десятки снимков по
-/// нескольку сотен вершин, то есть сотни килобайт, и буфер под них дорастает
-/// сам; мегабайт с самого начала был бы не запасом, а просто неиспользуемой
-/// видеопамятью в те разы, когда очерчено две строки.
+/// What the outline buffers start from. A screen of findings is dozens of
+/// images with a few hundred vertices each, that is hundreds of kilobytes, and
+/// the buffer grows to fit them on its own; a megabyte from the start would be
+/// not a reserve but simply unused video memory in the many cases when only two
+/// rows are outlined.
 const INITIAL_OUTLINE_BUFFER: u64 = 64 * 1024;
 
-/// С чего начинаются буферы варп-сеток наложений — оба, и вершин, и номеров. У
-/// гранулы ячейка — восемь десятков узлов и четыре сотни номеров, у растра
-/// покрупнее тысячи тех и других, и буферы дорастают сами; четверти мегабайта
-/// хватает первому кадру, чтобы не расти трижды подряд.
+/// What the overlay warp mesh buffers start from — both vertices and indices. A
+/// granule cell is some eighty nodes and four hundred indices, a raster is over
+/// a thousand of each, and the buffers grow on their own; a quarter of a
+/// megabyte lasts the first frame without growing three times in a row.
 const INITIAL_OVERLAY_BUFFER: u64 = 256 * 1024;
 
-/// Вершина варп-сетки наложения: точка мира, координата в текстуре носителя,
-/// прозрачность своего слоя и признак идущей загрузки. Две последние одинаковы
-/// у всех вершин одной ячейки — вершиной они едут потому, что все наложения
-/// лежат в одном буфере и рисуются одним пайплайном (см. `overlay::spread`).
+/// Vertex of an overlay warp mesh: a world point, a coordinate in the carrier
+/// texture, the opacity of its own layer, and a loading flag. The last two are
+/// the same for all vertices of one cell — they travel as vertex attributes
+/// because all overlays lie in one buffer and are drawn by one pipeline (see
+/// `overlay::spread`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct OverlayVertex {
@@ -115,36 +121,39 @@ pub struct OverlayVertex {
     pub position_low: World,
     pub uv: [f32; 2],
     pub alpha: f32,
-    /// 1 — своему тайлу этой ячейки ещё ехать, и место под ним рябит; 0 —
-    /// ячейка накрыта тем, чем и должна. Признак, а не сила: силу везёт
-    /// uniform кадра (см. [`CameraUniform::ripple`]).
+    /// 1 — the cell's own tile is still to travel and the place under it
+    /// ripples; 0 — the cell is covered by what it should be. A flag, not a
+    /// strength: the frame's uniform carries the strength (see
+    /// [`CameraUniform::ripple`]).
     pub ripple: f32,
 }
 
-/// Одна отрисовка наложения: чем красить, какой густоты у неё варп-сетка и с
-/// какого узла общего буфера она начинается.
+/// One overlay draw: what to paint with, how dense its warp mesh is, and which
+/// node of the shared buffer it starts from.
 ///
-/// Густотой, а не диапазоном номеров: номера у всех ячеек одной густоты
-/// одинаковы, и различает их только начало (см. [`OverlayBatch::block`]).
+/// By density, not by index range: the indices of all cells of one density are
+/// the same, and only the start distinguishes them (see
+/// [`OverlayBatch::block`]).
 pub struct Patch {
     pub bind: BindGroupId,
     pub segments: u32,
     pub base: u32,
 }
 
-/// Собранные патчи наложений: общий буфер вершин, буфер номеров блоками по
-/// густоте и отрисовки — по одной на ячейку. Пересобирается не кадром, а сменой
-/// состава (см. module.rs): камера двигает только uniform, мир патчей от неё не
-/// зависит.
+/// The assembled overlay patches: a shared vertex buffer, an index buffer in
+/// blocks by density, and draws — one per cell. Rebuilt not per frame but on
+/// composition change (see module.rs): the camera moves only the uniform, the
+/// patch set does not depend on it.
 pub struct OverlayBatch {
     vertices: GrowingBuffer,
     indices: GrowingBuffer,
-    /// Номера по густоте: где в буфере лежит блок сетки в `segments` сегментов.
-    /// Блок строится раз на густоту и живёт, сколько живёт устройство, — от
-    /// ячейки в нём не зависит ничего.
+    /// Indices by density: where in the buffer the mesh block of `segments`
+    /// segments lies. The block is built once per density and lives as long as
+    /// the device — nothing in it depends on the cell.
     blocks: Vec<(u32, std::ops::Range<u32>)>,
-    /// Сами номера, чтобы дописывать блок. Держатся здесь потому, что буфер
-    /// заливается целиком: дописать в него хвост, не имея начала, нечем.
+    /// The indices themselves, to append a block. They are kept here because the
+    /// buffer is filled whole: appending a tail to it without the head is
+    /// impossible.
     laid: Vec<u32>,
     pub draws: Vec<(BindGroupId, std::ops::Range<u32>, i32)>,
 }
@@ -154,12 +163,12 @@ impl OverlayBatch {
         Self {
             vertices: GrowingBuffer::new(
                 buffer_usage::VERTEX,
-                "вершины наложений",
+                "overlay vertices",
                 INITIAL_OVERLAY_BUFFER,
             ),
             indices: GrowingBuffer::new(
                 buffer_usage::INDEX,
-                "номера наложений",
+                "overlay indices",
                 INITIAL_OVERLAY_BUFFER,
             ),
             blocks: Vec::new(),
@@ -168,12 +177,13 @@ impl OverlayBatch {
         }
     }
 
-    /// Номера сетки такой густоты: из блоков либо построенные и туда же
-    /// положенные.
+    /// Mesh indices of that density: taken from the blocks or built and put
+    /// there.
     ///
-    /// Диагональ квада — от `b` к `c`, и обе тройки шестёрки её держат: по ней
-    /// делит себя нарисованное, по ней же считается провал хорды
-    /// (`mesh::lift_m`), и проведённая иначе она разошлась бы с меркой подъёма.
+    /// The quad's diagonal runs from `b` to `c`, and both triples of the six
+    /// hold it: the drawn surface divides itself along it, the chord sag
+    /// (`mesh::lift_m`) is computed along it too, and drawn differently it
+    /// would disagree with the lift measure.
     fn block(&mut self, segments: u32) -> std::ops::Range<u32> {
         if let Some((_, range)) = self.blocks.iter().find(|(at, _)| *at == segments) {
             return range.clone();
@@ -192,14 +202,14 @@ impl OverlayBatch {
         range
     }
 
-    /// Заливает пересобранные патчи. Пустой набор законен: наложения сняты
-    /// или их тайлы ещё не приехали.
+    /// Fills the rebuilt patches. An empty set is legal: the overlays are taken
+    /// off or their tiles have not arrived yet.
     ///
-    /// Отрисовки гасятся первым делом — по той же причине, что и у контуров
-    /// (см. [`Device::set_outlines`]): не залившийся буфер оставляет за собой
-    /// новый размер при старом содержимом, и диапазон от прошлой сборки уехал
-    /// бы за его конец. Буферов здесь два, и разойтись они могут между собой:
-    /// вершины залились, номера нет.
+    /// The draws are cleared first — for the same reason as with the outlines
+    /// (see [`Device::set_outlines`]): a buffer that failed to fill keeps the
+    /// new size with the old contents, and a range from the previous build
+    /// would run past its end. There are two buffers here, and they can fall
+    /// out of step with each other: the vertices filled, the indices did not.
     pub fn fill(
         &mut self,
         vertices: &[OverlayVertex],
@@ -213,8 +223,8 @@ impl OverlayBatch {
             .collect();
 
         self.vertices.write(vertices)?;
-        // Номера заливаются только когда добавился блок: густоты в кадре
-        // повторяются, и обычная пересборка их не трогает вовсе.
+        // The indices are filled only when a block was added: densities repeat
+        // within a frame, and a routine rebuild does not touch them at all.
         if self.laid.len() != laid || self.indices.id().is_none() {
             let laid = std::mem::take(&mut self.laid);
             let written = self.indices.write(&laid);
@@ -231,52 +241,54 @@ pub struct Device {
     indices: OwnedResource,
     camera: OwnedResource,
     camera_bind_group: BindGroupId,
-    /// Layout переживает bind group: пайплайны сослались на него при сборке.
+    /// The layout outlives the bind group: the pipelines referenced it at build.
     _camera_layout: BindGroupLayoutId,
     body: PipelineId,
     grid: PipelineId,
     outline: PipelineId,
-    /// Он же вполсилы — им рисуются невыбранные, пока выбран один.
+    /// Also the half-strength one — it draws the unselected outlines while one
+    /// is selected.
     dimmed: PipelineId,
-    /// Лента выделенного: своя вершина, своя вершинная функция.
+    /// The selected outline's ribbon: its own vertex, its own vertex function.
     ribbon: PipelineId,
-    /// Штриховка занятой области — ею помечено место снимка, который на шар
-    /// ещё едет. Вершина у неё та же, что у линий, отличается она топологией и
-    /// фрагментным шейдером.
+    /// Hatching of the occupied area — it marks the place of an image that is
+    /// still traveling to the globe. Its vertex is the same as the lines', it
+    /// differs in topology and the fragment shader.
     hatch: PipelineId,
-    /// Наложения: варп-сетки с текстурой тайла-носителя.
+    /// Overlays: warp meshes with the carrier tile's texture.
     overlay: PipelineId,
     overlay_layout: BindGroupLayoutId,
     overlay_sampler: SamplerId,
-    /// Формат таргета, под который собраны пайплайны. Сменится — пересобирать.
+    /// The target format the pipelines are built for. Changes — rebuild them.
     pub format: i32,
     body_indices: std::ops::Range<u32>,
     grid_indices: std::ops::Range<u32>,
-    /// Контуры: своя пара буферов, потому что меняются они с каждым ответом на
-    /// поиск, а Земля строится один раз.
+    /// Outlines: their own pair of buffers, because they change with every
+    /// search response, while the Earth is built once.
     outline_vertices: GrowingBuffer,
     outline_indices: GrowingBuffer,
     outline_lines: std::ops::Range<u32>,
-    /// Лента выделенного — своя пара: вершина у неё другая.
+    /// The selected outline's ribbon — its own pair: its vertex is different.
     ribbon_vertices: GrowingBuffer,
     ribbon_indices: GrowingBuffer,
     ribbon_range: std::ops::Range<u32>,
-    /// Штриховка занятых областей — тоже своя: вершина у неё общая с линиями,
-    /// но рисуется она треугольниками, и делить с ними индексный буфер было бы
-    /// нечем.
+    /// Hatching of occupied areas — its own pair too: its vertex is shared with
+    /// the lines, but it is drawn with triangles, and the index buffer cannot
+    /// be shared with them.
     hatch_vertices: GrowingBuffer,
     hatch_indices: GrowingBuffer,
     hatch_range: std::ops::Range<u32>,
 }
 
 impl Device {
-    /// Собирает всё, что не зависит от размера места. Геометрия строится здесь
-    /// же и здесь же остаётся — на стороне хоста; повторно она не понадобится.
+    /// Builds everything that does not depend on the target size. The geometry
+    /// is built here and stays here — on the host side; it will not be needed
+    /// again.
     pub fn create(format: i32) -> anyhow::Result<Self> {
         let mesh = Mesh::build();
 
-        let vertices = gfx::upload("вершины", &mesh.vertices, buffer_usage::VERTEX)?;
-        let indices = gfx::upload("индексы", &mesh.indices, buffer_usage::INDEX)?;
+        let vertices = gfx::upload("vertices", &mesh.vertices, buffer_usage::VERTEX)?;
+        let indices = gfx::upload("indices", &mesh.indices, buffer_usage::INDEX)?;
 
         let (camera, camera_layout, camera_bind_group) = gfx::uniform_binding(
             "Globe Camera",
@@ -286,21 +298,23 @@ impl Device {
 
         let shader = gfx::create_shader(include_str!("globe.wgsl"), "Globe Shader")?;
 
-        // Поверхность: пишет глубину — ею и закрывается всё, что за ней.
+        // The surface: it writes depth — with it everything behind is closed
+        // off.
         let body = pipeline(
             "Globe Body", &shader, "fs_body", &camera_layout, format,
             PrimitiveTopology::TopologyTriangleList, true, CompareFunction::CmpLess,
         )?;
-        // Сетка приподнята над поверхностью, поэтому её ближняя половина тест
-        // проходит, а дальняя — нет. Глубину не пишет: линия не должна
-        // закрывать собой Землю, она на ней лежит.
+        // The grid is lifted above the surface, so its near half passes the
+        // depth test and the far half does not. It does not write depth: a line
+        // must not close off the Earth, it lies on it.
         let grid = pipeline(
             "Globe Grid", &shader, "fs_grid", &camera_layout, format,
             PrimitiveTopology::TopologyLineList, false, CompareFunction::CmpLessEqual,
         )?;
-        // Контуры устроены ровно как сетка и отличаются от неё только цветом.
-        // Выбранный — от остальных тем же, а остальные от самих себя —
-        // силой: пока выбран один, соседние приглушены (см. globe.wgsl).
+        // Outlines are arranged exactly like the grid and differ from it only
+        // in color. The selected one differs from the rest the same way, and
+        // the rest from themselves — by strength: while one is selected, its
+        // neighbors are dimmed (see globe.wgsl).
         let outline = pipeline(
             "Globe Outline", &shader, "fs_outline", &camera_layout, format,
             PrimitiveTopology::TopologyLineList, false, CompareFunction::CmpLessEqual,
@@ -309,15 +323,15 @@ impl Device {
             "Globe Outline Dim", &shader, "fs_outline_dim", &camera_layout, format,
             PrimitiveTopology::TopologyLineList, false, CompareFunction::CmpLessEqual,
         )?;
-        // Штриховка занятой области: треугольники вместо линий, а всё
-        // остальное — вершина и обращение с глубиной — как у контуров: лежит
-        // она на той же высоте и о том же и говорит.
+        // Hatching of the occupied area: triangles instead of lines, and
+        // everything else — the vertex and the depth handling — as with the
+        // outlines: it lies at the same height and speaks of the same thing.
         let hatch = pipeline(
             "Globe Hatch", &shader, "fs_hatch", &camera_layout, format,
             PrimitiveTopology::TopologyTriangleList, false, CompareFunction::CmpLessEqual,
         )?;
-        // Лента: треугольники вместо линий и своя вершина, а глубина как у
-        // линий — она лежит на той же высоте и о ней же говорит.
+        // The ribbon: triangles instead of lines and its own vertex, with depth
+        // as with the lines — it lies at the same height and speaks of the same.
         let ribbon = gfx::create_render_pipeline(CreateRenderPipeline {
             shader_id: shader.id(),
             label: "Globe Ribbon".into(),
@@ -327,7 +341,7 @@ impl Device {
             vertex_layouts: vec![VertexBufferLayout {
                 array_stride: std::mem::size_of::<RibbonVertex>() as u64,
                 step_mode: StepMode::StepVertex as i32,
-                // Как поля RibbonVertex, смещения выводятся.
+                // The offsets are derived like the RibbonVertex fields.
                 attributes: gfx::packed_attributes(&[
                     VertexFormat::VtxFloat32x3,
                     VertexFormat::VtxFloat32x3,
@@ -339,8 +353,8 @@ impl Device {
             }],
             bind_group_layout_ids: vec![camera_layout.id()],
             primitive_topology: PrimitiveTopology::TopologyTriangleList as i32,
-            // Лента отводится в стороны на экране, и какая её сторона окажется
-            // лицевой — зависит от того, с какой стороны на неё смотрят.
+            // The ribbon is spread sideways on screen, and which of its sides
+            // turns out front-facing depends on which side it is viewed from.
             cull_mode: CullMode::None as i32,
             depth_stencil: Some(DepthStencilState {
                 format: DEPTH_FORMAT as i32,
@@ -350,8 +364,9 @@ impl Device {
             ..Default::default()
         })?;
 
-        // Наложения: своя вершина (точка + UV) и привязка тайла, глубина как у
-        // сетки — лежат на поверхности, спор за неё решает порядок отрисовки.
+        // Overlays: their own vertex (point + UV) and a tile binding, depth as
+        // with the grid — they lie on the surface, the draw order settles the
+        // contest over it.
         let overlay_layout = gfx::create_bind_group_layout(
             "Overlay Tile BGL",
             vec![
@@ -359,8 +374,9 @@ impl Device {
                 gfx::sampler_layout_entry(1, VISIBILITY_FRAGMENT),
             ],
         )?;
-        // Linear в обе стороны: уровень выбран по экранному пикселю, ужатие в
-        // кадре не глубже двух крат, тайлы sRGB — усреднение честное.
+        // Linear in both directions: the level is chosen by the screen pixel,
+        // the in-frame shrink is no deeper than twofold, the tiles are sRGB —
+        // the averaging is honest.
         let overlay_sampler = gfx::create_sampler(FilterMode::FiltLinear, FilterMode::FiltLinear)?;
         let overlay = gfx::create_render_pipeline(CreateRenderPipeline {
             shader_id: shader.id(),
@@ -409,36 +425,37 @@ impl Device {
             body_indices: mesh.surface,
             grid_indices: mesh.grid,
             outline_vertices: GrowingBuffer::new(
-                buffer_usage::VERTEX, "вершины контуров", INITIAL_OUTLINE_BUFFER,
+                buffer_usage::VERTEX, "outline vertices", INITIAL_OUTLINE_BUFFER,
             ),
             outline_indices: GrowingBuffer::new(
-                buffer_usage::INDEX, "индексы контуров", INITIAL_OUTLINE_BUFFER,
+                buffer_usage::INDEX, "outline indices", INITIAL_OUTLINE_BUFFER,
             ),
             outline_lines: 0..0,
             ribbon_vertices: GrowingBuffer::new(
-                buffer_usage::VERTEX, "вершины ленты", INITIAL_OUTLINE_BUFFER,
+                buffer_usage::VERTEX, "ribbon vertices", INITIAL_OUTLINE_BUFFER,
             ),
             ribbon_indices: GrowingBuffer::new(
-                buffer_usage::INDEX, "индексы ленты", INITIAL_OUTLINE_BUFFER,
+                buffer_usage::INDEX, "ribbon indices", INITIAL_OUTLINE_BUFFER,
             ),
             ribbon_range: 0..0,
             hatch_vertices: GrowingBuffer::new(
-                buffer_usage::VERTEX, "вершины штриховки", INITIAL_OUTLINE_BUFFER,
+                buffer_usage::VERTEX, "hatch vertices", INITIAL_OUTLINE_BUFFER,
             ),
             hatch_indices: GrowingBuffer::new(
-                buffer_usage::INDEX, "индексы штриховки", INITIAL_OUTLINE_BUFFER,
+                buffer_usage::INDEX, "hatch indices", INITIAL_OUTLINE_BUFFER,
             ),
             hatch_range: 0..0,
         })
     }
 
-    /// Заливает контуры в буферы. Набор заменяется целиком — таким он и
-    /// приходит (см. `Outlines` в types.proto).
+    /// Fills the outlines into the buffers. The set is replaced whole — that is
+    /// how it arrives (see `Outlines` in types.proto).
     ///
-    /// Отрезки гасятся первым делом: не залившийся буфер оставляет за собой
-    /// новый размер при старом содержимом, и оставшийся от прошлого набора
-    /// отрезок рисовал бы по нему что придётся. Отказ здесь только логируется,
-    /// кадр после него пишется дальше — и пустой набор в нём честнее мусора.
+    /// The ranges are cleared first: a buffer that failed to fill keeps the new
+    /// size with the old contents, and a range left from the previous set would
+    /// draw whatever is lying there. A failure here is only logged, the frame
+    /// after it is recorded further — and an empty set in it is more honest
+    /// than garbage.
     pub fn set_outlines(&mut self, outlines: &Outlines) -> anyhow::Result<()> {
         self.outline_lines = 0..0;
         self.ribbon_range = 0..0;
@@ -455,7 +472,7 @@ impl Device {
         Ok(())
     }
 
-    /// Привязка тайла-носителя: его view и общий сэмплер.
+    /// The carrier tile binding: its view and the shared sampler.
     pub fn overlay_bind_group(&self, view: &TextureViewId) -> anyhow::Result<BindGroupId> {
         gfx::create_bind_group(
             "Overlay Tile BG",
@@ -465,23 +482,24 @@ impl Device {
     }
 }
 
-/// Место, отданное нам владельцем разметки, вместе с буфером глубины под него.
+/// The space handed to us by the layout owner, together with the depth buffer
+/// under it.
 pub struct Target {
-    /// Текстура не наша: её выделил и освободит владелец. Держим только id —
-    /// по нему видно, что таргет сменился.
+    /// The texture is not ours: the owner allocated it and will free it. We
+    /// keep only the id — it shows that the target has changed.
     pub texture_id: u64,
     pub width: u32,
     pub height: u32,
     view: TextureViewId,
-    /// Буфер глубины наш и приватный: наружу он не нужен никому.
+    /// The depth buffer is ours and private: nobody outside needs it.
     _depth: OwnedResource,
     depth_view: TextureViewId,
 }
 
 impl Target {
-    /// Соотношение сторон места. Одна формула на проекцию и обратный луч
-    /// (`Camera::ray`): посчитанные порознь, они сходились бы, только пока
-    /// кто-то держит две копии одинаковыми.
+    /// Aspect ratio of the target. One formula for the projection and the
+    /// inverse ray (`Camera::ray`): computed separately, they would agree only
+    /// while someone keeps the two copies identical.
     pub fn aspect(&self) -> f32 {
         self.width as f32 / self.height.max(1) as f32
     }
@@ -491,7 +509,7 @@ impl Target {
 
         let depth_id = resource_alloc_texture(
             width, height, DEPTH_FORMAT as i32, texture_usage::RENDER_ATTACHMENT,
-        ).ok_or_else(|| anyhow!("не выделился буфер глубины {}x{}", width, height))?;
+        ).ok_or_else(|| anyhow!("failed to allocate the depth buffer {}x{}", width, height))?;
         let depth = OwnedResource::new(ResourceHandle { id: depth_id, size: 0 });
         let depth_view = gfx::create_texture_view(depth.id())?;
 
@@ -499,11 +517,11 @@ impl Target {
     }
 }
 
-/// Что уезжает в шейдер о камере.
+/// What goes to the shader about the camera.
 ///
-/// Отдельно от отрисовки, потому что иначе непроверяемо: обеих половин глаза
-/// глазом не увидеть — обнули младшую, и картинка останется той же, только
-/// вершины пойдут шагом в метр (см. `geodesy::parts`).
+/// Separate from the drawing, because otherwise it is unverifiable: both halves
+/// of the eye cannot be seen by eye — zero the low one and the picture stays
+/// the same, only the vertices start stepping by a meter (see `geodesy::parts`).
 fn camera_uniform(
     camera: &Camera,
     aspect: f32,
@@ -523,10 +541,10 @@ fn camera_uniform(
     }
 }
 
-/// Кадр: обновить камеру и записать отрисовку.
+/// Frame: update the camera and record the drawing.
 ///
-/// Исполнит записанное кадровый цикл хоста — здесь работа только ставится в
-/// очередь на этот таргет.
+/// The host's frame loop executes what is recorded — here the work is only
+/// queued for this target.
 pub fn render(
     device: &Device,
     target: &Target,
@@ -543,15 +561,15 @@ pub fn render(
     recorder.set_vertex_buffer(0, device.vertices.id(), 0, 0);
     recorder.set_index_buffer(device.indices.id(), IndexFormat::IdxUint32, 0, 0);
 
-    // Bind group ставится после каждой смены пайплайна: у этих двоих layout
-    // общий, и переживание им не запрещено, — но правило «сначала пайплайн,
-    // потом его привязки» не зависит от того, совпали ли layout'ы.
+    // The bind group is set after every pipeline change: these two share the
+    // layout, and outliving it is not forbidden — but the rule "pipeline first,
+    // then its bindings" does not depend on whether the layouts match.
     recorder.set_pipeline(&device.body);
     recorder.set_bind_group(0, &device.camera_bind_group);
     recorder.draw_indexed(device.body_indices.clone(), 0, 0..1);
 
-    // Наложения — после тела (его глубина заслоняет дальнюю сторону), но до
-    // сетки и контуров: линии обязаны читаться поверх снимка.
+    // Overlays — after the body (its depth hides the far side) but before the
+    // grid and the outlines: the lines must read on top of the image.
     if !overlays.draws.is_empty()
         && let (Some(vertices), Some(indices)) =
             (overlays.vertices.id(), overlays.indices.id())
@@ -562,14 +580,15 @@ pub fn render(
         recorder.set_index_buffer(indices, IndexFormat::IdxUint32, 0, overlays.indices.filled());
         for (bind, range, base) in &overlays.draws {
             recorder.set_bind_group(1, bind);
-            // Номера у всех ячеек одной густоты общие, а начало у каждой своё, и
-            // несёт его `base_vertex`: он прибавляется к номеру уже на
-            // видеокарте.
+            // The indices are shared by all cells of one density, but each has
+            // its own start, and `base_vertex` carries it: it is added to the
+            // index already on the GPU.
             recorder.draw_indexed(range.clone(), *base, 0..1);
         }
-        // Дальше рисуют Земля и линии — их буферы возвращаются на место. Оба:
-        // сетка сразу за наложениями рисуется номерами, и оставленный чужой
-        // буфер номеров увёл бы её в пустое место.
+        // Next the Earth and the lines are drawn — their buffers are restored.
+        // Both of them: the grid is drawn right after the overlays with
+        // indices, and a foreign index buffer left behind would drag it into
+        // empty space.
         recorder.set_vertex_buffer(0, device.vertices.id(), 0, 0);
         recorder.set_index_buffer(device.indices.id(), IndexFormat::IdxUint32, 0, 0);
     }
@@ -578,11 +597,11 @@ pub fn render(
     recorder.set_bind_group(0, &device.camera_bind_group);
     recorder.draw_indexed(device.grid_indices.clone(), 0, 0..1);
 
-    // Штриховка занятых областей — первой из того, что кладут контуры: она
-    // лежит под ними и под лентой, потому что говорит о месте, а они о самом
-    // снимке. Зато поверх сетки и поверх уже показанных наложений, и это не
-    // случайность: место, которое снимок займёт, надо видеть и там, где шар
-    // уже чем-то накрыт.
+    // Hatching of occupied areas goes first among what the outlines lay down:
+    // it lies under them and under the ribbon, because it speaks of the place
+    // while they speak of the image itself. But above the grid and above the
+    // already shown overlays, and this is no accident: the place the image will
+    // occupy must be visible even where the globe is already covered.
     if !device.hatch_range.is_empty()
         && let (Some(vertices), Some(indices)) =
             (device.hatch_vertices.id(), device.hatch_indices.id())
@@ -594,10 +613,10 @@ pub fn render(
         recorder.draw_indexed(device.hatch_range.clone(), 0, 0..1);
     }
 
-    // Контуры последними: они поверх сетки. Глубину линии не пишут, поэтому
-    // между собой они разбираются только очередью записи, и решает её порядок
-    // здесь: лента выделенного пишется после линий и потому видна поверх
-    // накрывших его соседей.
+    // Outlines last: they are above the grid. Lines do not write depth, so
+    // among themselves they are settled only by the record queue, and its order
+    // is decided here: the selected outline's ribbon is recorded after the
+    // lines and therefore is seen above the neighbors that cover it.
     if !device.outline_lines.is_empty()
         && let (Some(vertices), Some(indices)) =
             (device.outline_vertices.id(), device.outline_indices.id())
@@ -605,8 +624,9 @@ pub fn render(
         recorder.set_vertex_buffer(0, vertices, 0, device.outline_vertices.filled());
         recorder.set_index_buffer(indices, IndexFormat::IdxUint32, 0, device.outline_indices.filled());
 
-        // Пока выделен один контур, остальные рисуются вполсилы: лента и так
-        // заметна, но приглушённые соседи не спорят с ней за взгляд.
+        // While one outline is selected, the rest are drawn at half strength:
+        // the ribbon is noticeable anyway, and the dimmed neighbors do not
+        // compete with it for the eye.
         let plain = match device.ribbon_range.is_empty() {
             true => &device.outline,
             false => &device.dimmed,
@@ -630,9 +650,10 @@ pub fn render(
     recorder.submit_with_depth(&target.view, &target.depth_view)
 }
 
-/// Пайплайн отличается от соседнего четырьмя вещами, и ровно они здесь и
-/// параметры: чем красить, чем рисовать и как обращаться с глубиной. Вершинная
-/// функция, слой привязок и формат таргета у них общие.
+/// A pipeline differs from its neighbor in four things, and exactly those are
+/// the parameters here: what to paint with, what to draw, and how to handle
+/// depth. The vertex function, the bind group layout and the target format are
+/// shared by them.
 fn pipeline(
     label: &str,
     shader: &gfx::ShaderId,
@@ -652,7 +673,7 @@ fn pipeline(
         vertex_layouts: vec![VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: StepMode::StepVertex as i32,
-            // Позиция и нормаль — как поля Vertex, смещения выводятся.
+            // Position and normal as the Vertex fields, offsets are derived.
             attributes: gfx::packed_attributes(&[
                 VertexFormat::VtxFloat32x3,
                 VertexFormat::VtxFloat32x3,
@@ -661,9 +682,9 @@ fn pipeline(
         }],
         bind_group_layout_ids: vec![camera_layout.id()],
         primitive_topology: topology as i32,
-        // Отсечения нет: замкнутая поверхность и без него выглядит так же, а
-        // решает задачу тест глубины — он же нужен и сетке, у которой лица не
-        // разобрать.
+        // No culling: a closed surface looks the same without it, and the depth
+        // test solves the task — the grid needs it too, since its faces cannot
+        // be told apart.
         cull_mode: CullMode::None as i32,
         depth_stencil: Some(DepthStencilState {
             format: DEPTH_FORMAT as i32,
@@ -672,101 +693,4 @@ fn pipeline(
         }),
         ..Default::default()
     })
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Глаз доезжает до шейдера обеими половинами — теми самыми, что назвала
-    /// камера. Обнули младшую по дороге, и вычитание в шейдере схлопнется в
-    /// одинарную точность: картинка останется той же, только вершины пойдут
-    /// шагом в метр, а сценарии этого не замечают.
-    #[test]
-    fn the_uniform_carries_both_halves_of_the_eye() {
-        let camera = Camera::default();
-        let uniform = camera_uniform(&camera, 16.0 / 9.0, (1920, 1080), Ripple::default());
-        let (eye, eye_low) = camera.eye_parts();
-
-        assert_eq!(uniform.eye, eye);
-        assert_eq!(uniform.eye_low, eye_low, "младшая половина по дороге потерялась");
-        assert_ne!(eye_low, [0.0; 3], "младшая половина пуста — проверять было бы нечего");
-    }
-
-    /// Блок номеров строится раз на густоту и отдаётся повторно: у всех ячеек
-    /// одной густоты номера одни и те же, а различает их начало, и его несёт
-    /// `base_vertex`.
-    ///
-    /// Здесь же закреплена шестёрка квада `[a, b, c, b, d, c]` и его диагональ
-    /// `b`–`c`: по ней делит себя нарисованное, по ней же считается провал
-    /// хорды (`mesh::lift_m`), и проведённая иначе она разошлась бы с меркой
-    /// подъёма — снимок нырнул бы под поверхность серединами квадов.
-    #[test]
-    fn a_density_block_is_laid_once_and_reused() {
-        let mut batch = OverlayBatch::new();
-
-        let eight = batch.block(8);
-        assert_eq!(eight.len(), 8 * 8 * 6, "квадов у сетки в восемь сегментов 64");
-        assert_eq!(batch.block(8), eight, "та же густота — тот же блок, а не второй такой же");
-        assert_eq!(batch.laid.len(), eight.len(), "блок положен один раз");
-
-        // Шестёрка первого квада: узлы 0 и 1 — верхние, 9 и 10 — под ними
-        // (сторона сетки — девять узлов), диагональ идёт от 1 к 9.
-        assert_eq!(&batch.laid[..6], &[0, 1, 9, 1, 10, 9]);
-        let span = |at: &std::ops::Range<u32>| at.start as usize..at.end as usize;
-        assert!(batch.laid[span(&eight)].iter().all(|&at| at < 81), "номер мимо своих узлов");
-
-        // Вторая густота ложится следом и своей длины.
-        let sixteen = batch.block(16);
-        assert_eq!(sixteen.start, eight.end);
-        assert_eq!(sixteen.len(), 16 * 16 * 6);
-        assert!(batch.laid[span(&sixteen)].iter().all(|&at| at < 17 * 17));
-    }
-
-    /// Размер кадра не бывает нулевым: им лента делит, считая свою ширину в
-    /// долях отсечения.""
-    #[test]
-    fn an_empty_target_still_has_a_viewport() {
-        let uniform = camera_uniform(&Camera::default(), 1.0, (0, 0), Ripple::default());
-        assert_eq!(uniform.viewport, [1.0, 1.0]);
-    }
-
-    /// Раскладка вершины и её длина считаются в двух разных местах: шаг берётся
-    /// из `size_of`, а смещения — из перечня форматов. Разъедься они — пайплайн
-    /// соберётся, кадр запишется, а на шаре окажется пустое место: имён у
-    /// наложений нет, и сценарию такой отказ не виден вовсе.
-    ///
-    /// Здесь же и вторая пара, которую компилятор не сводит, — размер uniform'а
-    /// камеры против объявленной в globe.wgsl структуры. Шестнадцать байт
-    /// выравнивания у неё заняты нацело, и лишнее поле молча съело бы фазу
-    /// ряби, а не отказало бы вслух.
-    #[test]
-    fn the_vertex_layout_and_its_stride_agree() {
-        let overlay = gfx::packed_attributes(&[
-            VertexFormat::VtxFloat32x3,
-            VertexFormat::VtxFloat32x3,
-            VertexFormat::VtxFloat32x2,
-            VertexFormat::VtxFloat32,
-            VertexFormat::VtxFloat32,
-        ]);
-        let spanned = overlay
-            .last()
-            .map_or(0, |last| last.offset as usize + format_size(last.format));
-        assert_eq!(spanned, std::mem::size_of::<OverlayVertex>(), "вершина наложения");
-
-        assert_eq!(std::mem::size_of::<CameraUniform>(), 112, "uniform камеры");
-    }
-
-    /// Сколько байт занимает атрибут такого формата. Своим перечнем, а не общей
-    /// функцией: сойтись он обязан не с кодом, а с тем, что понимает драйвер.
-    fn format_size(format: i32) -> usize {
-        match format {
-            f if f == VertexFormat::VtxFloat32 as i32 => 4,
-            f if f == VertexFormat::VtxFloat32x2 as i32 => 8,
-            f if f == VertexFormat::VtxFloat32x3 as i32 => 12,
-            f if f == VertexFormat::VtxFloat32x4 as i32 => 16,
-            other => unreachable!("неизвестный формат вершины: {other}"),
-        }
-    }
 }

@@ -1,9 +1,9 @@
-//! Открытие скачанного файла ресурсом для заказчика.
+//! Opening a downloaded file as a resource for the caller.
 //!
-//! Библиотека открывает только то, что у неё есть. Продукт, которого в
-//! каталоге нет, открывает провайдер (data-provider/on_open): подписать
-//! запрос к хранилищу умеет только он, а библиотека про подписи не знает
-//! ровно так же, как провайдер не знает про раскладку диска.
+//! The library opens only what it has. A product that is not in the catalogue
+//! is opened by the provider (data-provider/on_open): only it can sign a
+//! request to the storage, and the library knows nothing about signing exactly
+//! as the provider knows nothing about the disk layout.
 
 use crate::module::{ReadPurpose, State};
 use crate::proto::data_library::{ItemRequest, OpenRequest};
@@ -11,27 +11,28 @@ use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::FsReadRequest;
 use veldsdk::resource;
 
-/// Открытие, которое ждёт конца обхода каталога.
+/// An open waiting for the catalogue traversal to finish.
 ///
-/// Ждать приходится с сохранённым владельцем и адресом ответа: и то, и другое
-/// читается из контекста вызова, а к моменту продолжения контекст будет уже
-/// чужой.
+/// Waiting requires the owner and reply address to be saved: both are read
+/// from the call context, and by the time of resumption the context is already
+/// someone else's.
 pub struct Deferred {
     pub name: String,
     pub owner: String,
     pub reply_to: String,
 }
 
-/// Повторяет отложенные открытия — зовётся, когда обход каталога кончился.
+/// Retries the deferred opens — called when the catalogue traversal has
+/// finished.
 pub fn resume(state: &mut State) {
     for waiting in std::mem::take(&mut state.deferred_opens) {
         match state.entry_for(&waiting.name) {
             Some(entry) if entry.is_partial => {
-                fail(waiting.reply_to, format!("'{}' скачан не полностью", waiting.name));
+                fail(waiting.reply_to, format!("'{}' is not fully downloaded", waiting.name));
             }
             Some(_) => read_file(state, waiting.name, waiting.owner, waiting.reply_to),
             None => {
-                fail(waiting.reply_to, format!("в каталоге нет записи '{}'", waiting.name));
+                fail(waiting.reply_to, format!("no entry '{}' in the catalogue", waiting.name));
             }
         }
     }
@@ -44,31 +45,32 @@ pub fn on_open(state: &mut State, req: OpenRequest) {
         Err(e) => return fail(reply_to, e),
     };
     let Some(entry) = state.entry_for(&req.name) else {
-        // Каталог ещё не прочитан — это не «нет такой записи», а «пока не
-        // знаю»: обход диска идёт своим заданием, и щелчок по «смотреть»
-        // успевает раньше него на первых секундах запуска. Отвечать отказом
-        // здесь значит убить вкладку показа за то, что мы не успели, — и
-        // повторить будет некому: заказчик спрашивает один раз.
+        // The catalogue is not read yet — this is not "no such entry" but "do
+        // not know yet": the disk traversal runs as its own job, and the click
+        // on "view" beats it in the first seconds of startup. Answering with a
+        // refusal here would kill the viewing tab for our own slowness — and
+        // there is no one to retry: the caller asks once.
         if !state.pending_list.is_empty() {
             veldsdk::log::debug!(target: "handlers",
-                "открытие '{}' ждёт первого обхода каталога", req.name);
+                "open of '{}' waits for the first catalogue traversal", req.name);
             state.deferred_opens.push(Deferred { name: req.name, owner, reply_to });
             return;
         }
-        return fail(reply_to, format!("в каталоге нет записи '{}'", req.name));
+        return fail(reply_to, format!("no entry '{}' in the catalogue", req.name));
     };
     if entry.is_partial {
-        return fail(reply_to, format!("'{}' скачан не полностью", req.name));
+        return fail(reply_to, format!("'{}' is not fully downloaded", req.name));
     }
     read_file(state, req.name, owner, reply_to);
 }
 
-/// Просит у файловой системы байты записи и запоминает, кому их отдать.
+/// Asks the file system for the bytes of the entry and remembers whom to hand
+/// them to.
 fn read_file(state: &mut State, name: String, owner: String, reply_to: String) {
-    // Недокачанное отсечено выше, значит файл лежит под своим именем.
+    // Partial downloads are cut off above, so the file lies under its own name.
     let path = crate::module::storage::file_path(&name);
-    // Внешний id вернём в ответе; собственный — это ключ ожидания, по нему
-    // же ответ и опознаётся как «открытие файла», а не чтение сидкара.
+    // The external id goes back in the answer; our own is the wait key, and by
+    // it the answer is recognized as a "file open" rather than a sidecar read.
     let correlation_id = state.pending_reads.begin(ReadPurpose::File(OpenFor {
         owner,
         reply_to,
@@ -76,15 +78,15 @@ fn read_file(state: &mut State, name: String, owner: String, reply_to: String) {
     crate::calls::fs::on_read(&FsReadRequest { path }, &correlation_id);
 }
 
-/// Кому уйдёт открытый ресурс и на какой запрос он отвечает.
+/// Who receives the opened resource and which request it answers.
 pub struct OpenFor {
     pub owner: String,
     pub reply_to: String,
 }
 
-/// fs открыл файл, который мы просили для заказчика (`target` — снятое с
-/// учёта ожидание, см. module::on_read_result). Владение уходит заказчику:
-/// дальше он читает ресурс как хочет и сам решает, когда закрыть.
+/// fs opened the file we requested for the caller (`target` is the settled
+/// wait, see module::on_read_result). Ownership goes to the caller: from now
+/// on it reads the resource as it likes and decides itself when to close.
 pub fn on_file_opened(target: OpenFor, opened: &ResourceOpened) {
     crate::emit::on_open_result(&resource::relay(opened, &target.owner), &target.reply_to);
 }
@@ -93,12 +95,12 @@ fn fail(correlation_id: String, error: String) {
     crate::emit::on_open_result(&resource::opened(Err(error)), &correlation_id);
 }
 
-/// Показать запись в файловом менеджере. Путь считаем мы: раскладка хранения
-/// наша и наружу не выходит, — а показывает платформа, потому что рабочий стол
-/// есть только у неё.
+/// Show the entry in the file manager. The path is computed by us: the storage
+/// layout is ours and does not leak out, while the showing is done by the
+/// platform, because only it has a desktop.
 ///
-/// Недокачанную показываем под её `.part`: это то, что на диске лежит на самом
-/// деле, и открывать вместо неё пустое место значило бы соврать.
+/// A partial one is shown under its `.part`: that is what actually lies on
+/// disk, and opening an empty place instead of it would be a lie.
 pub fn on_reveal(state: &mut State, req: ItemRequest) {
     if req.name.is_empty() { return; }
     crate::calls::app::on_reveal_path(&veldsdk::proto::app::RevealPath {

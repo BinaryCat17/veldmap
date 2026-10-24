@@ -1,62 +1,66 @@
-//! Земля: WGS84 и единственный переход от географических координат к
-//! декартовым.
+//! Earth: WGS84 and the single transition from geographic to Cartesian
+//! coordinates.
 //!
-//! Через него ходит всё, у чего есть место на Земле, — поверхность, сетка,
-//! камера, а дальше и контуры снимков. Второй такой формулы быть не должно:
-//! сойдясь на глаз, две разойдутся на десятки километров, и увидеть это можно
-//! будет только по съехавшему снимку.
+//! Everything that has a place on Earth goes through it: the surface, the grid,
+//! the camera, and further the scene footprints. There must not be a second
+//! such formula: two that agree by eye will drift apart by tens of kilometres,
+//! and that would only be visible by a shifted scene.
 //!
-//! ## Почему эллипсоид, а не шар
+//! ## Why the ellipsoid, not the sphere
 //!
-//! Широта в данных — **геодезическая**: угол между нормалью к эллипсоиду и
-//! плоскостью экватора. У шара нормаль выходит из центра, и та же самая широта
-//! означала бы другую точку: на 45° расхождение доходит до 0.19°, а это 21 км
-//! по поверхности — пятая часть плитки Sentinel-2 мимо. Шар не проще
-//! эллипсоида, он просто врёт в пятом знаке, и врёт там, где это видно.
+//! The latitude in the data is **geodetic**: the angle between the normal to
+//! the ellipsoid and the equator plane. On a sphere the normal comes out of the
+//! centre, and the same latitude would mean a different point: at 45° the
+//! divergence reaches 0.19°, which is 21 km along the surface — a fifth of a
+//! Sentinel-2 tile missed. The sphere is not simpler than the ellipsoid, it
+//! simply lies in the fifth digit, and it lies where it shows.
 //!
-//! ## Оси
+//! ## Axes
 //!
-//! Стандартные ECEF (EPSG:4978), в них же приходит геометрия извне: `X` — на
-//! пересечение экватора и Гринвича, `Y` — на 90° в.д., `Z` — на северный
-//! полюс. Своей системы у нас нет намеренно: чужая точка обязана попадать
-//! туда, где ей место, без поправочного знака где-то по дороге.
+//! Standard ECEF (EPSG:4978); external geometry arrives in the same axes: `X`
+//! — toward the intersection of the equator and Greenwich, `Y` — 90° east,
+//! `Z` — the north pole. Having a system of our own is deliberately avoided: a
+//! foreign point must land where it belongs, without a correction sign
+//! somewhere along the way.
 //!
-//! ## Единицы
+//! ## Units
 //!
-//! Наружу — мировые координаты в долях большой полуоси: `1.0` на экваторе.
-//! Масштаб равномерный по всем трём осям, поэтому форма сохраняется в точности;
-//! растянуть ось Z до шара значило бы ровно то искажение, ради которого всё это
-//! и заведено.
+//! Outward — world coordinates in fractions of the semi-major axis: `1.0` at
+//! the equator. The scale is uniform along all three axes, so the shape is
+//! preserved exactly; stretching the Z axis into a sphere would be exactly the
+//! distortion the whole thing is made to avoid.
 //!
-//! Считается всё в f64: на радиусе Земли шаг f32 — около 0.8 м, чего хватает
-//! вершине в буфере, но не хватает ни промежуточным величинам вроде радиуса
-//! кривизны, ни лучу, который потом переводят обратно в градусы. Поэтому f32
-//! здесь ровно один и на самом краю — [`position`].
+//! Everything is computed in f64: at the Earth radius an f32 step is about
+//! 0.8 m, enough for a vertex in the buffer, but enough neither for
+//! intermediate values like the radius of curvature, nor for a ray that is
+//! later converted back to degrees. So f32 appears here exactly once, at the
+//! very edge — [`position`].
 //!
-//! Носитель тройки — `glam::DVec3`, а не свой массив: покомпонентная запись по
-//! индексам 0/1/2 не даёт компилятору поймать опечатку в индексе, а ошибка эта
-//! тихая — поворот вокруг перепутанной оси остаётся поворотом, и тест на
-//! ортонормальность рамки его пропускает.
+//! The carrier of the triple is `glam::DVec3`, not a home-grown array:
+//! component-wise writing by indices 0/1/2 does not let the compiler catch a
+//! typo in an index, and that error is silent — a rotation about a mixed-up
+//! axis is still a rotation, and a frame orthonormality check passes it.
 
 use glam::{DVec3, Vec3};
 
-/// Большая полуось WGS84, метры.
+/// WGS84 semi-major axis, metres.
 pub const SEMI_MAJOR_M: f64 = 6_378_137.0;
 
-/// Сжатие WGS84. Полярный радиус меньше экваториального на 21 км — те самые
-/// 0.34%, из-за которых геодезическая широта не равна геоцентрической.
-/// Открыто соседям по модулю: проекции (projection.rs) обязаны считать на том
-/// же эллипсоиде — второй набор констант разошёлся бы с этим молча.
+/// WGS84 flattening. The polar radius is 21 km shorter than the equatorial —
+/// the very 0.34% that make geodetic latitude differ from geocentric.
+/// Open to the module's neighbours: the projections (projection.rs) must
+/// compute on the same ellipsoid — a second set of constants would silently
+/// diverge from this one.
 pub(crate) const FLATTENING: f64 = 1.0 / 298.257_223_563;
 
-/// Квадрат первого эксцентриситета, `e² = 2f − f²`.
+/// Square of the first eccentricity, `e² = 2f − f²`.
 const ECCENTRICITY_SQ: f64 = FLATTENING * (2.0 - FLATTENING);
 
-/// Точка в мировых координатах — тех, что уезжают в вершинный буфер.
+/// A point in world coordinates — the ones that go into the vertex buffer.
 pub type World = [f32; 3];
 
-/// Географические координаты. Широта геодезическая, высота — над эллипсоидом
-/// (не над уровнем моря: геоид мы не знаем и знать пока незачем).
+/// Geographic coordinates. Latitude is geodetic, height is above the ellipsoid
+/// (not above sea level: the geoid is unknown here and not needed so far).
 #[derive(Clone, Copy, PartialEq)]
 pub struct Geodetic {
     pub lat_deg: f64,
@@ -65,50 +69,54 @@ pub struct Geodetic {
 }
 
 impl Geodetic {
-    /// Точка на самой поверхности.
+    /// A point on the surface itself.
     pub fn surface(lat_deg: f64, lon_deg: f64) -> Self {
         Self { lat_deg, lon_deg, height_m: 0.0 }
     }
 }
 
-/// Точка эллипсоида в мировых координатах, f64 — тем, кто считает ею дальше:
-/// в вершинном буфере хватает f32, а лучу и обратному переходу к градусам —
-/// нет (см. [`intersect`]).
+/// The ellipsoid point in world coordinates, f64 for those who compute with it
+/// further: the vertex buffer is fine with f32, but the ray and the reverse
+/// transition to degrees are not (see [`intersect`]).
 pub fn world(point: Geodetic) -> DVec3 {
     let (sin_lon, cos_lon) = point.lon_deg.to_radians().sin_cos();
     parallel(point.lat_deg, point.height_m).at(sin_lon, cos_lon)
 }
 
-/// Всё в точке мира, что зависит от широты и высоты, но не от долготы.
+/// Everything at a world point that depends on latitude and height but not on
+/// longitude.
 ///
-/// Вынесено отдельно затем, что на одной параллели этого не меняется, а стои́т
-/// оно тригонометрии с корнем. Варп-сетка глобального растра лежит рядами по
-/// параллелям, и посчитанное на ряд разбирают все его узлы (см.
-/// `overlay::nodes_of`).
+/// Split out because on a single parallel it does not change, while it costs a
+/// trigonometry with a root. The warp mesh of the global raster lies in rows
+/// along parallels, and what is computed once per row is shared by all its
+/// nodes (see `overlay::nodes_of`).
 #[derive(Clone, Copy)]
 pub struct Parallel {
     sin_lat: f64,
     cos_lat: f64,
-    /// Радиусы вдоль экватора и вдоль оси вращения — с высотой и уже в долях
-    /// большой полуоси: в них мир и уезжает наружу (см. шапку модуля). Делится
-    /// это здесь, а не в [`Parallel::at`], чтобы на узел приходились одни
-    /// умножения: делений там было бы три, и они одни стоили бы дороже всего
-    /// остального в узле.
+    /// Radii along the equator and along the rotation axis — with height and
+    /// already in fractions of the semi-major axis: in them the world goes out
+    /// (see the module header). The division happens here and not in
+    /// [`Parallel::at`] so that each node gets only multiplications: there
+    /// would be three divisions, and they alone would cost more than everything
+    /// else in the node.
     equatorial: f64,
     polar: f64,
 }
 
-/// Разложить широту с высотой на то, чем потом разойдётся долгота.
+/// Split latitude with height into what the longitudes will then diverge by.
 pub fn parallel(lat_deg: f64, height_m: f64) -> Parallel {
     let (sin_lat, cos_lat) = lat_deg.to_radians().sin_cos();
 
-    // Радиус кривизны первого вертикала: расстояние от точки до оси вращения,
-    // отмеренное по нормали. Им эллипсоид и отличается от шара — у шара эта
-    // величина постоянна и равна радиусу, отчего широты и сходятся.
+    // Radius of curvature in the prime vertical: the distance from the point
+    // to the rotation axis, measured along the normal. This is exactly how the
+    // ellipsoid differs from the sphere — on a sphere this value is constant
+    // and equals the radius, which is why the latitudes converge.
     let curvature = SEMI_MAJOR_M / (1.0 - ECCENTRICITY_SQ * sin_lat * sin_lat).sqrt();
 
-    // Высота отсчитывается по нормали, поэтому прибавляется к обоим радиусам
-    // одинаково, а сами радиусы разные: вдоль оси вращения эллипсоид короче.
+    // Height is measured along the normal, so it is added to both radii
+    // equally, while the radii themselves differ: along the rotation axis the
+    // ellipsoid is shorter.
     Parallel {
         sin_lat,
         cos_lat,
@@ -118,89 +126,96 @@ pub fn parallel(lat_deg: f64, height_m: f64) -> Parallel {
 }
 
 impl Parallel {
-    /// Точка этой параллели на такой долготе — синус с косинусом её же.
+    /// The point of this parallel at that longitude — its sine with its cosine.
     ///
-    /// Долготой, разложенной заранее, а не градусами: у ряда варп-сетки долготы
-    /// повторяются столбец в столбец, и разложенные один раз они превращают
-    /// узел в три умножения.
+    /// By longitude split in advance, not by degrees: in a warp-mesh row the
+    /// longitudes repeat column after column, and split once they turn a node
+    /// into three multiplications.
     pub fn at(&self, sin_lon: f64, cos_lon: f64) -> DVec3 {
         DVec3::new(self.cos_lat * cos_lon, self.cos_lat * sin_lon, self.sin_lat)
             * DVec3::new(self.equatorial, self.equatorial, self.polar)
     }
 }
 
-/// То же в раскладке вершинного буфера.
+/// The same in the vertex-buffer layout.
 pub fn position(point: Geodetic) -> World {
     world(point).as_vec3().to_array()
 }
 
-/// Точка мира, разложенная на старшую и младшую половины.
+/// A world point split into the high and low halves.
 ///
-/// Одним `f32` точка поверхности хранится с шагом в восемьдесят сантиметров:
-/// координата у неё порядка единицы, а шаг такого числа — два в минус двадцать
-/// третьей, то есть восемь десятых метра на большой полуоси. На высоте десяти
-/// километров это шестая часть пикселя, на километре — уже три пикселя, и
-/// вершины начинают дрожать и слипаться.
+/// With a single `f32` a surface point is stored with a step of eighty
+/// centimetres: its coordinate is on the order of one, and the step of such a
+/// number is two to the minus twenty-third, that is eight tenths of a metre on
+/// the semi-major axis. At ten kilometres of height that is a sixth of a pixel,
+/// at one kilometre already three pixels, and vertices start to jitter and
+/// stick together.
 ///
-/// Пара половин снимает этот предел целиком: старшая — та же грубая, младшая —
-/// остаток от неё, и вместе они держат саму точку с шагом в сотые доли микрона.
-/// Работает это на том, что **разность двух близких чисел одного порядка в
-/// `f32` представима точно**: старшие половины вершины и глаза сокращаются без
-/// потерь, а младшие доносят подробность.
+/// A pair of halves removes that limit completely: the high one is the same
+/// coarse value, the low one is the remainder of it, and together they hold the
+/// point itself with steps of hundredths of a micron. This works because **the
+/// difference of two close numbers of the same order is exactly representable
+/// in `f32`**: the high halves of the vertex and the eye cancel without loss,
+/// and the low ones carry the detail.
 ///
-/// Точность **разности** после этого идёт от расстояния до глаза, а не от
-/// радиуса Земли, и она грубее точности хранения: на километре это полсотни
-/// микрон, на сотне метров — шесть. Две эти величины легко спутать, а разница
-/// между ними — три порядка.
+/// The accuracy of the **difference** then comes from the distance to the eye,
+/// not from the Earth radius, and it is coarser than the storage accuracy: at a
+/// kilometre it is fifty microns, at a hundred metres six. The two are easy to
+/// confuse, and they differ by three orders of magnitude.
 ///
-/// Такой парой едет всё, что рисуется, а вычитается она в шейдере — см.
-/// `relative` в globe.wgsl.
+/// Everything drawn rides on such a pair, and it is subtracted in the shader —
+/// see `relative` in globe.wgsl.
 pub fn parts(point: DVec3) -> (World, World) {
     let high = point.as_vec3();
     (high.to_array(), (point - high.as_dvec3()).as_vec3().to_array())
 }
 
-/// Смещение от одной такой точки к другой.
+/// The offset from one such point to another.
 ///
-/// По половинам порознь, а не по старшим: у соседних вершин контура старшие
-/// половины совпадают до последнего разряда, и одна их разность дала бы ноль
-/// там, где до соседа полсотни метров.
+/// Half by half, not by the high halves alone: at neighbouring outline
+/// vertices the high halves match to the last digit, and their difference alone
+/// would give zero where the neighbour is fifty metres away.
 pub fn offset(head: (World, World), tail: (World, World)) -> World {
     let high = Vec3::from(head.0) - Vec3::from(tail.0);
     let low = Vec3::from(head.1) - Vec3::from(tail.1);
     (high + low).to_array()
 }
 
-/// Где луч встречает поверхность, поднятую на `height_m`. `None` — мимо: за
-/// краем силуэта Земли нет.
+/// Where a ray meets the surface raised by `height_m`. `None` — a miss: past
+/// the limb there is no Earth.
 ///
-/// Высота — довод, а не умолчание, и обёртки с нулём здесь нет нарочно. Спросить
-/// про сам эллипсоид законно, но спрашивают отсюда, чтобы назвать место под
-/// курсором, а нарисовано оно не на эллипсоиде; вторая, короткая дверь звала бы
-/// ошибиться молча.
+/// The height is an argument, not a default, and there is deliberately no
+/// wrapper with zero here. Asking about the bare ellipsoid is legitimate, but
+/// it is asked from here to name the place under the cursor, and what is drawn
+/// there is not on the ellipsoid; a second, short door would invite a silent
+/// mistake.
 ///
-/// Спрашивают о поднятой, а не о самой поверхности потому, что видно под
-/// курсором не Землю, а то, что на ней нарисовано, — а нарисовано оно на выносе
-/// (`mesh::SURFACE_LIFT_M`). Пересеки луч эллипсоид, и ответ назвал бы место,
-/// отстоящее от увиденного тем сильнее, чем ближе к краю кадра.
+/// The raised surface is asked about, not the surface itself, because what is
+/// seen under the cursor is not the Earth but what is drawn on it — and it is
+/// drawn on the lift (`mesh::SURFACE_LIFT_M`). Had the ray intersected the
+/// ellipsoid, the answer would name a place standing off the seen one, the more
+/// the closer to the frame edge.
 ///
-/// Считается на шаре: сжатие эллипсоида — это сжатие одной оси, и, сжав вместе
-/// с ним луч, задачу сводим к пересечению со сферой. Иначе пришлось бы решать
-/// то же квадратное уравнение с тремя разными коэффициентами и с тем же
-/// ответом.
+/// Computed on a sphere: the flattening of the ellipsoid is the compression of
+/// a single axis, and by compressing the ray together with it the problem is
+/// reduced to a sphere intersection. Otherwise the same quadratic equation
+/// would have to be solved with three different coefficients and the same
+/// answer.
 ///
-/// Поднятая по нормали поверхность сферой в сжатом пространстве не становится:
-/// у полюса она отстоит от неё на `height_m·f/(1−f)`. На выносе это двадцать
-/// семь сантиметров — против сотен метров, которые эта поправка исправляет.
+/// A surface raised along the normal does not become a sphere in the compressed
+/// space: at the pole it stands off it by `height_m·f/(1−f)`. On the lift that
+/// is twenty-seven centimetres — against the hundreds of metres this correction
+/// fixes.
 ///
-/// Ещё одно следствие подъёма: сфера стала больше, и у самого лимба попадают
-/// лучи, проходящие мимо Земли, — полоской шириной `√(2h/R)`, около трёх
-/// десятых градуса, то есть тридцати километров по земле. Там ответ и без того
-/// ненадёжен: поверхность видна под скользящим углом, и один пиксель кадра
-/// накрывает эти километры целиком.
+/// Another consequence of the lift: the sphere grew larger, and right at the
+/// limb rays passing by the Earth do hit — a strip `√(2h/R)` wide, about three
+/// tenths of a degree, that is thirty kilometres on the ground. There the
+/// answer is unreliable anyway: the surface is seen at a grazing angle, and one
+/// frame pixel covers those kilometres completely.
 pub fn intersect_at(origin: DVec3, direction: DVec3, height_m: f64) -> Option<DVec3> {
-    // Полярная полуось короче экваториальной ровно на сжатие — во столько же
-    // растягиваем ось Z, чтобы эллипсоид стал шаром.
+    // The polar axis is shorter than the equatorial one by exactly the
+    // flattening — stretch the Z axis by the same factor to turn the ellipsoid
+    // into a sphere.
     let stretch = DVec3::new(1.0, 1.0, 1.0 / (1.0 - FLATTENING));
     let start = origin * stretch;
     let along = direction * stretch;
@@ -214,50 +229,55 @@ pub fn intersect_at(origin: DVec3, direction: DVec3, height_m: f64) -> Option<DV
         return None;
     }
 
-    // Ближний корень: дальний лежит на изнанке, и её не видно.
+    // The near root: the far one lies on the back side, which cannot be seen.
     let t = (-b - discriminant.sqrt()) / (2.0 * a);
     (t > 0.0).then(|| origin + direction * t)
 }
 
-/// Широта с долготой точки, лежащей **на поверхности**, — обратное к
-/// [`world`].
+/// Latitude with longitude of a point lying **on the surface** — the inverse
+/// of [`world`].
 ///
-/// Считается для точки на поверхности: у поднятой над ней широта отделяется от
-/// высоты лишь итерациями, потому что нормаль, вдоль которой отсчитана высота,
-/// зависит от самой широты. Спрашивают отсюда и про точку на выносе
-/// ([`intersect_at`]) — там ошибка выходит `h·e²·sinφ·cosφ/N`, то есть те же
-/// двадцать семь сантиметров, и итерации ради неё заводить незачем.
+/// Computed for a point on the surface: for one raised above it the latitude
+/// separates from the height only by iterations, because the normal along which
+/// the height is measured depends on the latitude itself. A point on the lift
+/// ([`intersect_at`]) is asked about here too — there the error comes out as
+/// `h·e²·sinφ·cosφ/N`, that is the same twenty-seven centimetres, and
+/// iterations are not worth starting for it.
 pub fn surface_at(point: DVec3) -> (f64, f64) {
-    // Нормаль к эллипсоиду наклонена круче радиуса-вектора ровно во столько
-    // раз, во сколько сжата полярная ось, — отсюда деление на (1 − e²). У шара
-    // множителя не было бы, и обе широты совпали бы.
+    // The ellipsoid normal is steeper than the radius vector by exactly the
+    // factor by which the polar axis is compressed — hence the division by
+    // (1 − e²). On a sphere the factor would be absent, and both latitudes
+    // would coincide.
     let lat = (point.z / ((1.0 - ECCENTRICITY_SQ) * point.x.hypot(point.y))).atan();
     (lat.to_degrees(), point.y.atan2(point.x).to_degrees())
 }
 
-/// Угол между двумя точками поверхности, градусы дуги. 1° — около 111 км.
+/// The angle between two surface points, degrees of arc. 1° is about 111 km.
 pub fn separation(from: (f64, f64), to: (f64, f64)) -> f64 {
     unit(from.0, from.1).dot(unit(to.0, to.1)).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
-/// Точка между двумя на поверхности: доля `t` пути от первой ко второй.
+/// A point between two on the surface: the fraction `t` of the way from the
+/// first to the second.
 ///
-/// По дуге, а не по прямой в широте с долготой, и разница не тонкая: у верхнего
-/// ребра гранулы Sentinel-1 EW GRDM (421 км на 73° с. ш.) середина дуги отстоит
-/// от середины «в градусах» на 13 км — это закреплено тестом ниже. Отход растёт
-/// как квадрат длины ребра.
+/// Along the arc, not along the straight line in latitude and longitude, and
+/// the difference is not subtle: on the top edge of a Sentinel-1 EW GRDM
+/// granule (421 km at 73° N) the arc midpoint stands 13 km off the "in
+/// degrees" midpoint. The deviation grows as the square of the edge length.
 ///
-/// Прямая в градусах это локсодрома, путь постоянного азимута, а спутник ведёт
-/// край съёмки кратчайшим. Четырьмя углами футпринта по-другому и не
-/// воспользоваться — между ними ничего, кроме поверхности, нет.
+/// A straight line in degrees is a loxodrome, a path of constant azimuth, while
+/// the satellite leads the imaging edge by the shortest one. With the four
+/// corners of a footprint there is no other way — between them there is nothing
+/// but the surface.
 ///
-/// Интерполируются нормали: у них те же углы, что у координат (см. [`unit`]),
-/// поэтому на концах ответ точен, а долгота остаётся в ветви первой точки —
-/// контур через антимеридиан не обязан рваться.
+/// The normals are interpolated: they have the same angles as the coordinates
+/// (see [`unit`]), so at the ends the answer is exact, and the longitude stays
+/// in the branch of the first point — a contour across the antimeridian is not
+/// obliged to break.
 pub fn between(from: (f64, f64), to: (f64, f64), t: f64) -> (f64, f64) {
-    // Концы отдаются как есть: обратный ход через асинус вернул бы их с
-    // точностью до последнего разряда, а стыки соседних ячеек обязаны сходиться
-    // в те же самые числа, из которых их и считали.
+    // The ends are handed out as they are: the return trip through an arcsine
+    // would give them only to the last digit, while the joins of neighbouring
+    // cells must come out on the very numbers they were computed from.
     if t <= 0.0 {
         return from;
     }
@@ -268,7 +288,8 @@ pub fn between(from: (f64, f64), to: (f64, f64), t: f64) -> (f64, f64) {
     let (a, b) = (unit(from.0, from.1), unit(to.0, to.1));
     let angle = a.dot(b).clamp(-1.0, 1.0).acos();
     let sin = angle.sin();
-    // Совпавшие точки: дуги между ними нет, а синус в знаменателе — ноль.
+    // Coincident points: there is no arc between them, and the sine in the
+    // denominator is zero.
     if sin.abs() < 1e-12 {
         return from;
     }
@@ -278,38 +299,41 @@ pub fn between(from: (f64, f64), to: (f64, f64), t: f64) -> (f64, f64) {
     (mid.z.asin().to_degrees(), unwind(from.1, mid.y.atan2(mid.x).to_degrees()))
 }
 
-/// Насколько разность долгот должна приблизиться к полному кругу, чтобы ребро
-/// считалось им. Глобальная сетка обводится краями вида −180,0125 → 179,9875,
-/// то есть на полпикселя не дотягивает до ровных 360°.
+/// How close a longitude difference must come to the full circle to count as
+/// one. The global grid is outlined with edges like −180.0125 → 179.9875, that
+/// is, half a pixel short of exact 360°.
 pub const FULL_CIRCLE_DEG: f64 = 359.0;
 
-/// Оборот долготы. Развороты двигают её на него, и всё, что считает сдвиги
-/// ветвей, обязано остаться его кратным — с точностью до последнего разряда:
-/// разность двух долгот округляется, и уложить её в оборот ровно удаётся не
-/// всегда. Считающий сдвиги округляет частное сам (см. `Grid::unwind`).
+/// One turn of longitude. Unwinds move it by this, and everything that counts
+/// branch shifts must stay a multiple of it — to the last digit: a difference
+/// of two longitudes is rounded, and fitting it into a turn does not always
+/// succeed exactly. The one that counts shifts rounds the quotient itself (see
+/// `Grid::unwind`).
 ///
-/// С допуском, которым узнаётся круг ([`FULL_CIRCLE_DEG`]), его путать нельзя:
-/// тот меряет, а этот считает.
+/// It must not be confused with the tolerance by which a circle is recognised
+/// ([`FULL_CIRCLE_DEG`]): that one measures, this one counts.
 pub const TURN_DEG: f64 = 360.0;
 
-/// Чем ведётся ребро контура.
+/// What a contour edge is drawn along.
 ///
-/// Решает это само ребро, и вопрос здесь не о вкусе. Край снимка, снятого
-/// полосой, идёт по поверхности кратчайшим путём — дугой большого круга. А у
-/// растра, лежащего в градусной сетке, края — это в точности параллели и
-/// меридианы, и дуга между их концами проходит мимо: у ребра вдоль параллели
-/// она срезает к полюсу, а у ребра в целых 360° вырождается вовсе, потому что
-/// концы его — одна и та же точка шара. Тогда от всего контура глобального
-/// продукта остаётся один меридиан.
+/// The edge itself decides this, and the question here is not about taste. The
+/// edge of a scene imaged as a strip runs along the surface by the shortest
+/// path — an arc of a great circle. But the edges of a raster lying in a degree
+/// grid are exactly parallels and meridians, and the arc between their ends
+/// passes by: for an edge along a parallel it cuts toward the pole, and for an
+/// edge of a whole 360° it degenerates altogether, because its ends are one and
+/// the same point of the sphere. Then of the whole contour of a global product
+/// one meridian would remain.
 ///
-/// Отличается одно от другого по самому ребру: у параллели совпадают широты
-/// концов, у меридиана — долготы. У полосы съёмки не совпадает ни то, ни другое:
-/// углы её лежат где придётся, и совпадение до последнего разряда там не
-/// случается.
+/// One is told from the other by the edge itself: a parallel has equal endpoint
+/// latitudes, a meridian equal longitudes. A imaging strip has neither: its
+/// corners lie wherever they happen to, and a match to the last digit never
+/// occurs there.
 ///
-/// Живёт здесь, а не у рисующего, потому что спрашивают об этом двое: рисующий
-/// (`outlines::edge`) и считающий попадание щелчком (data-browser, footprint.rs).
-/// Разойдись они — снимок очерчивался бы в одном месте, а выбирался в другом.
+/// It lives here and not with the drawer because two parties ask about it: the
+/// drawer (`outlines::edge`) and the one computing the click hit (data-browser,
+/// footprint.rs). Were they to disagree, a scene would be outlined in one place
+/// and selected in another.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Along {
     Parallel,
@@ -317,7 +341,7 @@ enum Along {
     Arc,
 }
 
-/// Чем ведётся ребро между этими углами.
+/// What the edge between these corners is drawn along.
 fn along(from: (f64, f64), to: (f64, f64)) -> Along {
     match (from.0 == to.0, from.1 == to.1) {
         (true, _) => Along::Parallel,
@@ -326,15 +350,15 @@ fn along(from: (f64, f64), to: (f64, f64)) -> Along {
     }
 }
 
-/// Насколько ребро проходит по долготе.
+/// How far an edge runs along the longitude.
 ///
-/// Короткую сторону через антимеридиан дуга выбирает сама, а у параллели
-/// выбирают за неё, и выбор этот один: полный круг остаётся кругом, всё
-/// прочее разворачивается к ближней ветви. Полный круг сворачивать нельзя —
-/// концы его одна и та же точка шара, и от контура остался бы меридиан; а не
-/// разворачивать прочее нельзя тем более: коробка в двадцать градусов поперёк
-/// шва записана как 170 → −170, и прочитанная буквально она обводится вокруг
-/// всей Земли.
+/// For a short side across the antimeridian the arc picks the way itself, while
+/// for a parallel it is picked for it, and the pick is one: a full circle stays
+/// a circle, everything else unfolds to the nearer branch. A full circle must
+/// not be folded — its ends are one and the same point of the sphere, and only
+/// a meridian would remain of the contour; and leaving the rest unfolded is
+/// even less possible: a box twenty degrees wide across the seam is written as
+/// 170 → −170, and read literally it would be outlined around the whole Earth.
 pub fn sweep(from: (f64, f64), to: (f64, f64)) -> f64 {
     match (to.1 - from.1).abs() >= FULL_CIRCLE_DEG {
         true => to.1 - from.1,
@@ -342,18 +366,20 @@ pub fn sweep(from: (f64, f64), to: (f64, f64)) -> f64 {
     }
 }
 
-/// Длина ребра в градусах — мера того, насколько густо его бить.
+/// Edge length in degrees — a measure of how densely to subdivide it.
 pub fn edge_span(from: (f64, f64), to: (f64, f64)) -> f64 {
     match along(from, to) {
-        // Длина параллели меряется не разностью долгот: у 70-й она вдвое
-        // короче экватора, и уплотнять её вдвое гуще незачем.
+        // The length of a parallel is not measured by the longitude difference:
+        // at the 70th it is half as short as the equator, and subdividing it
+        // twice as densely is pointless.
         Along::Parallel => sweep(from, to).abs() * from.0.to_radians().cos(),
         Along::Meridian => (to.0 - from.0).abs(),
         Along::Arc => separation(from, to),
     }
 }
 
-/// Точка ребра в доле `t` пути — тем же способом, каким это ребро ведут.
+/// A point of the edge at the fraction `t` of the way — by the same rule the
+/// edge is drawn by.
 pub fn edge_point(from: (f64, f64), to: (f64, f64), t: f64) -> (f64, f64) {
     match along(from, to) {
         Along::Parallel => (from.0, from.1 + sweep(from, to) * t),
@@ -362,17 +388,17 @@ pub fn edge_point(from: (f64, f64), to: (f64, f64), t: f64) -> (f64, f64) {
     }
 }
 
-/// Обходит ли кольцо Землю по долготе — то есть нет ли меридиана, свободного от
-/// него.
+/// Whether the ring goes around the Earth in longitude — that is, whether
+/// there is a meridian free of it.
 ///
-/// Спрашивают **уплотнённое** кольцо, то, которое рисуется: у пояса, записанного
-/// четырьмя вершинами, полный круг сидит в одном ребре, и по вершинам его не
-/// видно, а по ходу видно. Заодно поэтому признак не зависит от того, сколькими
-/// вершинами поставщик записал одну и ту же линию.
+/// The **densified** ring is asked about, the one that is drawn: in a belt
+/// written with four vertices the full circle sits in a single edge, invisible
+/// in the vertices but visible along the way. Hence too the flag does not
+/// depend on how many vertices the provider wrote the same line with.
 ///
-/// Считается наибольшим промежутком между соседними долготами: меридиан, в
-/// который кольцо не заходит, — это промежуток шире полукруга, и по нему шар
-/// можно разрезать. Нет такого — кольцо обошло Землю.
+/// Computed as the largest gap between neighbouring longitudes: a meridian the
+/// ring does not enter is a gap wider than a half-circle, and the sphere can be
+/// cut along it. If there is none, the ring has gone around the Earth.
 pub fn encircles(ring: &[(f64, f64)]) -> bool {
     if ring.len() < 2 {
         return false;
@@ -388,19 +414,19 @@ pub fn encircles(ring: &[(f64, f64)]) -> bool {
     widest < 180.0
 }
 
-/// Долгота в ту же ветвь, что у `base`: набор точек по одну сторону
-/// антимеридиана иначе разъезжается на пол-Земли — интерполяция между 179° и
-/// −179° прошла бы через ноль.
+/// Longitude into the same branch as `base`: otherwise a set of points on one
+/// side of the antimeridian slides half the world apart — interpolation between
+/// 179° and −179° would pass through zero.
 pub fn unwind(base: f64, lon_deg: f64) -> f64 {
-    // Сколько кругов снять, чтобы уложиться в полукруг от `base`, считается
-    // разом, а не вычитанием по кругу. Не ради скорости: вычитание по кругу над
-    // бесконечной долготой не кончается вовсе — `inf − 360` это по-прежнему
-    // `inf`, — и модуль повис бы на ней навсегда, а зависший модуль хост, в
-    // отличие от упавшего, не поднимает.
+    // How many turns to take off to fit into the half-circle from `base` is
+    // computed at once, not by subtracting turn by turn. Not for speed:
+    // subtracting turn by turn over an infinite longitude never ends at all —
+    // `inf − 360` is still `inf` — and the module would hang on it forever, and
+    // a hung host module, unlike a crashed one, is not brought back up.
     //
-    // Ровно полукруг остаётся на месте, и с обеих сторон: у глобального растра
-    // край записан как −180 → 180, и сдвинутый к ближней ветви он схлопнул бы
-    // растр в меридиан.
+    // Exactly a half-circle stays where it is, and from both sides: a global
+    // raster edge is written as −180 → 180, and shifted to the nearer branch it
+    // would collapse the raster into a meridian.
     let apart = lon_deg - base;
     let turns = if apart > 180.0 {
         ((apart - 180.0) / TURN_DEG).ceil()
@@ -412,326 +438,39 @@ pub fn unwind(base: f64, lon_deg: f64) -> f64 {
     lon_deg - turns * TURN_DEG
 }
 
-/// Единичная нормаль к эллипсоиду — она же местная вертикаль, она же то, чем
-/// освещается поверхность. У шара её заменяла бы сама позиция, у эллипсоида
-/// нет: направление из центра отклоняется от нормали на те же 0.19°.
+/// The unit normal to the ellipsoid — also the local vertical, also what the
+/// surface is lit by. On a sphere the position itself would take its place, on
+/// an ellipsoid it would not: the direction from the centre deviates from the
+/// normal by the same 0.19°.
 pub fn normal(lat_deg: f64, lon_deg: f64) -> World {
     unit(lat_deg, lon_deg).as_vec3().to_array()
 }
 
-/// Метры в мировые единицы — для величин, у которых нет своего места: высоты
-/// камеры, выноса сетки, плоскостей отсечения.
+/// Metres into world units — for values that have no place of their own: camera
+/// height, grid lift, clipping planes.
 pub fn metres(value: f64) -> f32 {
     (value / SEMI_MAJOR_M) as f32
 }
 
-/// Пара углов по единичному вектору — обратное к [`unit`]. Пара, а не
-/// `Geodetic`: что этот вектор значит, знает вызывающий, и высоты у него нет.
+/// A pair of angles from a unit vector — the inverse of [`unit`]. A pair, not
+/// `Geodetic`: what the vector means is known to the caller, and it has no
+/// height.
 ///
-/// Полюса здесь нет: у направления, в отличие от пары углов, он ничем не
-/// особенный — долгота на нём произвольна, и `atan2(0, 0)` отвечает нулём, что
-/// не хуже любого другого ответа (см. `camera::Camera`).
+/// There is no pole here: for a direction, unlike for a pair of angles, it is
+/// not special in any way — the longitude on it is arbitrary, and
+/// `atan2(0, 0)` answers zero, which is no worse than any other answer (see
+/// `camera::Camera`).
 pub fn angles(unit: DVec3) -> (f64, f64) {
     (unit.z.clamp(-1.0, 1.0).asin().to_degrees(), unit.y.atan2(unit.x).to_degrees())
 }
 
-/// Единичный вектор по паре углов. Что он значит, решает вызывающий: с
-/// геодезической широтой это нормаль к эллипсоиду, с геоцентрической —
-/// направление из центра. Формула у них одна, и это не совпадение — обе
-/// сферические, разойтись здесь нечему.
+/// A unit vector from a pair of angles. What it means is decided by the caller:
+/// with a geodetic latitude it is the normal to the ellipsoid, with a
+/// geocentric one the direction from the centre. The formula is one for both,
+/// and that is no coincidence — both are spherical, there is nothing here to
+/// diverge.
 pub fn unit(lat_deg: f64, lon_deg: f64) -> DVec3 {
     let (sin_lat, cos_lat) = lat_deg.to_radians().sin_cos();
     let (sin_lon, cos_lon) = lon_deg.to_radians().sin_cos();
     DVec3::new(cos_lat * cos_lon, cos_lat * sin_lon, sin_lat)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Полукруг остаётся на месте с обеих сторон: у глобального растра край
-    /// записан как −180 → 180, и сдвинутый к ближней ветви он схлопнул бы
-    /// растр в меридиан.
-    #[test]
-    fn a_half_turn_stays_where_it_is() {
-        assert_eq!(unwind(0.0, 180.0), 180.0);
-        assert_eq!(unwind(0.0, -180.0), -180.0);
-        // А целый оборот врозь — это одно и то же место, и оно сводится к опоре.
-        assert_eq!(unwind(180.0, -180.0), 180.0);
-        assert_eq!(unwind(-180.0, 180.0), -180.0);
-    }
-
-    /// Долгота ложится в полукруг от опоры, сколько бы оборотов до неё ни было,
-    /// и сдвиг остаётся кратным обороту — на этом держится счёт голосов у
-    /// решётки (`overlay::Grid::unwind`).
-    ///
-    /// Кратность с точностью до последнего разряда, а не ровная: разность двух
-    /// долгот округляется, и у дробной опоры частное отходит от целого на
-    /// единицу младшего разряда. Голоса считаются округлённым частным, и им
-    /// этого довольно.
-    #[test]
-    fn a_longitude_lands_within_a_half_turn_of_its_base() {
-        for base in [-179.0, 0.0, 37.0, 179.0, 900.0] {
-            let dense = [336.457_855_398_182_46, -157.459_371_577_220_8, 0.5];
-            for lon in [-1081.0, -359.0, -181.0, -180.0, -1.0, 0.0, 180.0, 181.0, 359.0, 1081.0]
-                .into_iter()
-                .chain(dense)
-            {
-                let near = unwind(base, lon);
-                assert!(
-                    (near - base).abs() <= 180.0,
-                    "опора {} и долгота {} дали {}",
-                    base, lon, near
-                );
-                let turns = (near - lon) / TURN_DEG;
-                assert!(
-                    (turns - turns.round()).abs() < 1.0e-9,
-                    "сдвиг {} не кратен обороту",
-                    near - lon
-                );
-            }
-        }
-    }
-
-    /// Бесконечная долгота разворот не подвешивает.
-    ///
-    /// Вычитание по кругу над ней не кончилось бы вовсе — `inf − 360` это
-    /// по-прежнему `inf`, — а зависший модуль хост, в отличие от упавшего, не
-    /// поднимает. Того же хватало и конечной долготе больше 3·10¹⁸: вычитание
-    /// перестаёт её менять.
-    ///
-    /// Ответ у бесконечной — не число, и это честно: она не место. А вот
-    /// конечное чудовище ответ получает, и обычный: 10³⁰⁰ садится на нулевой
-    /// меридиан, потому что оборотов в нём столько, что вычитание их схлопывает
-    /// его целиком. Отсеивать такое разворот не берётся — это дело того, кто
-    /// читает число из файла (`adapters::placed`).
-    #[test]
-    fn an_endless_longitude_does_not_hang_the_unwinding() {
-        assert!(unwind(0.0, f64::INFINITY).is_nan());
-        assert!(unwind(0.0, f64::NEG_INFINITY).is_nan());
-        assert!(unwind(0.0, f64::NAN).is_nan());
-        assert!(unwind(f64::INFINITY, 0.0).is_infinite());
-        assert_eq!(unwind(0.0, 1.0e300), 0.0, "конечное чудовище схлопывается в ноль");
-        assert_eq!(unwind(0.0, f64::MAX), 0.0);
-    }
-
-    /// Половины складываются обратно в ту же точку: младшая — остаток старшей,
-    /// а не вторая независимая координата. Разойдись они — и вершина уехала бы
-    /// туда, где её никто не ждёт.
-    #[test]
-    fn the_halves_add_back_up_to_the_point() {
-        let places = [
-            world(Geodetic::surface(45.0, 60.0)),
-            world(Geodetic::surface(-78.0, -179.0)),
-            world(Geodetic { lat_deg: 0.0, lon_deg: 0.0, height_m: 80_000_000.0 }),
-            DVec3::ZERO,
-        ];
-        for point in places {
-            let (high, low) = parts(point);
-            let back = Vec3::from(high).as_dvec3() + Vec3::from(low).as_dvec3();
-            let off_m = (back - point).length() * SEMI_MAJOR_M;
-            assert!(off_m < 1e-6, "{:?}: разошлись на {} м", point, off_m);
-        }
-    }
-
-    /// То, ради чего половины и заведены: сантиметр у поверхности одной старшей
-    /// половиной не виден вовсе — шаг `f32` там восемьдесят сантиметров, — а
-    /// парой виден точно.
-    #[test]
-    fn two_halves_tell_apart_what_one_half_cannot() {
-        let step_m = 0.01;
-        let here = world(Geodetic::surface(45.0, 60.0));
-        let there = here + DVec3::Z * (step_m / SEMI_MAJOR_M);
-
-        let (near, far) = (parts(here), parts(there));
-        assert_eq!(near.0, far.0, "одной старшей половиной сантиметра не видно");
-
-        let moved = f64::from(Vec3::from(offset(far, near)).length()) * SEMI_MAJOR_M;
-        assert!((moved - step_m).abs() < 1e-6, "{} м вместо {}", moved, step_m);
-    }
-
-    /// Смещение к соседу держит и сантиметр, и сотню метров — на всём разбеге,
-    /// какой бывает у звена контура. Одной старшей половиной ближний конец
-    /// этого разбега не берётся вовсе: её шаг — восемьдесят сантиметров, и
-    /// звено короче него схлопнулось бы в ноль, а лента — в линию.
-    #[test]
-    fn the_offset_keeps_what_one_half_would_drop() {
-        let here = world(Geodetic::surface(45.0, 60.0));
-        for step_m in [0.01, 0.1, 1.0, 100.0, 10_000.0] {
-            let there = here + DVec3::Z * (step_m / SEMI_MAJOR_M);
-            let step = Vec3::from(offset(parts(there), parts(here)));
-            let moved = f64::from(step.length()) * SEMI_MAJOR_M;
-            assert!((moved - step_m).abs() < 1e-4, "{} м вместо {}", moved, step_m);
-            // И сторона у смещения своя: длина одна и у обратного знака.
-            assert!(step.z > 0.0, "смещение смотрит не туда: {:?}", step);
-        }
-    }
-
-    /// `world` и `surface_at` — обратные друг другу на поверхности: точка,
-    /// уехавшая в декартовы и вернувшаяся, обязана назвать те же градусы.
-    /// Расхождение здесь — те самые «десятки километров», от которых модуль
-    /// и заведён одним.
-    #[test]
-    fn surface_roundtrip() {
-        for &(lat, lon) in &[(0.0, 0.0), (45.0, 60.0), (-33.9, 151.2), (78.0, -179.5)] {
-            let (back_lat, back_lon) = surface_at(world(Geodetic::surface(lat, lon)));
-            assert!((back_lat - lat).abs() < 1e-9, "{} → {}", lat, back_lat);
-            assert!((back_lon - lon).abs() < 1e-9, "{} → {}", lon, back_lon);
-        }
-    }
-
-    /// Эллипсоид, а не шар: на 45° точка поверхности заметно ниже, чем была бы
-    /// на сфере. Сожмись это в шар — тест поймает первым.
-    #[test]
-    fn flattening_is_real() {
-        let point = world(Geodetic::surface(45.0, 0.0));
-        assert!(point[2] < 45.0_f64.to_radians().sin() - 1e-4, "z = {}", point[2]);
-        // А на экваторе и полюсе — точные полуоси.
-        assert!((world(Geodetic::surface(0.0, 0.0))[0] - 1.0).abs() < 1e-12);
-        let polar = world(Geodetic::surface(90.0, 0.0))[2];
-        assert!(((1.0 - polar) * SEMI_MAJOR_M - 21_384.7).abs() < 1.0, "сжатие ~21.4 км: {}", polar);
-    }
-
-    /// Середина ребра лежит на дуге, а не на прямой в градусах, и на широте
-    /// гранулы Sentinel-1 между ними десяток километров.
-    ///
-    /// Числа настоящие: верхнее ребро гранулы EW GRDM — от северо-восточного
-    /// угла к северо-западному, 421 км.
-    #[test]
-    fn between_follows_the_arc_not_the_degrees() {
-        let (ne, nw) = ((73.395172, 2.707061), (74.523872, -10.408985));
-        let arc = between(ne, nw, 0.5);
-        let flat = ((ne.0 + nw.0) / 2.0, (ne.1 + nw.1) / 2.0);
-        let apart = separation(arc, flat).to_radians() * SEMI_MAJOR_M;
-        assert!((12_000.0..14_000.0).contains(&apart), "разошлись на {:.0} м", apart);
-        // Дуга проходит севернее: к полюсу от прямой в градусах.
-        assert!(arc.0 > flat.0, "{} против {}", arc.0, flat.0);
-
-        // Концы — те же числа, из которых их считали.
-        assert_eq!(between(ne, nw, 0.0), ne);
-        assert_eq!(between(ne, nw, 1.0), nw);
-    }
-
-    /// Через антимеридиан — короткой стороной и без разрыва в ветви: середина
-    /// между 179° и −179° это 180°, а не ноль.
-    #[test]
-    fn between_crosses_the_antimeridian_the_short_way() {
-        let (lat, lon) = between((10.0, 179.0), (10.0, -179.0), 0.5);
-        assert!((lon - 180.0).abs() < 1e-9, "{}", lon);
-        assert!(lat > 10.0, "дуга по эту сторону экватора идёт к полюсу: {}", lat);
-        assert!((separation((10.0, 179.0), (10.0, -179.0)) - 1.9696).abs() < 1e-3);
-    }
-
-    /// Ребро ведут так, как его назвали, — и это правило общее для рисующего,
-    /// обводящего и считающего попадание. Проверяется оно здесь, у самого
-    /// правила: следствиями его проверяют трое, и каждый из них поймал бы
-    /// поломку только своей ветки.
-    #[test]
-    fn an_edge_goes_the_way_it_is_named() {
-        // Равные широты — параллель: середина остаётся на той же широте, а не
-        // выгибается к полюсу, как это делает дуга.
-        let (west, east) = ((60.0, 10.0), (60.0, 30.0));
-        assert_eq!(edge_point(west, east, 0.5), (60.0, 20.0));
-        assert!(between(west, east, 0.5).0 > 60.0, "дуга обязана выгибаться");
-
-        // Равные долготы — меридиан: он и есть большой круг, поэтому ответ
-        // сходится с дугой, а широта идёт ровно.
-        let (south, north) = ((50.0, 10.0), (70.0, 10.0));
-        assert_eq!(edge_point(south, north, 0.5), (60.0, 10.0));
-
-        // Прочее — кратчайшая дуга, тем же ходом, что и у футпринта.
-        let (from, to) = ((73.395172, 2.707061), (74.523872, -10.408985));
-        assert_eq!(edge_point(from, to, 0.5), between(from, to, 0.5));
-    }
-
-    /// Концы ребра ложатся туда, где ребро назвали, — но у полного круга
-    /// дальний конец остаётся дальним.
-    ///
-    /// Точного равенства чисел тут нет и быть не может: `a + (b − a)` равно `b`
-    /// не всегда, а у полного круга конец нарочно отличается от начала на все
-    /// 360°, хотя место на шаре то же. Спрашивается поэтому место, а не число.
-    #[test]
-    fn every_kind_of_edge_lands_on_its_ends() {
-        let edges = [
-            ((60.0, 10.0), (60.0, 30.0)),    // параллель
-            ((50.0, 10.0), (70.0, 10.0)),    // меридиан
-            ((73.4, 2.7), (74.5, -10.4)),    // дуга
-            ((10.0, 179.0), (10.0, -179.0)), // параллель через шов
-            // Числа каталога, у которых `a + (b − a)` мимо `b` на последний
-            // разряд: ровные градусы такого не показывают.
-            ((-78.676191, 12.0), (1.323561, 12.0)),
-            ((43.0, -78.676191), (43.0, 1.323561)),
-        ];
-        for (from, to) in edges {
-            assert_eq!(edge_point(from, to, 0.0), from, "начало ребра {from:?} — {to:?}");
-            // Мера — сами координаты, а не `separation`: у той на сонаправленных
-            // точках свой пол в десяток сантиметров (`acos` возле единицы), и
-            // расхождение в последний разряд она бы не увидела.
-            let end = edge_point(from, to, 1.0);
-            let apart = (end.0 - to.0).abs() + (unwind(to.1, end.1) - to.1).abs();
-            assert!(apart < 1e-9, "конец ребра {from:?} — {to:?} уехал на {apart}°");
-        }
-
-        // А у полного круга конец — это тот же оборот, а не свёрнутое начало:
-        // свернув его, от пояса климатической сетки остался бы меридиан.
-        let (west, east) = ((80.0, -180.0125), (80.0, 179.9875));
-        assert_eq!(edge_point(west, east, 1.0).1, 179.9875);
-    }
-
-    /// Полный круг остаётся кругом, а коробка поперёк шва — коробкой.
-    ///
-    /// Разница между ними — в размахе долгот, и другого признака нет: и то и
-    /// другое записано парой чисел, у которых знак разный. Спутай их, и пояс
-    /// климатической сетки соберётся в меридиан, а коробка в двадцать градусов
-    /// обведётся вокруг всей Земли.
-    #[test]
-    fn a_full_circle_stays_a_circle_and_a_seam_takes_the_short_way() {
-        // Глобальная сетка обводится краями, которые на полпикселя не дотягивают
-        // до ровных 360° (см. `FULL_CIRCLE_DEG`).
-        let (west, east) = ((80.0, -180.0125), (80.0, 179.9875));
-        assert!((sweep(west, east) - 360.0).abs() < 0.05, "{}", sweep(west, east));
-        assert!((edge_point(west, east, 0.5).1 - 0.0).abs() < 0.05, "середина круга");
-
-        // А эта пара — не круг, а двадцать градусов поперёк шва.
-        let (from, to) = ((10.0, 170.0), (10.0, -170.0));
-        assert_eq!(sweep(from, to), 20.0);
-        assert_eq!(edge_point(from, to, 0.5), (10.0, 180.0));
-    }
-
-    /// Длина ребра меряется тем, сколько его на самом деле, а не разностью
-    /// координат: у 70-й параллели двадцать градусов долготы вдвое короче, чем у
-    /// экватора, и уплотнять её вдвое гуще незачем.
-    #[test]
-    fn an_edge_is_measured_by_the_way_it_goes() {
-        // Двадцать градусов долготы на 70-й параллели — это 6,84° дуги, а не
-        // двадцать: длина параллели короче экватора в косинус раз.
-        assert!((edge_span((70.0, 10.0), (70.0, 30.0)) - 6.8404).abs() < 1e-4);
-        // Меридиан — большой круг, и его двадцать градусов ими и остаются.
-        assert_eq!(edge_span((50.0, 10.0), (70.0, 10.0)), 20.0);
-        // У косого ребра мера — кратчайшая дуга: у верхнего ребра гранулы
-        // Sentinel-1 EW это 3,79°, то есть 421 км.
-        assert!((edge_span((73.395172, 2.707061), (74.523872, -10.408985)) - 3.7868).abs() < 1e-4);
-    }
-
-    /// Луч встречает поверхность там, где ей и положено, — и поднятую
-    /// встречает раньше ровно на её подъём. Второе и есть то, чем отвечают на
-    /// «куда я ткнул»: разойдись подъём с высотой, на которой рисуют, и ответ
-    /// назвал бы соседнее место.
-    #[test]
-    fn ray_hits_and_misses() {
-        // Взгляд с двух радиусов в центр: пересечение — подэкваторная точка.
-        let eye = DVec3::new(2.0, 0.0, 0.0);
-        let hit = intersect_at(eye, DVec3::NEG_X, 0.0).expect("луч в центр");
-        let (lat, lon) = surface_at(hit);
-        assert!(lat.abs() < 1e-9 && lon.abs() < 1e-9);
-        // Поднятая поверхность стои́т к глазу ближе ровно на свой подъём.
-        let raised = intersect_at(eye, DVec3::NEG_X, 1_000.0).expect("луч в центр");
-        let lifted = (raised.x - hit.x) * SEMI_MAJOR_M;
-        assert!((lifted - 1_000.0).abs() < 1.0, "подъём вышел в {} м", lifted);
-        // Луч вбок Земли не касается.
-        assert!(intersect_at(eye, DVec3::Y, 0.0).is_none());
-        // Поверхность за спиной — не пересечение.
-        assert!(intersect_at(eye, DVec3::X, 0.0).is_none());
-    }
-}
-

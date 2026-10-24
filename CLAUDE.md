@@ -1,77 +1,81 @@
-# Работа с проектом
+# Working on the project
 
-Памятка по процессу. Устройство проекта описано в [README.md](README.md) и в
-`docs/architecture/`, термины — в [docs/glossary.md](docs/glossary.md).
-Правка, сделанная без этого, разойдётся с архитектурой, а не с компилятором.
+A memo on the process. The design of the project is described in
+[README.md](README.md) and in `docs/architecture/`, the terms — in
+[docs/glossary.md](docs/glossary.md). An edit made without this will diverge
+from the architecture, not from the compiler.
 
-**Очередь работ — [docs/roadmap.md](docs/roadmap.md).** Шаг берётся целиком,
-со своей проверкой и своими страницами docs/; раздел «Чего не делать» там —
-граница, которую правка не переходит.
+**The work queue is [docs/roadmap.md](docs/roadmap.md).** A step is taken as a
+whole, with its own check and its own docs/ pages; the "What not to do" section
+there is the boundary that an edit does not cross.
 
-## Сборка и проверка
-
-```bash
-python3 buildgen/build.py          # единственная команда сборки и проверки
-python3 buildgen/run-native.py     # запуск
-```
-
-`build.py` без аргументов — релизная сборка, и именно ей проверяются любые
-правки: тесты buildgen, кодогенерация, все wasm-модули, хост, нативные
-юнит-тесты. Что она делает по шагам, как гонять тесты порознь и что значат два
-сообщения компилятора — [docs/operations/build.md](docs/operations/build.md).
-
-**Только эта команда.** `cargo build` и `cargo check` по отдельным крейтам
-пропускают кодогенерацию и собирают часть дерева: расхождение схемы и кода
-такая проверка не поймает. `--debug` добавлять не нужно.
-
-**Что покрыто тестами.** Юнит-тестами — чистая логика: функция над своими
-доводами либо пара функций, обязанных сойтись механически. Тесты живут в самих
-файлах (`#[cfg(test)]`) и бегут нативно на заглушках SDK; правка такой логики
-сопровождается тестом рядом. Величины по разные стороны провода сводятся
-общим файлом через wrap-крейт либо таблицей `buildgen/tests/test_wire_pairs.py`.
-Интерфейс — рендер, шина, ввод — проверяется только запуском: «сборка прошла»
-не значит «интерфейс работает». Повторяемая проверка запуском — прогон по
-сценарию, [docs/operations/ui-tests.md](docs/operations/ui-tests.md):
+## Build and check
 
 ```bash
-python3 buildgen/run-uitests.py            # все сценарии
-python3 buildgen/run-uitests.py tabs menus # названные
+python3 buildgen/build.py          # the single build and check command
+python3 buildgen/run-native.py     # run
 ```
 
-Держат ли тесты код, проверяется мутациями вручную: `buildgen/mutate.py`.
+`build.py` without arguments is the release build, and every edit is checked
+with exactly it: the buildgen tests, the code generation, all wasm modules, the
+host, the native unit tests. What it does step by step, how to run the tests
+individually and what the two compiler messages mean —
+[docs/operations/build.md](docs/operations/build.md).
 
-## Чего не делать
+**This command only.** `cargo build` and `cargo check` on individual crates skip
+the code generation and build part of the tree: such a check will not catch a
+divergence of the schema and the code. There is no need to add `--debug`.
 
-| Не делать | Почему |
+**What the tests cover.** Unit tests cover the pure logic: a function over its
+own arguments, or a pair of functions obliged to agree mechanically. The tests
+live in the files themselves (`#[cfg(test)]`) and run natively on the SDK
+stubs; an edit to such logic comes with a test next to it. Quantities on the
+different sides of the wire are reconciled by a shared file through a wrap
+crate, or by the `buildgen/tests/test_wire_pairs.py` table. The interface —
+rendering, the bus, the input — is checked only by running it: "the build
+passed" does not mean "the interface works". The repeatable run-based check is
+a scenario run, [docs/operations/ui-tests.md](docs/operations/ui-tests.md):
+
+```bash
+python3 buildgen/run-uitests.py            # all scenarios
+python3 buildgen/run-uitests.py tabs menus # the named ones
+```
+
+Whether the tests actually hold the code is checked manually with mutations:
+`buildgen/mutate.py`.
+
+## What not to do
+
+| Do not | Why |
 |---|---|
-| `build.py clean`, `cargo clean`, удаление `target/` или `generated/` | следующая сборка пойдёт с нуля — wasm, хост и нативные цели тестов — и это несравнимо дольше любой правки |
-| Менять `[profile.*]` в `veldcore/Cargo.toml` или rustflags в `veldcore/.cargo/config.toml` | меняет фингерпринт cargo — весь воркспейс пересобирается с нуля |
-| Запускать `cargo` вручную из другого каталога, чем каталог манифеста | toolchain и rustflags cargo ищет от cwd; из другого каталога получится другой фингерпринт и полная пересборка |
-| Править файлы в `*/generated/` | это вывод кодогенератора, перезаписывается при каждой сборке |
-| Заводить строковый топик в коде модуля | топики объявляются только в `schema.yaml`, обращение к ним — через `crate::emit::*` и `crate::calls::*` |
-| Класть секреты в `runtime/config/*.json` | конфиги в git; секреты подставляются как `${VAR}` из `.env` (он в `.gitignore`) |
-| Коммитить скачанное из `runtime/data/` | каталог в `.gitignore`, тестовые данные лежат локально |
+| `build.py clean`, `cargo clean`, deleting `target/` or `generated/` | the next build starts from scratch — wasm, host and the native test targets — and that is incomparably longer than any edit |
+| Change `[profile.*]` in `veldcore/Cargo.toml` or the rustflags in `veldcore/.cargo/config.toml` | it changes the cargo fingerprint — the whole workspace is rebuilt from scratch |
+| Run `cargo` by hand from a directory other than the manifest directory | cargo looks for the toolchain and rustflags from the cwd; from another directory you get a different fingerprint and a full rebuild |
+| Edit files under `*/generated/` | that is the code generator output, overwritten on every build |
+| Introduce a string topic in a module's code | topics are declared only in `schema.yaml`; they are accessed through `crate::emit::*` and `crate::calls::*` |
+| Put secrets into `runtime/config/*.json` | the configs are in git; secrets are substituted as `${VAR}` from `.env` (which is in `.gitignore`) |
+| Commit anything downloaded under `runtime/data/` | the directory is in `.gitignore`, the test data lives locally |
 
-## Диагностика
+## Diagnostics
 
-Логи каждого запуска лежат в `runtime/logs/`: `host.log` — то же, что в
-консоли, `trace.log` — полный поток. Счётчики производительности и правила их
-чтения — [docs/operations/diagnostics.md](docs/operations/diagnostics.md).
+The logs of every run lie in `runtime/logs/`: `host.log` is the same as the
+console, `trace.log` is the full stream. The performance counters and the rules
+for reading them — [docs/operations/diagnostics.md](docs/operations/diagnostics.md).
 
-## Стиль
+## Style
 
-Комментарии в коде на русском, объясняют смысл и устройство, а не
-пересказывают строчку ниже; правила —
-[ADR 0001](docs/decisions/0001-documentation-and-comments.md). Именование,
-плотность комментариев и структуру файла держите такими же, как в соседнем
-коде.
+Code comments are written in Russian; they explain the meaning and the design,
+not the line below; the rules are in
+[ADR 0001](docs/decisions/0001-documentation-and-comments.md). Keep the
+naming, the comment density and the file structure the same as in the
+neighbouring code.
 
-**Никакой истории.** Комментарий описывает код, каким он есть, а не путь,
-которым он таким стал: «раньше было X, теперь Y», «переехало», «вернули как
-было» удаляются, а не дописываются — код меняется, а такая запись остаётся и
-начинает врать; что было раньше, помнит `git log`. Исключение одно: если
-старое решение объясняет живое ограничение — почему нельзя сделать очевидным
-способом, — причина остаётся, но в настоящем времени и как правило, а не как
-хроника. Проверка простая: если убрать упоминание прошлого, комментарий
-перестаёт что-либо запрещать или объяснять — значит это была история. То же
-относится к README.md и к этому файлу.
+**No history at all.** A comment describes the code as it is, not the path by
+which it became so: "it used to be X, now it is Y", "moved here", "restored as
+it was" get deleted rather than appended — the code changes while such a note
+stays and starts to lie; what was before is remembered by `git log`. There is
+one exception: if an old decision explains a live constraint — why the obvious
+way is not allowed — the reason stays, but in the present tense and as a rule,
+not as a chronicle. The check is simple: if mentioning the past is removed and
+the comment stops forbidding or explaining anything — that was history. The
+same applies to README.md and to this file.

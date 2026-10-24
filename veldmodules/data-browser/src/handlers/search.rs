@@ -1,16 +1,18 @@
-//! Поиск по каталогу: запрос и приём найденного.
+//! Catalog search: the query and receiving what is found.
 //!
-//! Контуров здесь нет: рисует шар не то, что нашлось, а то, что отметили, — и
-//! сводит это в набор `handlers::outline`. Выдача с ним связана одним
-//! правилом: ушедший из неё продукт уносит с собой и отметку, и наложение —
-//! отмечать и показывать нечего то, чего в списке больше нет.
+//! No outlines here: the globe draws not what was found but what was marked —
+//! and gathers them into a set (`handlers::outline`). The results are tied to it
+//! by one rule: a product that leaves the results takes with it both the mark and
+//! the overlay — there is nothing to mark or show for what is no longer in the
+//! list.
 
 use crate::module::state::search::{Cloud, Mission, Period};
 use crate::module::state::{State, ViewId, ViewKind};
 use crate::proto::data_provider::{SearchRequest, SearchResponse};
 
-/// Набранное в поле запроса. Сам запрос отсюда не уходит: искать на каждую
-/// букву значит слать в сеть десяток запросов на одно слово.
+/// Text typed into the query field. The query itself does not leave from here:
+/// searching on every letter would mean sending a dozen network requests for one
+/// word.
 pub fn on_query(state: &mut State, view: ViewId, query: String) {
     let Some(search) = state.search_mut(view) else { return };
     search.query = query;
@@ -19,26 +21,28 @@ pub fn on_query(state: &mut State, view: ViewId, query: String) {
 pub fn on_mission(state: &mut State, view: ViewId, mission: Mission) {
     let Some(search) = state.search_mut(view) else { return };
     search.mission = mission;
-    // Радар про облачность не спрашивают, и его чипа на полосе нет — а
-    // оставшийся от прошлой миссии потолок обнулил бы выдачу молча, потому что
-    // условие по облачности отбирает снимки, у которых атрибут есть.
+    // Radar is not asked about cloud cover, and its chip is absent from the bar —
+    // while a ceiling left over from a previous mission would silently zero the
+    // results, because the cloud condition selects snapshots that carry the
+    // attribute.
     //
-    // Снятый потолок называется вслух: чип вместе с ним уходит с полосы, и по
-    // экрану не видно ни того, что он был, ни того, что выдача от этого стала
-    // шире.
+    // The removed ceiling is stated out loud: the chip leaves the bar along with
+    // it, and the screen shows neither that it was there nor that the results
+    // became wider because of it.
     let dropped = !mission.clouded() && search.cloud != Cloud::default();
     if !mission.clouded() {
         search.cloud = Cloud::default();
     }
     if dropped {
-        state.notice = Some("Потолок облачности снят: у этой миссии её не измеряют".to_string());
+        state.notice = Some("Cloud cover ceiling removed: this mission does not measure it".to_string());
     }
     state.refine(view);
     run(state, view);
 }
 
-/// Край своего интервала. Запрос отсюда не уходит: дату набирают по знаку, и
-/// спрашивать каталог на каждый было бы то же, что искать на каждую букву.
+/// Edge of the custom interval. The query does not leave from here: a date is
+/// typed character by character, and asking the catalog on each would be the
+/// same as searching on every letter.
 pub fn on_from(state: &mut State, view: ViewId, value: String) {
     let Some(search) = state.search_mut(view) else { return };
     search.from = value;
@@ -63,12 +67,12 @@ pub fn on_cloud(state: &mut State, view: ViewId, cloud: Cloud) {
     run(state, view);
 }
 
-/// Спросить каталог.
+/// Ask the catalog.
 ///
-/// Страница сбрасывается здесь, а не только у чипов отбора: выдача меняется
-/// целиком, и «страница 3» относилась бы к прошлой. Иначе Enter в поле имени
-/// или в поле даты открывает новый ответ на старой странице — а это чужая
-/// страница чужого списка (см. `ListingState::page`).
+/// The page is reset here, not only at the filter chips: the results change
+/// entirely, and "page 3" would refer to the previous ones. Otherwise Enter in
+/// the name field or in a date field opens a new answer on an old page — a
+/// foreign page of a foreign list (see `ListingState::page`).
 pub fn run(state: &mut State, view: ViewId) {
     state.refine(view);
     let now = crate::module::components::format::now();
@@ -77,8 +81,8 @@ pub fn run(state: &mut State, view: ViewId) {
     let request = SearchRequest {
         mission: search.mission.collection().to_string(),
         name: search.query.clone(),
-        // Область контракт принимает, но задать её пока нечем: под неё нужна
-        // рамка на шаре, а её в интерфейсе нет.
+        // The contract accepts an area, but there is nothing to set it with yet:
+        // it needs a frame on the globe, and the interface has none.
         area: None,
         from,
         to,
@@ -92,8 +96,8 @@ pub fn run(state: &mut State, view: ViewId) {
     crate::calls::data_provider::on_search(&request, &correlation_id);
 }
 
-/// Результат поиска. Чей он — знает таблица маршрутов; свой устаревший
-/// (запрос успели сменить) отбрасываем так же, как чужой.
+/// Search result. The routing table knows whose it is; a stale one of ours (the
+/// query has been changed meanwhile) is dropped just like a foreign one.
 pub fn on_search_result(
     state: &mut State,
     response: SearchResponse,
@@ -113,28 +117,31 @@ pub fn on_search_result(
         search.error = None;
         search.results = response.products;
     }
-    // Раскрытое принадлежало прошлой выдаче: продукты в ней другие, и файлы
-    // под их строками — тоже. Свернуть надо и сами строки: раскрытая с пустым
-    // содержимым выглядит как снимок без файлов.
+    // What was expanded belonged to the previous results: the products in them
+    // are different, and so are the files under their rows. The rows themselves
+    // must collapse too: one expanded with empty contents looks like a snapshot
+    // without files.
     search.children.clear();
     search.listing.expanded.clear();
 
     survivors(state, view);
 }
 
-/// Что пережило новую выдачу.
+/// What survived the new results.
 ///
-/// Выбор и наложение — своё у этого списка: ушедший из выдачи продукт уносит
-/// коробочку, которой в нём больше нет, и снимок с шара, положенный из него же.
-/// Действует это только на своё: показанному из каталога чужая выдача не указ.
+/// Selection and overlay belong to this list: a product that leaves the results
+/// takes with it the checkbox that is no longer in it, and the snapshot on the
+/// globe placed from it. This applies only to one's own: a foreign result has no
+/// say over what is shown from the catalog.
 ///
-/// Контуры не трогаются вовсе: они одни на приложение, а не на список
-/// (см. handlers::outline), геометрия их уже под рукой, и новая выдача поиска
-/// про них ничего не говорит.
+/// Outlines are not touched at all: they belong to the application, not to the
+/// list (see handlers::outline), their geometry is already at hand, and a new
+/// search result says nothing about them.
 ///
-/// И только когда выдача есть. Отказ каталога — это отсутствие ответа, а не
-/// пустой ответ: продукт от сетевой ошибки никуда не делся, и снимать из-за неё
-/// то, что человек положил на шар руками, значит терять его работу.
+/// And only when there are results. A catalog failure is the absence of an
+/// answer, not an empty one: the product has not gone anywhere due to a network
+/// error, and taking down what a person placed on the globe by hand because of it
+/// would mean losing their work.
 fn survivors(state: &mut State, view: ViewId) {
     let alive: std::collections::HashSet<String> = {
         let Some(ViewKind::Search(search)) = state.get(view) else { return };
@@ -151,24 +158,25 @@ fn survivors(state: &mut State, view: ViewId) {
     super::outline::refresh(state);
 }
 
-/// Вкладка-источник закрывается: её выбор уходит вместе с ней — он часть
-/// списка, и другого носителя у него нет. Наложение из её выдачи уходит по
-/// тому же правилу (см. overlay::source_closed). Контуры остаются: они не
-/// принадлежат вкладке.
+/// The source tab is closing: its selection leaves along with it — it is part of
+/// the list, and it has no other carrier. The overlay from its results leaves by
+/// the same rule (see overlay::source_closed). Outlines stay: they do not belong
+/// to the tab.
 pub fn on_source_closed(state: &mut State, id: ViewId) {
     super::overlay::source_closed(state, id);
     super::outline::refresh(state);
 }
 
-/// Наложить растры снимка из выдачи названного поиска. `false` — этот вид не
-/// поиск или продукта в его выдаче нет; тогда его восстанавливает по ключу
-/// провайдер (см. overlay::on_toggle_pressed).
+/// Overlay the rasters of a snapshot from the named search's results. `false` —
+/// this view is not a search or the product is not in its results; then the
+/// provider restores it by key (see overlay::on_toggle_pressed).
 ///
-/// Именно названного, а не активного: строку могли нажать в той половине
-/// экрана, что не под рукой, и продукт искать надо в её выдаче.
+/// Exactly the named one, not the active one: the row could have been pressed in
+/// the half of the screen that is not at hand, and the product must be looked up
+/// in that half's results.
 ///
-/// Камеры это не касается: показ её не двигает вовсе — наводит отдельное
-/// нажатие (`outline::focus`), и это разные намерения (см.
+/// The camera is not affected: showing does not move it at all — a separate press
+/// aims it (`outline::focus`), and these are different intentions (see
 /// `overlay::on_toggle_pressed`).
 pub fn show(state: &mut State, view: ViewId, identifier: &str) -> bool {
     let Some(search) = state.search_mut(view) else { return false };
@@ -181,9 +189,9 @@ pub fn show(state: &mut State, view: ViewId, identifier: &str) -> bool {
         return false;
     };
 
-    // Наложение растров пробуем и без геометрии: честный ответ «нет растров»
-    // придёт от провайдера, а место снимка при пустом контуре просто не будет
-    // помечено — помечать его нечем.
+    // We try overlaying the rasters even without geometry: an honest "no rasters"
+    // answer will come from the provider, while the snapshot's place with an empty
+    // outline simply stays unmarked — there is nothing to mark it with.
     super::overlay::show(state, &product, Some(view));
     true
 }

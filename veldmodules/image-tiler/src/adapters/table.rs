@@ -1,13 +1,13 @@
-//! Таблица уровней источника: как обслуживается каждый уровень, чего он стоит
-//! и влезает ли в память. Одна на описание и производство: она же строками
-//! уезжает на провод (`Described.levels`), и по ней же `adapters::produce`
-//! выбирает рукав — правило записано один раз.
+//! Source level table: how each level is served, what it costs, and whether
+//! it fits in memory. One table for both description and production: it
+//! travels over the wire as rows (`Described.levels`), and `adapters::produce`
+//! picks the arm by it — the rule is written down once.
 //!
-//! Строки считаются по заголовку, без пикселей: у TIFF, JPEG 2000 и NetCDF по
-//! сетке чанков (`Grid::footprint`), у остальных по кадру и правилам их
-//! декодеров. Пик — `budget::Peak`, столбец «влезает» — его сверка со
-//! свободным вместе с потолком пути, если у пути он свой: `FULL_DECODE_BUDGET`
-//! у кадра целиком.
+//! Rows are computed from the header, without pixels: for TIFF, JPEG 2000 and
+//! NetCDF from the chunk grid (`Grid::footprint`), for the rest from the frame
+//! and their decoder rules. The peak is `budget::Peak`; the "fits" column is
+//! its check against the free memory along with the path ceiling, if the path
+//! has one of its own: `FULL_DECODE_BUDGET` for a whole frame.
 
 use super::super::budget::Peak;
 use super::super::cascade;
@@ -15,33 +15,34 @@ use super::super::pyramid;
 use super::grid::Overview;
 use super::{frame_fits, jpeg, Info, Kind, Tie};
 
-/// Как уровень обслуживается.
+/// How a level is served.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Serve {
-    /// Точечно: читаются только чанки под заказанными тайлами.
+    /// Pointwise: only the chunks under the requested tiles are read.
     Pointwise,
-    /// Проходом, который начинается на уровне `from` и строит каскадом его и
-    /// все грубее. Ноль — вся пирамида одним проходом; сам уровень — декодер
-    /// отдаёт кадр сразу в его масштаб, и за подробным приходят новым проходом.
+    /// With a pass that starts at level `from` and builds it and every coarser
+    /// level via the cascade. Zero — the whole pyramid in one pass; the level
+    /// itself — the decoder delivers the frame straight at its scale, and
+    /// finer detail comes in a new pass.
     Pass { from: u32 },
 }
 
-/// Строка таблицы — один уровень пирамиды.
+/// A table row — one pyramid level.
 #[derive(Clone, Debug)]
 pub struct Level {
     pub serve: Serve,
-    /// Чего стоит чтение: пикселей источника, распакованных ради одного тайла
-    /// (точечно) либо за весь проход (растр целиком).
+    /// Reading cost: source pixels decoded for a single tile (pointwise) or
+    /// for the whole pass (the entire raster).
     pub pixels: u64,
-    /// Пик памяти работы на этом уровне — именованными слагаемыми.
+    /// Memory peak of the work at this level — as named components.
     pub peak: Peak,
-    /// Влезает ли работа в память: пик против свободного вместе с потолком
-    /// пути, если у пути он свой.
+    /// Whether the work fits in memory: the peak against free memory along
+    /// with the path ceiling, if the path has one of its own.
     pub fits: bool,
 }
 
 impl Info {
-    /// Таблица уровней, от нулевого к вершине.
+    /// The level table, from level zero to the top.
     pub fn levels(&self) -> Vec<Level> {
         let base = (self.width, self.height);
         let whole = u64::from(self.width) * u64::from(self.height);
@@ -50,10 +51,11 @@ impl Info {
             .map(|level| {
                 let lw = pyramid::level_size(self.width, level);
                 let lh = pyramid::level_size(self.height, level);
-                // Сетка чанков — точечно, где окно и правда окно, иначе проходом.
+                // Chunk grid — pointwise where the window is a real window,
+                // otherwise with a pass.
                 let chunked = |grid: &super::grid::Grid| match grid.footprint(base, level) {
                     Some(footprint) => {
-                        let peak = grid.direct_peak(base, level).expect("уровень точечный");
+                        let peak = grid.direct_peak(base, level).expect("pointwise level");
                         Level { serve: Serve::Pointwise, pixels: footprint.held, fits: peak.fits(), peak }
                     }
                     None => {
@@ -64,31 +66,31 @@ impl Info {
                 match &self.kind {
                     Kind::Tiff(layout) => chunked(&layout.grid),
                     Kind::Jp2(layout) => chunked(&layout.grid),
-                    // Окна строк во всю ширину — сетка без копий, как полосный TIFF.
+                    // Full-width row windows — a grid without copies, like a stripped TIFF.
                     Kind::Netcdf(layout) => chunked(&layout.grid),
-                    // Потоковый PNG: строка и полосы каскада.
+                    // Streaming PNG: a row and the cascade bands.
                     Kind::Png { interlaced: false } => {
                         let peak = Peak::new()
-                            .with("строка", u64::from(self.width) * 4)
-                            .with("каскад", cascade::bytes(self.width, self.height));
+                            .with("row", u64::from(self.width) * 4)
+                            .with("cascade", cascade::bytes(self.width, self.height));
                         pass(peak.clone(), peak.fits())
                     }
-                    // Кадр целиком: декодированный и он же в RGBA.
+                    // Whole frame: decoded and again in RGBA.
                     Kind::Png { interlaced: true } | Kind::Full(_) => {
                         let peak = Peak::new()
-                            .with("кадр", whole * 4 * 2)
-                            .with("каскад", cascade::bytes(self.width, self.height));
+                            .with("frame", whole * 4 * 2)
+                            .with("cascade", cascade::bytes(self.width, self.height));
                         pass(peak.clone(), frame_fits(self.width, self.height) && peak.fits())
                     }
-                    // Кадр в масштабе декодера, приведённый к сетке уровня.
+                    // Frame at the decoder scale, brought to the level grid.
                     Kind::Jpeg => {
                         let (dw, dh) = jpeg::decoded_size(self.width, self.height, level);
                         let decoded = u64::from(dw) * u64::from(dh);
                         let peak = Peak::new()
-                            .with("сырой кадр", decoded * 3)
-                            .with("кадр", decoded * 4)
-                            .with("уровень", u64::from(lw) * u64::from(lh) * 4)
-                            .with("каскад", cascade::bytes(lw, lh));
+                            .with("raw frame", decoded * 3)
+                            .with("frame", decoded * 4)
+                            .with("level", u64::from(lw) * u64::from(lh) * 4)
+                            .with("cascade", cascade::bytes(lw, lh));
                         Level {
                             serve: Serve::Pass { from: level },
                             pixels: whole,
@@ -101,30 +103,30 @@ impl Info {
             .collect()
     }
 
-    /// Строка уровня; `None` — уровня у пирамиды нет.
+    /// The row of a level; `None` — the pyramid has no such level.
     pub fn level(&self, level: u32) -> Option<Level> {
         self.levels().into_iter().nth(level as usize)
     }
 
-    /// Сколько уровней от нулевого читаются точечно — длина точечного начала
-    /// таблицы.
+    /// How many levels from zero are read pointwise — the length of the
+    /// pointwise prefix of the table.
     pub fn windowed(&self) -> u32 {
         self.levels().iter().take_while(|row| row.serve == Serve::Pointwise).count() as u32
     }
 
-    /// Предел детали: первый уровень, который влезает. Не влезает ни один —
-    /// вершина; такой источник описание не отдаёт (`adapters::checked`), и
-    /// ответ здесь — на случай таблицы, посчитанной мимо описания. Потребитель
-    /// считает то же по строкам провода (`tiles::Meta::finest`).
+    /// Detail limit: the first level that fits. If none fits — the top; such
+    /// a source is not described (`adapters::checked`), and the answer here is
+    /// for a table computed outside the description. The consumer computes the
+    /// same from the wire rows (`tiles::Meta::finest`).
     pub fn finest(&self) -> u32 {
         let rows = self.levels();
         let top = rows.len().saturating_sub(1) as u32;
         rows.iter().position(|row| row.fits).map_or(top, |at| at as u32)
     }
 
-    /// Сколько памяти держит сам разбор, пока лежит в memo: узлы привязки и
-    /// сетка копий. Слагаемое пика соседней работы
-    /// (`module::State::neighbour_footprint`).
+    /// How much memory the parsing itself holds while it sits in the memo:
+    /// tie points and the copy grid. A component of the neighbouring work
+    /// peak (`module::State::neighbour_footprint`).
     pub fn footprint(&self) -> u64 {
         let ties = (self.ties.len() * std::mem::size_of::<Tie>()) as u64;
         let kind = match &self.kind {
@@ -133,189 +135,5 @@ impl Info {
             Kind::Netcdf(_) | Kind::Png { .. } | Kind::Jpeg | Kind::Full(_) => 0,
         };
         ties + kind
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::super::budget;
-    use super::super::super::pyramid::TILE;
-    use hdf5_pure::DType;
-
-    use super::super::codec::Format;
-    use super::super::jp2;
-    use super::super::netcdf;
-    use super::super::tiff::Layout;
-    use super::*;
-
-    /// TCI гранулы Sentinel-2 как JPEG 2000: 10980², тайлы 1024², пять
-    /// разрешений (ADR 0002).
-    fn tci() -> Info {
-        let codestream = jp2::Codestream {
-            canvas: (10980, 10980),
-            origin: (0, 0),
-            tile: (1024, 1024),
-            tile_origin: (0, 0),
-            components: 3,
-            precision: 8,
-            resolutions: 5,
-            progression: 0,
-            layers: 1,
-            tlm_parts: Some(121),
-            plt_first: Some(true),
-        };
-        Info::plain(10980, 10980, Kind::Jp2(jp2::Layout::of(&codestream, 130 << 20, Format::Jp2, Some(0.0), None)))
-    }
-
-    /// Байт на пиксель RGB8 — таблице геометрии глубина сэмпла безразлична.
-    const RGB8: u32 = 3;
-
-    /// Величина 450×4172 f32 одним чанком — окно строк ростом с плоскость;
-    /// форма и тип как у гранулы Sentinel-5P уровня 2, чанкование — фикстуры.
-    fn s5p() -> Info {
-        Info::plain(450, 4172, Kind::Netcdf(netcdf::Layout::of(450, 4172, 4172, DType::F32)))
-    }
-
-    /// Полосный TIFF без копий, как пишет GDAL гранулу Sentinel-1 GRD без
-    /// внутренних тайлов: полоса в одну строку во всю ширину.
-    fn stripped(width: u32, height: u32) -> Info {
-        Info::plain(width, height, Kind::Tiff(Layout::of(false, (width, 1), Vec::new(), RGB8)))
-    }
-
-    /// Тайловый TIFF с полной цепочкой копий-половин.
-    fn cog(width: u32, height: u32) -> Info {
-        let overviews = (1..pyramid::level_count(width, height))
-            .map(|level| Overview {
-                image: level as usize,
-                width: pyramid::level_size(width, level),
-                height: pyramid::level_size(height, level),
-                chunk: (TILE, TILE),
-            })
-            .collect();
-        Info::plain(width, height, Kind::Tiff(Layout::of(true, (TILE, TILE), overviews, RGB8)))
-    }
-
-    /// На настоящих размерах всё, что читается точечно или проходом, влезает
-    /// на каждом уровне, и предел детали у таких — родное разрешение; а
-    /// декодер кадра целиком влезает не везде, и таблица это говорит.
-    ///
-    /// Размеры настоящие: Sentinel-1 GRD полосный и он же COG, Landsat 7,
-    /// квиклук, TCI Sentinel-2 как JPEG 2000 — тайлами кодстрима.
-    #[test]
-    fn настоящие_размеры_влезают_по_таблице() {
-        let sources = [
-            stripped(25309, 17408),
-            cog(25309, 17408),
-            cog(8271, 8391),
-            Info::plain(2422, 1940, Kind::Png { interlaced: false }),
-            tci(),
-        ];
-        for info in &sources {
-            let rows = info.levels();
-            assert_eq!(rows.len() as u32, pyramid::level_count(info.width, info.height));
-            for (level, row) in rows.iter().enumerate() {
-                assert!(
-                    row.fits && row.peak.total() <= budget::free(),
-                    "{}×{} уровень {}: {}", info.width, info.height, level, row.peak.note()
-                );
-            }
-            assert_eq!(info.finest(), 0, "{}×{}", info.width, info.height);
-        }
-
-        // Каждый уровень TCI — точечно из своей копии либо из самой мелкой
-        // (вершине копии не достаётся: разрешений пять, уровней шесть).
-        assert!(tci().levels().iter().all(|row| row.serve == Serve::Pointwise));
-    }
-
-    /// Столбец обслуживания у четырёх родов источника: точечно везде (COG), на
-    /// части уровней (полосный — точечное начало ровно по длине окна), проходом
-    /// с нулевого на всех (PNG), проходом со своего уровня на каждом (JPEG).
-    #[test]
-    fn столбец_обслуживания_различает_четыре_рода_источника() {
-        let exact = cog(4 * TILE, 4 * TILE);
-        assert_eq!(exact.windowed(), exact.levels().len() as u32);
-
-        let strips = stripped(25309, 17408);
-        let rows = strips.levels();
-        let prefix = rows.iter().take_while(|row| row.serve == Serve::Pointwise).count() as u32;
-        assert!(prefix > 0 && prefix < rows.len() as u32, "окно на части уровней: {prefix}");
-        assert_eq!(strips.windowed(), prefix);
-        assert!(rows[prefix as usize..].iter().all(|row| row.serve == Serve::Pass { from: 0 }));
-
-        let png = Info::plain(2048, 2048, Kind::Png { interlaced: false });
-        assert_eq!(png.windowed(), 0);
-        assert!(png.levels().iter().all(|row| row.serve == Serve::Pass { from: 0 }));
-
-        let jpeg = Info::plain(2048, 2048, Kind::Jpeg);
-        assert!(jpeg.levels().iter().enumerate().all(|(at, row)| row.serve == Serve::Pass { from: at as u32 }));
-    }
-
-    /// Предел детали — первый влезающий уровень: у JPEG во весь TCI — первый,
-    /// чей кадр в масштабе декодера влезает в потолок кадра; у точечных COG и
-    /// TCI как JPEG 2000 — нулевой.
-    #[test]
-    fn предел_детали_это_первый_влезающий_уровень() {
-        assert_eq!(tci().finest(), 0);
-
-        let jpeg = Info::plain(10980, 10980, Kind::Jpeg);
-        let finest = jpeg.finest();
-        assert!(finest > 0, "кадр 10980² в RGBA больше потолка кадра");
-        assert!(!jpeg.level(finest - 1).unwrap().fits && jpeg.level(finest).unwrap().fits);
-
-        assert_eq!(cog(25309, 17408).finest(), 0);
-    }
-
-    /// Вырожденная сетка — чанк мельче [`grid::MIN_CHUNK_PIXELS`] — читается
-    /// только проходом: так лежит квиклук PVI Sentinel-2 (8×8), и точечное
-    /// чтение платило бы за вызов декодера на каждые 64 пикселя.
-    #[test]
-    fn вырожденная_сетка_идёт_проходом() {
-        let pvi = Info::plain(343, 343, Kind::Tiff(Layout::of(true, (8, 8), Vec::new(), RGB8)));
-        assert!(pvi.levels().iter().all(|row| row.serve == Serve::Pass { from: 0 }));
-
-        // А полоса в одну строку во всю ширину сеткой не вырождена: она
-        // крупнее порога, и нулевой уровень читается точечно.
-        assert_eq!(stripped(25309, 17408).level(0).unwrap().serve, Serve::Pointwise);
-    }
-
-    /// Разбор соседа весит столько, сколько держит: узлы привязки и копии;
-    /// отсчётов не держит никто, и раскладка NetCDF весит как раскладка.
-    #[test]
-    fn след_разбора_считается_по_тому_что_он_держит() {
-        assert_eq!(Info::plain(64, 64, Kind::Jpeg).footprint(), 0);
-        let mut tiff = cog(4096, 4096);
-        tiff.ties = (0..441).map(|_| Tie { px: 0.0, py: 0.0, lat: 0.0, lon: 0.0 }).collect();
-        assert!(tiff.footprint() >= 441 * 32, "узлы привязки не посчитаны");
-        assert_eq!(s5p().footprint(), 0, "раскладка величины отсчётов не держит");
-    }
-
-    /// Величина NetCDF по окнам строк: величины формы S5P и SYNERGY, в
-    /// фикстуре записанные одним чанком во всю высоту, — окно ростом с плоскость,
-    /// и нулевой уровень у них точечный ценой всей плоскости; у гранулы OLCI,
-    /// чанкованной по строкам, нулевой уровень стои́т двух окон — двух третей
-    /// плоскости, и таблица говорит это честно, — а грубые идут проходом с
-    /// нулевого, как у полосного TIFF.
-    ///
-    /// Размеры настоящие: S5P CO 4172×450 f32, SYNERGY AOD 4022×324 f32,
-    /// OLCI LRR GIFAPAR 1217×15076 u8 чанками файла по 5026 строк.
-    #[test]
-    fn величина_netcdf_обслуживается_по_сетке_окон_строк() {
-        for info in [s5p(), Info::plain(4022, 324, Kind::Netcdf(netcdf::Layout::of(4022, 324, 324, DType::F32)))] {
-            let rows = info.levels();
-            let whole = u64::from(info.width) * u64::from(info.height);
-            assert_eq!(rows[0].serve, Serve::Pointwise, "{}×{}", info.width, info.height);
-            assert_eq!(rows[0].pixels, whole, "окно и есть плоскость — тайл стои́т её целиком");
-            assert!(rows.iter().all(|row| row.fits));
-            assert_eq!(info.finest(), 0);
-        }
-
-        let olci = Info::plain(1217, 15076, Kind::Netcdf(netcdf::Layout::of(1217, 15076, 5026, DType::U8)));
-        let rows = olci.levels();
-        assert_eq!(rows[0].serve, Serve::Pointwise);
-        assert_eq!(rows[0].pixels, 2 * 5026 * 1217, "тайл нулевого уровня стои́т двух окон");
-        assert!(rows[0].pixels < u64::from(olci.width) * u64::from(olci.height), "но не плоскости");
-        assert_eq!(olci.windowed(), 5, "точечно 0–4");
-        assert_eq!(rows[5].serve, Serve::Pass { from: 0 }, "вершина — проходом с нулевого");
-        assert!(rows.iter().all(|row| row.fits));
     }
 }

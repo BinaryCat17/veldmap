@@ -1,60 +1,60 @@
-//! components/arrange.rs — что и в каком порядке показывать.
+//! components/arrange.rs — what to show and in what order.
 //!
-//! Отбор, сортировка, страница и группировка — в одном месте и без единого
-//! виджета: это правила, а не оформление, и проверяются они по данным, а не
-//! глазами. Разметка получает уже готовый список строк (см. `table`).
+//! Filtering, sorting, paging, and grouping live in one place without a single
+//! widget: these are rules, not presentation, and they are checked against
+//! data, not by eye. The layout receives a ready-made list of rows (see `table`).
 
 use crate::module::components::{format, last_segment, Row};
 use crate::module::state::listing::{Filter, Grouping, ListingState};
 
-/// Сколько записей на странице. Число фиксированное, а не выведенное из высоты
-/// окна: страница, меняющая состав при изменении размера окна, теряет место, на
-/// котором стоял пользователь.
+/// How many entries fit on a page. The number is fixed, not derived from the
+/// window height: a page whose content changes on window resize loses the spot
+/// the user was standing on.
 pub const PAGE_SIZE: usize = 20;
 
-/// Строка таблицы после группировки.
+/// A table row after grouping.
 pub enum Line<'a> {
-    /// Заголовок группы: папка и сколько в ней показано.
+    /// Group header: the folder and how many of its entries are shown.
     Group { title: String, meta: String, depth: usize },
     Entry { row: &'a Row, depth: usize },
-    /// Раскрытая папка, чьё содержимое ещё едет. Своя строка, а не поддельная
-    /// запись: у записи есть ключ, род и действия, а у ожидания нет ничего,
-    /// кроме места, которое оно занимает.
+    /// An expanded folder whose content is still on its way. A row of its own,
+    /// not a fake entry: an entry has a key, a kind, and actions, while a wait
+    /// has nothing but the space it occupies.
     Waiting { depth: usize },
 }
 
-/// Готовый к показу список и всё, что нужно знать о его страницах.
+/// The list ready for display, along with everything to know about its pages.
 pub struct Arranged<'a> {
     pub lines: Vec<Line<'a>>,
-    /// Сколько записей прошло отбор — по нему подписан диапазон страницы.
+    /// How many entries passed the filter — the page range label is based on it.
     pub total: usize,
     pub pages: usize,
-    /// Страница, которая показана: та, что просили, но не дальше последней.
+    /// The page being shown: the one requested, but no further than the last.
     pub page: usize,
-    /// Сколько записей в каждом состоянии (по `Filter::ALL`) — счётчики меню
-    /// отбора. Считаются до отбора: иначе «Все» показывало бы столько же,
-    /// сколько выбранное.
+    /// How many entries sit in each state (per `Filter::ALL`) — the filter
+    /// menu counters. Counted before filtering: otherwise "All" would show the
+    /// same number as the selected state.
     pub counts: Vec<usize>,
 }
 
 impl Arranged<'_> {
-    /// «1–20 из 36». Пустой список — пустая подпись: диапазона у него нет.
+    /// "1–20 of 36". An empty list gets an empty label: it has no range.
     pub fn range(&self) -> String {
         if self.total == 0 {
             return String::new();
         }
         let from = self.page * PAGE_SIZE + 1;
         let to = ((self.page + 1) * PAGE_SIZE).min(self.total);
-        format!("{}–{} из {}", from, to, self.total)
+        format!("{}–{} of {}", from, to, self.total)
     }
 
-    /// Строки, показанные на этой странице, — вместе с раскрытыми подстроками.
-    /// Заголовки групп сюда не идут: они не строки, а подписи над ними.
+    /// The rows shown on this page, expanded subrows included. Group headers
+    /// are not here: they are labels above the rows, not rows themselves.
     ///
-    /// По ним отвечают на всякий вопрос «что видно»: какие колонки завести,
-    /// что отметит коробочка в шапке, отмечено ли уже всё. Второго ответа на
-    /// этот вопрос нет намеренно — разойдясь, колонка и её содержимое
-    /// показывали бы разное.
+    /// They answer every "what is visible" question: which columns to set up,
+    /// what the header checkbox will mark, whether everything is already
+    /// marked. There is deliberately no second answer to this question — were
+    /// they to diverge, the column and its content would show different things.
     pub fn shown(&self) -> impl Iterator<Item = &Row> {
         self.lines.iter().filter_map(|line| match line {
             Line::Entry { row, .. } => Some(*row),
@@ -62,21 +62,22 @@ impl Arranged<'_> {
         })
     }
 
-    /// Строки этой страницы, которые можно выбрать, — ровно то, на что
-    /// действует коробочка в шапке.
+    /// The rows of this page that can be chosen — exactly what the header
+    /// checkbox acts on.
     ///
-    /// Страница, а не весь отбор: коробочка стои́т над видимым, и отмечать ею
-    /// сотню строк, которых на экране нет, значило бы заодно спросить у
-    /// каталога сотню продуктов — по одному на контур.
+    /// The page, not the whole filter: the checkbox stands above the visible
+    /// area, and marking a hundred rows that are not on screen would also mean
+    /// asking the catalogue for a hundred products — one per footprint.
     ///
-    /// Строками, а не ключами: за выбором стои́т ещё и род строки (снимок или
-    /// файл сам по себе), и восстанавливать его по одному ключу было бы нечем.
+    /// Rows, not keys: a choice also carries the row kind (a snapshot or a file
+    /// on its own), and it could not be restored from a single key.
     pub fn marks(&self) -> impl Iterator<Item = &Row> {
         self.shown().filter(|row| row.choosable())
     }
 
-    /// Отмечено ли всё, что видно. Отмечать нечего — не отмечено: коробочка
-    /// тогда предлагает отметить, а нажатие ничего не меняет.
+    /// Whether everything visible is marked. Nothing to mark counts as not
+    /// marked: the checkbox then offers to mark, and pressing it changes
+    /// nothing.
     pub fn all_marked(&self, listing: &ListingState) -> bool {
         let mut marks = self.marks().peekable();
         marks.peek().is_some()
@@ -84,12 +85,12 @@ impl Arranged<'_> {
     }
 }
 
-/// Строки, прошедшие отбор, в порядке показа.
+/// The rows that passed the filter, in display order.
 ///
-/// Общее начало у показа и у всякого действия над списком целиком: «отметить
-/// всё» отмечает ровно то, что видно, а переход к строке ищет её страницу в
-/// том же порядке. Вторая копия этого отбора разошлась бы с первой ровно там,
-/// где это заметнее всего.
+/// A shared start for the display and for every action over the whole list:
+/// "mark all" marks exactly what is visible, and navigating to a row looks up
+/// its page in the same order. A second copy of this filter would diverge from
+/// the first exactly where it shows the most.
 pub fn filtered<'a>(rows: &'a [Row], listing: &ListingState) -> Vec<&'a Row> {
     let query = listing.query.to_lowercase();
     let mut passing: Vec<&Row> =
@@ -98,8 +99,8 @@ pub fn filtered<'a>(rows: &'a [Row], listing: &ListingState) -> Vec<&'a Row> {
     passing
 }
 
-/// На какой странице стоит строка с этим ключом. `None` — под отбор она не
-/// подошла, и вести к ней некуда.
+/// Which page the row with this key stands on. `None` — the row did not pass
+/// the filter, and there is nowhere to lead to it.
 pub fn page_of(rows: &[Row], listing: &ListingState, key: &str) -> Option<usize> {
     let at = filtered(rows, listing).iter().position(|row| row.named(key))?;
     Some(at / PAGE_SIZE)
@@ -108,8 +109,9 @@ pub fn page_of(rows: &[Row], listing: &ListingState, key: &str) -> Option<usize>
 pub fn arrange<'a>(rows: &'a [Row], listing: &ListingState) -> Arranged<'a> {
     use crate::module::state::listing::Choice;
 
-    // Счётчики меню считаются до отбора по состоянию, но после отбора по
-    // имени: «Все» иначе показывало бы столько же, сколько выбранное.
+    // The menu counters are computed before filtering by state but after
+    // filtering by name: otherwise "All" would show the same number as the
+    // selected state.
     let query = listing.query.to_lowercase();
     let counts = Filter::ALL
         .iter()
@@ -129,17 +131,18 @@ pub fn arrange<'a>(rows: &'a [Row], listing: &ListingState) -> Arranged<'a> {
     Arranged { lines: group(shown, listing), total, pages, page, counts }
 }
 
-/// Проходит ли строка отбор: набранным именем и названным состоянием.
+/// Whether a row passes the filter: by the typed name and the named state.
 ///
-/// Одно правило на показ и на счётчики меню — они считаются тем же отбором, но
-/// каждый со своим состоянием (см. [`arrange`]), — а два выражения одного и
-/// того же однажды написали бы в меню не то число, что стои́т в списке.
+/// One rule for the display and for the menu counters — they are computed by
+/// the same filter, each with its own state (see [`arrange`]) — while two
+/// phrasings of the same thing would one day write a number into the menu that
+/// differs from the list.
 fn passes(row: &Row, query: &str, filter: Filter) -> bool {
     matches_query(row, query) && filter.matches(&row.status)
 }
 
-/// Отбор по имени — по вхождению, без учёта регистра: пользователь помнит
-/// кусок имени, а не его начало. `query` уже в нижнем регистре.
+/// The name filter matches by substring, case-insensitive: the user remembers
+/// a piece of the name, not its beginning. `query` is already lowercase.
 fn matches_query(row: &Row, query: &str) -> bool {
     query.is_empty() || row.title.to_lowercase().contains(query)
 }
@@ -147,9 +150,9 @@ fn matches_query(row: &Row, query: &str) -> bool {
 fn sort(rows: &mut [&Row], listing: &ListingState) {
     use crate::module::state::listing::Sorting;
     rows.sort_by(|left, right| {
-        // При группировке порядок папок старше любого выбранного: иначе строки
-        // одной папки расходятся, и заголовок над ними открывается по разу на
-        // каждую.
+        // Under grouping, folder order outranks any selected order: otherwise
+        // rows of one folder spread apart, and the header above them opens once
+        // for each.
         let by_folder = match listing.grouping {
             Grouping::None => std::cmp::Ordering::Equal,
             _ => left.folder().cmp(right.folder()),
@@ -162,10 +165,11 @@ fn sort(rows: &mut [&Row], listing: &ListingState) {
     });
 }
 
-/// Раскладывает записи по группам. Обе группировки — один и тот же обход: у
-/// «по папкам» ступенька одна (вся папка целиком), у «дерева» их столько,
-/// сколько сегментов в пути. Заголовок открывается там, где путь разошёлся с
-/// предыдущим, — строки к этому моменту уже стоят по папкам (см. `sort`).
+/// Lays the entries out into groups. Both groupings are one and the same walk:
+/// "by folder" has a single step (the whole folder at once), "tree" has as many
+/// as there are segments in the path. A header opens where the path diverges
+/// from the previous one — the rows already stand by folder by then (see
+/// `sort`).
 fn group<'a>(rows: Vec<&'a Row>, listing: &ListingState) -> Vec<Line<'a>> {
     let grouping = listing.grouping;
     if grouping == Grouping::None {
@@ -177,9 +181,9 @@ fn group<'a>(rows: Vec<&'a Row>, listing: &ListingState) -> Vec<Line<'a>> {
         return lines;
     }
 
-    // Пути считаются один раз на строку: их сравнивают и с предыдущей строкой,
-    // и со всеми следующими — пересчитывать их на каждое сравнение значит
-    // разбирать один и тот же путь десяток раз.
+    // Paths are computed once per row: they are compared both against the
+    // previous row and against all the following ones — recomputing them for
+    // every comparison would parse the same path a dozen times over.
     let paths: Vec<Vec<&str>> = rows.iter().map(|row| segments(row.folder(), grouping)).collect();
 
     let mut lines = Vec::new();
@@ -191,11 +195,11 @@ fn group<'a>(rows: Vec<&'a Row>, listing: &ListingState) -> Vec<Line<'a>> {
         };
 
         for (depth, segment) in path.iter().enumerate().skip(common) {
-            // Счётчик — только у самой глубокой ступени: у промежуточных он
-            // считал бы не показанное здесь, а всё поддерево.
+            // The counter sits only on the deepest step: on intermediate ones
+            // it would count the whole subtree, not what is shown here.
             let meta = if depth + 1 == path.len() {
                 let same = paths[index..].iter().take_while(|other| *other == path).count();
-                format!("{} {}", same, format::plural(same, ["файл", "файла", "файлов"]))
+                format!("{} {}", same, format::plural(same, ["file", "files", "files"]))
             } else {
                 String::new()
             };
@@ -208,22 +212,24 @@ fn group<'a>(rows: Vec<&'a Row>, listing: &ListingState) -> Vec<Line<'a>> {
     lines
 }
 
-/// Содержимое раскрытой строки — подстроками под ней. Ступенькой глубже, тем
-/// же `Line::Entry`: подстрока это такая же строка, и рисовать её отдельным
-/// родом значило бы завести вторую таблицу.
+/// The content of an expanded row — as subrows under it. One step deeper, the
+/// same `Line::Entry`: a subrow is a row like any other, and drawing it as a
+/// separate kind would mean a second table.
 ///
-/// Вглубь, а не на один ярус: раскрытая папка внутри раскрытой — обычное дело,
-/// и второго правила для неё нет.
+/// All the way down, not one level: an expanded folder inside an expanded one
+/// is routine, and there is no second rule for it.
 ///
-/// Отбор и сортировка их не касаются: содержимое показывает состав строки, а
-/// не участвует в списке наравне с ней — иначе «показано 20 из 36» считало бы
-/// разное в зависимости от того, что раскрыто.
+/// Filtering and sorting do not reach them: the content shows what the row is
+/// made of rather than taking part in the list alongside it — otherwise
+/// "showing 20 of 36" would count different things depending on what is
+/// expanded.
 fn expand<'a>(row: &'a Row, listing: &ListingState, depth: usize, lines: &mut Vec<Line<'a>>) {
     if !listing.expanded.contains(row.key()) {
         return;
     }
-    // Ответ ещё в пути — так и сказано. Пустое место под раскрытой папкой
-    // читается как «здесь ничего нет», а это неправда ровно до конца листинга.
+    // The answer is still on its way — and it says so. Empty space under an
+    // expanded folder reads as "there is nothing here", which is untrue right
+    // up to the end of the listing.
     if row.loading {
         lines.push(Line::Waiting { depth: depth + 1 });
     }
@@ -233,189 +239,18 @@ fn expand<'a>(row: &'a Row, listing: &ListingState, depth: usize, lines: &mut Ve
     }
 }
 
-/// Ступени, которые открывает эта папка.
+/// The steps this folder opens.
 fn segments(folder: &str, grouping: Grouping) -> Vec<&str> {
     match grouping {
-        // Заголовком названа сама папка, а путь к ней не показан: он одинаков
-        // у всех строк вида и места в заголовке не стоит. У строк корня папки
-        // нет вовсе — им и заголовка не открывается.
+        // The header is named after the folder itself, with no path shown: the
+        // path is the same for every row of the kind and does not earn space in
+        // the header. Root rows have no folder at all — no header opens for
+        // them.
         Grouping::Folder => match last_segment(folder) {
             "" => Vec::new(),
             name => vec![name],
         },
         Grouping::Tree => folder.split('/').filter(|name| !name.is_empty()).collect(),
         Grouping::None => Vec::new(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::module::components::{RowKind, RowStatus};
-    use crate::module::state::listing::{Chosen, Sorting};
-
-    fn folder(key: &str, children: Vec<Row>) -> Row {
-        Row {
-            children,
-            ..Row::container_row(
-                key.to_string(),
-                key.to_string(),
-                RowStatus::Remote,
-                RowKind::Folder,
-            )
-        }
-    }
-
-    fn file(key: &str) -> Row {
-        Row::container_row(
-            key.to_string(),
-            key.to_string(),
-            RowStatus::Complete,
-            RowKind::File,
-        )
-    }
-
-    fn snapshot(key: &str) -> Row {
-        Row::container_row(
-            key.to_string(),
-            key.to_string(),
-            RowStatus::Remote,
-            RowKind::Product { folder: true },
-        )
-    }
-
-    fn depths(arranged: &Arranged<'_>) -> Vec<usize> {
-        arranged
-            .lines
-            .iter()
-            .map(|line| match line {
-                Line::Entry { depth, .. }
-                | Line::Group { depth, .. }
-                | Line::Waiting { depth } => *depth,
-            })
-            .collect()
-    }
-
-    /// Раскрытая папка внутри раскрытой показывается вглубь, ступенькой на
-    /// каждый ярус: второго правила для вложенности нет.
-    #[test]
-    fn expansion_goes_all_the_way_down() {
-        let rows = vec![folder("a/", vec![folder("a/b/", vec![folder("a/b/c/", Vec::new())])])];
-        let mut listing = ListingState::default();
-        listing.expanded.insert("a/".to_string());
-        listing.expanded.insert("a/b/".to_string());
-
-        assert_eq!(depths(&arrange(&rows, &listing)), vec![0, 1, 2]);
-
-        // Свёрнутая молчит о своём содержимом, даже когда оно уже приехало.
-        listing.expanded.remove("a/b/");
-        assert_eq!(depths(&arrange(&rows, &listing)), vec![0, 1]);
-    }
-
-    /// Страница строки считается по тому же отбору, что показан, — и слэш
-    /// папки в ключе в счёт не идёт: в каталоге он есть, в выдаче поиска нет,
-    /// а строка одна и та же.
-    #[test]
-    fn page_of_finds_the_row_across_pages_and_a_trailing_slash() {
-        let rows: Vec<Row> =
-            (0..45).map(|index| folder(&format!("p/{:02}/", index), Vec::new())).collect();
-        let listing = ListingState { sorting: Sorting::Name, ..Default::default() };
-
-        assert_eq!(page_of(&rows, &listing, "p/00"), Some(0));
-        assert_eq!(page_of(&rows, &listing, "p/25/"), Some(1));
-        assert_eq!(page_of(&rows, &listing, "p/44"), Some(2));
-        assert_eq!(page_of(&rows, &listing, "чего тут нет"), None);
-    }
-
-    /// Отбор один на показ и на переход: строка, которую отбор убрал, не
-    /// показана — и вести к ней некуда.
-    #[test]
-    fn page_of_obeys_the_same_filter_as_the_list() {
-        let rows: Vec<Row> = vec![folder("p/one/", Vec::new()), folder("p/two/", Vec::new())];
-        let listing = ListingState { query: "two".to_string(), ..Default::default() };
-
-        assert_eq!(page_of(&rows, &listing, "p/two/"), Some(0));
-        assert_eq!(page_of(&rows, &listing, "p/one/"), None);
-    }
-
-    /// Коробочка в шапке говорит о снимках, показанных под ней: у папки пути
-    /// контура нет и отмечать её нечем, а скрытое отбором в счёт не идёт —
-    /// иначе на шар легло бы то, чего на экране нет.
-    #[test]
-    fn the_header_box_counts_only_the_snapshots_it_shows() {
-        let rows = vec![snapshot("p/a"), snapshot("p/b"), folder("p/c/", Vec::new())];
-        let mut listing = ListingState::default();
-        assert!(!arrange(&rows, &listing).all_marked(&listing), "пока не отмечено ничего");
-
-        listing.selected.insert("p/a".to_string(), Chosen::Snapshot);
-        assert!(!arrange(&rows, &listing).all_marked(&listing), "отмечен один из двух");
-
-        listing.selected.insert("p/b".to_string(), Chosen::Snapshot);
-        assert!(arrange(&rows, &listing).all_marked(&listing), "папка в счёт не идёт");
-
-        // Отбор сузил список до одного снимка — и он отмечен.
-        let mut narrowed = ListingState { query: "a".to_string(), ..Default::default() };
-        narrowed.selected.insert("p/a".to_string(), Chosen::Snapshot);
-        assert!(arrange(&rows, &narrowed).all_marked(&narrowed));
-    }
-
-    /// Коробочка в шапке считает всё выбираемое, а не одни снимки: выбирают
-    /// строку, и файл сам по себе выбирается наравне со снимком — иначе
-    /// «отметить всё» оставляло бы половину списка невыбранной.
-    #[test]
-    fn the_header_box_counts_files_too() {
-        let rows = vec![snapshot("p/a"), file("p/dem.tif"), folder("p/c/", Vec::new())];
-        let mut listing = ListingState::default();
-
-        listing.selected.insert("p/a".to_string(), Chosen::Snapshot);
-        assert!(!arrange(&rows, &listing).all_marked(&listing), "файл ещё не выбран");
-
-        listing.selected.insert(
-            "p/dem.tif".to_string(),
-            Chosen::File {
-                identifier: "p/dem.tif".to_string(),
-                product: String::new(),
-                name: "dem.tif".to_string(),
-            },
-        );
-        assert!(arrange(&rows, &listing).all_marked(&listing), "папка в счёт не идёт");
-    }
-
-    /// Отмечать нечего — коробочка не держится нажатой: иначе она обещала бы,
-    /// что нажатие её отпустит, а отпускать нечего.
-    #[test]
-    fn the_header_box_of_an_unmarkable_list_is_empty() {
-        let listing = ListingState::default();
-        let folders = vec![folder("p/c/", Vec::new())];
-        assert!(!arrange(&folders, &listing).all_marked(&listing));
-        assert!(!arrange(&[], &listing).all_marked(&listing));
-    }
-
-    /// Раскрытая подстрока-снимок видна наравне с прочими — и коробочка в
-    /// шапке обязана считать её вместе со всеми, иначе она никогда не
-    /// заполнится там, где что-то раскрыли.
-    #[test]
-    fn expanded_snapshots_count_as_shown() {
-        let rows = vec![folder("p/day/", vec![snapshot("p/day/one")])];
-        let mut listing = ListingState::default();
-        listing.expanded.insert("p/day/".to_string());
-
-        let arranged = arrange(&rows, &listing);
-        let shown: Vec<&str> = arranged.marks().map(Row::choice_key).collect();
-        assert_eq!(shown, vec!["p/day/one"]);
-        assert!(!arrange(&rows, &listing).all_marked(&listing));
-
-        listing.selected.insert("p/day/one".to_string(), Chosen::Snapshot);
-        assert!(arrange(&rows, &listing).all_marked(&listing));
-    }
-
-    /// Страница ограничивает и коробочку: отмечать разом то, чего на экране
-    /// нет, значило бы спросить у каталога сотню продуктов за одно нажатие.
-    #[test]
-    fn the_header_box_stops_at_the_page() {
-        let rows: Vec<Row> =
-            (0..PAGE_SIZE + 5).map(|index| snapshot(&format!("p/{:02}", index))).collect();
-        let listing = ListingState::default();
-        assert_eq!(arrange(&rows, &listing).marks().count(), PAGE_SIZE);
     }
 }

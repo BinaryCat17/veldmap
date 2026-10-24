@@ -1,55 +1,59 @@
-//! Системы координат в метрах: поперечная цилиндрическая проекция плюс датум,
-//! на котором она стои́т.
+//! Coordinate systems in metres: a transverse cylindrical projection plus the
+//! datum it stands on.
 //!
-//! Ими привязаны растры и ими же записаны земельные контуры. Гранула Sentinel-2
-//! — прямоугольник в своей зоне UTM; сцена Landsat — в ней же; кадастровый
-//! участок Ростовской области — в МСК-61. Разные это системы не устройством, а
-//! числами: масштабом на осевом меридиане, самим меридианом, сдвигами и тем
-//! эллипсоидом, к которому отнесены градусы.
+//! Rasters are georeferenced with them, and land outlines are written with them
+//! too. A Sentinel-2 granule is a rectangle in its own UTM zone; a Landsat scene
+//! is in the same one; a cadastral plot of the Rostov region is in MSK-61. These
+//! systems differ not by device but by numbers: the scale on the central
+//! meridian, the meridian itself, the offsets, and the ellipsoid the degrees are
+//! referred to.
 //!
-//! Поэтому здесь не «UTM», а система с параметрами: зашитый UTM пришлось бы
-//! переписывать под каждую следующую, а число — просто другое число.
+//! Hence not "UTM" here but a system with parameters: a hard-coded UTM would
+//! have to be rewritten for each next one, while a number is simply a different
+//! number.
 //!
-//! Второе семейство стои́т рядом и параметрами не сводится: веб-Меркатор
-//! (EPSG:3857) считается по сфере и рядов Крюгера не знает вовсе. Оттого
-//! проекция здесь — [`Projection`], а не одна лишь [`System`]: у семейств общий
-//! разговор с наложением («метры → градусы»), но не общая математика.
+//! The second family stands apart and is not reducible to parameters: Web
+//! Mercator (EPSG:3857) is computed on a sphere and knows no Kruger series at
+//! all. That is why the projection here is [`Projection`], not [`System`] alone:
+//! the families share the talk with the overlay ("metres to degrees") but not
+//! the mathematics.
 //!
-//! **Наружу отсюда уезжает только WGS84.** Переход между датумами делается
-//! внутри, потому что снаружи его негде было бы сделать честно: широта на
-//! Красовском и широта на WGS84 выглядят одинаково, и перепутанные, они
-//! расходятся на сотню метров молча.
+//! **Only WGS84 leaves here.** The transition between datums is done inside,
+//! because outside there would be no honest place for it: latitude on Krasovsky
+//! and latitude on WGS84 look the same, and confused, they diverge by a hundred
+//! metres silently.
 //!
-//! Счёт — ряды Крюгера по третьему сжатию `n` до четвёртой степени: при
-//! n ≈ 0.0017 хвост ряда — десятки нанометров. Годятся они в пределах своей
-//! зоны;
-//! в тысяче километров от осевого меридиана проекция и сама теряет смысл.
-//! Прямая и обратная — пара, и тест сходимости гоняет их друг через друга по
-//! всей зоне (правило парных функций из README).
+//! The computation is Kruger series in the third flattening `n` up to the fourth
+//! power: at n ≈ 0.0017 the series tail is tens of nanometres. They hold within
+//! their own zone; a thousand kilometres from the central meridian the
+//! projection itself loses meaning. The forward and the inverse are a pair, and
+//! the convergence check drives them through each other across the whole zone
+//! (the paired-functions rule from the README).
 
 use super::geodesy::{unwind, FLATTENING, SEMI_MAJOR_M};
 
-/// Эллипсоид вращения — та поверхность, к которой отнесены широта с долготой.
+/// Ellipsoid of revolution — the surface that latitude and longitude are
+/// referred to.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Ellipsoid {
     pub semi_major_m: f64,
     pub flattening: f64,
 }
 
-/// Тот же, на котором стоит весь модуль.
+/// The one the whole module stands on.
 pub const WGS84: Ellipsoid =
     Ellipsoid { semi_major_m: SEMI_MAJOR_M, flattening: FLATTENING };
 
-/// Эллипсоид Красовского: на нём стоит СК-42 и всё, что из неё выросло —
-/// шестиградусные зоны Гаусса-Крюгера и местные системы вроде МСК-61.
+/// Krasovsky ellipsoid: SK-42 stands on it, and everything that grew out of it
+/// — the six-degree Gauss-Kruger zones and local systems like MSK-61.
 ///
-/// От WGS84 он отличается на 108 метров по большой полуоси, но само по себе это
-/// даёт лишь пару метров на местности: почти весь разбег между системами —
-/// сдвиг центра, а не форма (см. [`PULKOVO_1942`]).
+/// It differs from WGS84 by 108 metres along the semi-major axis, but by itself
+/// that gives only a couple of metres on the ground: nearly all the gap between
+/// the systems is a centre shift, not a shape (see [`PULKOVO_1942`]).
 pub const KRASOVSKY: Ellipsoid = Ellipsoid { semi_major_m: 6_378_245.0, flattening: 1.0 / 298.3 };
 
 impl Ellipsoid {
-    /// Третье сжатие — параметр рядов Крюгера.
+    /// Third flattening — the parameter of the Kruger series.
     fn third_flattening(&self) -> f64 {
         self.flattening / (2.0 - self.flattening)
     }
@@ -58,14 +62,13 @@ impl Ellipsoid {
         self.flattening * (2.0 - self.flattening)
     }
 
-    /// Радиус выпрямляющей окружности `A`: множитель, которым ряд переводится
-    /// в метры.
+    /// Rectifying radius `A`: the factor that turns the series into metres.
     fn rectifying_radius(&self) -> f64 {
         let n = self.third_flattening();
         self.semi_major_m / (1.0 + n) * (1.0 + n * n / 4.0 + n * n * n * n / 64.0)
     }
 
-    /// Ряд прямой проекции (Крюгер, до n⁴).
+    /// Forward projection series (Kruger, up to n⁴).
     fn alpha(&self) -> [f64; 4] {
         let n = self.third_flattening();
         [
@@ -76,7 +79,7 @@ impl Ellipsoid {
         ]
     }
 
-    /// Ряд обратной (та же структура, свои числа).
+    /// Inverse series (same structure, its own numbers).
     fn beta(&self) -> [f64; 4] {
         let n = self.third_flattening();
         [
@@ -87,9 +90,10 @@ impl Ellipsoid {
         ]
     }
 
-    /// Широта и долгота на этом эллипсоиде → геоцентрические прямоугольные,
-    /// метры. Высота везде нулевая: привязка растра её не несёт, а переход
-    /// между датумами от неё почти не зависит — сантиметры на километр.
+    /// Latitude and longitude on this ellipsoid → geocentric Cartesian,
+    /// metres. Height is zero everywhere: the raster georeference carries none,
+    /// and the transition between datums barely depends on it — centimetres per
+    /// kilometre.
     fn to_earth_centred(&self, lat_deg: f64, lon_deg: f64) -> [f64; 3] {
         let (lat, lon) = (lat_deg.to_radians(), lon_deg.to_radians());
         let e2 = self.eccentricity_sq();
@@ -101,13 +105,14 @@ impl Ellipsoid {
         ]
     }
 
-    /// Обратно: геоцентрические прямоугольные → широта и долгота.
+    /// Back: geocentric Cartesian → latitude and longitude.
     fn from_earth_centred(&self, point: [f64; 3]) -> (f64, f64) {
         let [x, y, z] = point;
         let flat = x.hypot(y);
-        // На самой оси широта известна без счёта, а счёт там разваливается:
-        // `flat / cos(lat)` даёт бесконечность, и произведение её с нулём —
-        // не-число. Долгота на полюсе произвольна, и ноль не хуже другого.
+        // On the axis itself the latitude is known without computation, and the
+        // computation breaks down there: `flat / cos(lat)` yields an infinity, and
+        // its product with zero is a not-a-number. Longitude at the pole is
+        // arbitrary, and zero is as good as any other.
         if flat == 0.0 {
             return (90.0f64.copysign(z), 0.0);
         }
@@ -115,28 +120,30 @@ impl Ellipsoid {
         (lat.to_degrees(), y.atan2(x).to_degrees())
     }
 
-    /// Широта точки по её расстоянию от оси и высоте над плоскостью экватора.
+    /// Latitude of a point from its distance to the axis and height above the
+    /// equatorial plane.
     ///
-    /// Повторением, а не формулой: радиус кривизны зависит от самой искомой
-    /// широты. Множитель сходимости — `−e²sin²φ/(1−e²sin²φ)`, то есть худший
-    /// случай здесь **полюс**, а не экватор, как у обратного перехода в
-    /// [`System::to_geodetic`]: у того множитель зеркальный, с косинусом.
+    /// By iteration, not by formula: the radius of curvature depends on the very
+    /// latitude being sought. The convergence factor is
+    /// `−e²sin²φ/(1−e²sin²φ)`, so the worst case here is the **pole**, not the
+    /// equator as with the inverse transition in [`System::to_geodetic`]: there
+    /// the factor is mirrored, with a cosine.
     ///
-    /// Знак у множителя отрицательный, и это меняет смысл слова «сошлось»:
-    /// ошибка меняет знак каждый оборот, и на части широт значение вечно
-    /// качается между двумя соседними числами вместо того, чтобы замереть.
-    /// Поэтому число оборотов выбирается полом округления, а не неподвижностью.
+    /// The factor is negative, and that changes the meaning of "converged": the
+    /// error flips sign on every pass, and at some latitudes the value forever
+    /// swings between two neighbouring numbers instead of coming to rest. Hence
+    /// the pass count is chosen by the rounding gap, not by stillness.
     ///
-    /// Про множитель, а не про то, где цикл труднее всего: ровно на полюсе он
-    /// холост (туда не доходит — выше стои́т охрана), а больше всего оборотов
-    /// уходит около шестидесяти семи градусов.
+    /// About the factor, not about where the loop is hardest: exactly at the pole
+    /// it is idle (the loop never gets there — a guard stands above), and the
+    /// most passes are spent around sixty-seven degrees.
     ///
-    /// На точке, лежащей ровно на своём эллипсоиде, цикл не делает ничего:
-    /// начальное приближение там точное. Работать ему приходится только на
-    /// точке, снятой с эллипсоида Гельмертом, а сходит она с него по всей Земле
-    /// на −56…+271 метр (над той территорией, ради которой построена СК-42, —
-    /// на полсотни в обе стороны). На этом конверте четвёртый оборот уже сидит
-    /// на последнем разряде.
+    /// On a point lying exactly on its own ellipsoid the loop does nothing: the
+    /// initial approximation there is exact. It only has to work on a point taken
+    /// off the Helmert ellipsoid, and that departs from it across the whole Earth
+    /// by −56…+271 metres (over the territory SK-42 was built for — fifty metres
+    /// either way). On this envelope the fourth pass already sits on the last
+    /// digit.
     fn latitude_at(&self, flat: f64, z: f64, rounds: u32) -> f64 {
         let e2 = self.eccentricity_sq();
         let mut lat = z.atan2(flat * (1.0 - e2));
@@ -150,30 +157,31 @@ impl Ellipsoid {
     }
 }
 
-/// Сколько оборотов даётся [`Ellipsoid::latitude_at`].
+/// How many passes [`Ellipsoid::latitude_at`] gets.
 ///
-/// Шесть — это четыре, на которых f64 перестаёт улучшаться, и два запаса. Запас
-/// не вкусовой: проверяется это нативно, а исполняется в wasm, и `sin`, `cos`,
-/// `atan2` там округляются своей libm. Число, обоснованное последним разрядом
-/// одной реализации, для другой не доказано, а оборот у цикла в четыре действия
-/// стои́т дешевле, чем разбирательство, чей разряд правее.
+/// Six is the four at which f64 stops improving plus two of margin. The margin
+/// is not a matter of taste: this is verified natively but runs in wasm, and
+/// `sin`, `cos`, `atan2` round with their own libm there. A number justified by
+/// the last digit of one implementation is not proven for another, and a pass of
+/// a four-step loop costs less than settling whose digit is further right.
 const CENTRED_ROUNDS: u32 = 6;
 
-/// Конформная широта → геодезическая.
+/// Conformal latitude → geodetic.
 ///
-/// Повторением, а не формулой: высота отсчитана вдоль нормали, зависящей от
-/// самой искомой широты, поэтому переход — неподвижная точка. Множитель
-/// сходимости — `e²cos²φ/(1−e²sin²φ)`: наибольший на экваторе, где он равен
-/// `e²`, и вчетверо меньший к шестидесятой широте, в тридцать раз — к
-/// восьмидесятой, в девяносто — к восемьдесят четвёртой. Одной удобной точкой
-/// такой цикл проверять нельзя.
+/// By iteration, not by formula: height is measured along the normal, which
+/// depends on the very latitude being sought, so the transition is a fixed
+/// point. The convergence factor is `e²cos²φ/(1−e²sin²φ)`: largest at the
+/// equator, where it equals `e²`, four times smaller by latitude sixty, thirty
+/// times by eighty, ninety by eighty-four. Such a loop cannot be checked at a
+/// single convenient point.
 ///
-/// Наибольший множитель и наибольшая работа — не одно место: на самом экваторе
-/// конформная широта совпадает с геодезической, и цикл там холост. Больше всего
-/// оборотов уходит около двадцати градусов.
+/// The largest factor and the most work are not the same place: right at the
+/// equator the conformal latitude coincides with the geodetic one, and the loop
+/// is idle there. The most passes are spent around twenty degrees.
 ///
-/// Довод, а не литерал в теле: число оборотов иначе нечем проверить, а раскрутки
-/// цикла здесь нет и терять её не на что (модуль собирается на размер).
+/// A constant rather than a literal in the body: the pass count cannot be
+/// checked any other way, and there is no loop unrolling here to lose (the
+/// module is built for size).
 fn geodetic_from_conformal(e: f64, tau_c: f64, rounds: u32) -> f64 {
     let psi = tau_c.asinh();
     let mut phi = tau_c.atan();
@@ -183,43 +191,45 @@ fn geodetic_from_conformal(e: f64, tau_c: f64, rounds: u32) -> f64 {
     phi
 }
 
-/// Сколько оборотов даётся [`geodetic_from_conformal`].
+/// How many passes [`geodetic_from_conformal`] gets.
 ///
-/// Четыре оборота держат семнадцать микрон, пять — десятую долю микрона, шесть
-/// подходят к последнему разряду вплотную (полтора нанометра на радиусе Земли),
-/// и только восемь дают точный ноль. Восьмёрка — не «дальше нечего», а «дальше
-/// нечего и ещё немного сверх»: по той же причине, что и у [`CENTRED_ROUNDS`],
-/// — проверяем одной libm, отгружаем другой.
+/// Four passes hold seventeen microns, five a tenth of a micron, six come close
+/// to the last digit (one and a half nanometres at the Earth's radius), and only
+/// eight give an exact zero. Eight is not "nothing further" but "nothing further
+/// and a bit more on top": for the same reason as [`CENTRED_ROUNDS`] — one libm
+/// is verified with, another ships.
 const CONFORMAL_ROUNDS: u32 = 8;
 
-/// Датум: эллипсоид и то, как он стоит относительно WGS84.
+/// Datum: the ellipsoid and how it stands relative to WGS84.
 ///
-/// Семь элементов Гельмерта — сдвиг начала, развороты осей и поправка масштаба.
-/// Нужны они потому, что разница между датумами почти вся в сдвиге центра, а не
-/// в форме эллипсоида: подменить один эллипсоид другим и на том успокоиться —
-/// значит убрать два метра из ста двенадцати.
+/// Seven Helmert parameters — origin shift, axis rotations, and a scale
+/// correction. They are needed because almost all the difference between datums
+/// lies in the centre shift, not in the ellipsoid shape: substituting one
+/// ellipsoid for another and resting there would remove two metres out of one
+/// hundred and twelve.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Datum {
     pub ellipsoid: Ellipsoid,
-    /// Сдвиг начала координат, метры.
+    /// Origin shift, metres.
     pub shift_m: [f64; 3],
-    /// Развороты осей, угловые секунды.
+    /// Axis rotations, arc-seconds.
     pub rotate_sec: [f64; 3],
-    /// Поправка масштаба, миллионные доли.
+    /// Scale correction, parts per million.
     pub scale_ppm: f64,
 }
 
-/// Сам WGS84: переходить некуда, и все семь элементов нулевые.
+/// WGS84 itself: there is nowhere to go, and all seven parameters are zero.
 pub const WGS84_DATUM: Datum =
     Datum { ellipsoid: WGS84, shift_m: [0.0; 3], rotate_sec: [0.0; 3], scale_ppm: 0.0 };
 
-/// СК-42 (Пулково-1942) → WGS84, семь элементов по ГОСТ Р 51794-2008.
+/// SK-42 (Pulkovo-1942) → WGS84, seven parameters per GOST R 51794-2008.
 ///
-/// Этим набором, а не более поздним из ГОСТ 32453-2017, и не по старшинству
-/// редакции: им описаны местные системы в тех приказах, по которым ведётся
-/// кадастр, и им же считают пересчётчики, которыми сверяются на местах. Разница
-/// между наборами двадцать сантиметров — разойтись на них с кадастровыми
-/// числами дороже, чем отстать от новой редакции.
+/// This set, not the later one from GOST 32453-2017, and not by seniority of
+/// edition: it describes the local systems in the decrees by which the cadastre
+/// is kept, and the converters that field work is reconciled with compute with
+/// it too. The difference between the sets is twenty centimetres — diverging
+/// from the cadastral numbers over them costs more than lagging behind the new
+/// edition.
 pub const PULKOVO_1942: Datum = Datum {
     ellipsoid: KRASOVSKY,
     shift_m: [23.57, -140.95, -79.8],
@@ -228,14 +238,15 @@ pub const PULKOVO_1942: Datum = Datum {
 };
 
 impl Datum {
-    /// Развороты осей в радианах и поправка масштаба множителем — числа
-    /// хранятся в удобных для чтения единицах, а считать надо в этих.
+    /// Axis rotations in radians and the scale correction as a factor — the
+    /// values are stored in units that are easy to read but must be computed in
+    /// these.
     fn turn(&self) -> ([f64; 3], f64) {
         let second = std::f64::consts::PI / (180.0 * 3600.0);
         (self.rotate_sec.map(|value| value * second), 1.0 + self.scale_ppm * 1e-6)
     }
 
-    /// Преобразование Гельмерта: точка этого датума → геоцентрика WGS84.
+    /// Helmert transformation: a point of this datum → WGS84 geocentric.
     fn helmert(&self, point: [f64; 3]) -> [f64; 3] {
         let ([wx, wy, wz], scale) = self.turn();
         let [x, y, z] = point;
@@ -247,17 +258,17 @@ impl Datum {
         ]
     }
 
-    /// Обратное преобразование — точное, а не разворотом знаков.
+    /// Inverse transformation — exact, not by flipping signs.
     ///
-    /// Разворот знаков расходится с настоящей обратной на произведение
-    /// разворота и сдвига: при трети угловой секунды и ста сорока метрах это
-    /// доли миллиметра. Мало — но пара функций, сходящаяся лишь примерно,
-    /// перестаёт быть проверкой друг друга, и настоящая ошибка прячется тогда в
-    /// её собственном допуске.
+    /// Flipping signs diverges from the true inverse by the product of the
+    /// rotation and the shift: at a third of an arc-second and one hundred and
+    /// forty metres this is fractions of a millimetre. Small — but a pair of
+    /// functions that converges only approximately stops being a check of each
+    /// other, and the real error then hides inside its own tolerance.
     ///
-    /// Матрица здесь — единичная плюс кососимметричная, и обратная у такой
-    /// известна в замкнутом виде: `(I − W + wwᵀ)/(1 + |w|²)`. Никакого решения
-    /// системы не нужно.
+    /// The matrix here is the identity plus a skew-symmetric one, and the
+    /// inverse of such is known in closed form: `(I − W + wwᵀ)/(1 + |w|²)`. No
+    /// system solving is needed.
     fn helmert_back(&self, point: [f64; 3]) -> [f64; 3] {
         let ([wx, wy, wz], scale) = self.turn();
         let [x, y, z] = [0, 1, 2].map(|axis| (point[axis] - self.shift_m[axis]) / scale);
@@ -271,7 +282,7 @@ impl Datum {
         ]
     }
 
-    /// Широта и долгота этого датума → они же в WGS84.
+    /// Latitude and longitude of this datum → the same in WGS84.
     pub fn to_wgs84(&self, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
         if *self == WGS84_DATUM {
             return (lat_deg, lon_deg);
@@ -280,7 +291,7 @@ impl Datum {
         WGS84.from_earth_centred(self.helmert(point))
     }
 
-    /// Обратно: WGS84 → широта и долгота этого датума.
+    /// Back: WGS84 → latitude and longitude of this datum.
     pub fn from_wgs84(&self, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
         if *self == WGS84_DATUM {
             return (lat_deg, lon_deg);
@@ -290,17 +301,17 @@ impl Datum {
     }
 }
 
-/// Проекция растра: как его плоские метры ложатся на эллипсоид.
+/// Raster projection: how its flat metres lie on the ellipsoid.
 ///
-/// Семейств здесь два, и объединять их в одно нельзя — у них разная
-/// математика, а не разные числа. Поперечное цилиндрическое накрывает всё, что
-/// нарезано зонами: UTM, Гаусса-Крюгера, местные системы. Веб-Меркатор стои́т
-/// особняком и попал сюда затем, что в него сложены все тайловые карты мира.
+/// There are two families here, and they cannot be merged into one — they differ
+/// in mathematics, not in numbers. The transverse cylindrical covers everything
+/// cut into zones: UTM, Gauss-Kruger, local systems. Web Mercator stands apart
+/// and landed here because all tiled world maps are folded into it.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Projection {
-    /// UTM, зоны Гаусса-Крюгера, местные системы — см. [`System`].
+    /// UTM, Gauss-Kruger zones, local systems — see [`System`].
     Transverse(System),
-    /// Веб-Меркатор, EPSG:3857.
+    /// Web Mercator, EPSG:3857.
     WebMercator,
 }
 
@@ -310,23 +321,24 @@ impl From<System> for Projection {
     }
 }
 
-/// Радиус сферы веб-Меркатора — большая полуось WGS84, взятая за радиус.
+/// Radius of the Web Mercator sphere — the WGS84 semi-major axis taken as a
+/// radius.
 ///
-/// Так эту проекцию и определили: широта берётся эллипсоидальная, а считается
-/// по сфере. Строго равноугольной она от этого быть перестаёт — масштаб вдоль
-/// меридиана и вдоль параллели расходятся на семь десятых процента у экватора и
-/// на три десятых у сорок пятой широты, — зато сетка получается степенями
-/// двойки, и на ней стои́т всякая веб-карта.
+/// This is how the projection is defined: the latitude is ellipsoidal, but the
+/// computation runs on a sphere. Strictly conformal it thereby ceases to be —
+/// the scale along the meridian and along the parallel diverge by seven tenths
+/// of a percent at the equator and three tenths at latitude forty-five — but the
+/// grid comes out in powers of two, and every web map stands on it.
 const WEB_MERCATOR_RADIUS_M: f64 = SEMI_MAJOR_M;
 
-/// Предел широты веб-Меркатора: к полюсу проекция уходит в бесконечность, и
-/// сетку обрезают там, где мир выходит квадратом, — при этой широте северная
-/// координата равна `π·a`, то есть ровно половине стороны.
+/// Latitude limit of Web Mercator: toward the pole the projection goes to
+/// infinity, and the grid is cut where the world comes out as a square — at this
+/// latitude the northern coordinate equals `π·a`, exactly half the side.
 const WEB_MERCATOR_LIMIT_DEG: f64 = 85.051_128_779_806_59;
 
 impl Projection {
-    /// Проекция по коду EPSG. `None` — кода мы не знаем; такой растр ложится
-    /// по контуру каталога, а не по своей привязке.
+    /// Projection by EPSG code. `None` — the code is unknown to us; such a
+    /// raster lies by the catalogue outline, not by its own georeference.
     pub fn from_epsg(code: u32) -> Option<Self> {
         match code {
             3857 => Some(Self::WebMercator),
@@ -334,14 +346,14 @@ impl Projection {
         }
     }
 
-    /// Широта и долгота WGS84 → метры проекции.
+    /// Latitude and longitude of WGS84 → projection metres.
     ///
-    /// В рабочем коде не зовётся: варп-сетка ходит только обратной, из метров
-    /// привязки в градусы (см. [`System::from_geodetic`] — там та же оговорка).
-    /// Широта у веб-Меркатора здесь зажимается пределом сетки, и не ради
-    /// защиты чего-либо, а чтобы пара `from`/`to` была определена на всей
-    /// широте: за пределом прямая ушла бы в бесконечность, и гонять её через
-    /// обратную стало бы нечем.
+    /// Not called in working code: the warp mesh walks only the inverse, from
+    /// georeference metres to degrees (see [`System::from_geodetic`] — the same
+    /// caveat there). The Web Mercator latitude is clamped here by the grid
+    /// limit, not to guard anything, but so that the `from`/`to` pair stays
+    /// defined at every latitude: beyond the limit the forward would run to
+    /// infinity, and driving it through the inverse would become impossible.
     pub fn from_geodetic(&self, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
         match self {
             Self::Transverse(system) => system.from_geodetic(lat_deg, lon_deg),
@@ -356,12 +368,12 @@ impl Projection {
         }
     }
 
-    /// Метры проекции → широта и долгота WGS84. Обратная к
-    /// [`Projection::from_geodetic`], и это тот ход, которым ходит варп-сетка.
+    /// Projection metres → latitude and longitude of WGS84. The inverse of
+    /// [`Projection::from_geodetic`], and this is the walk the warp mesh makes.
     ///
-    /// Зажима здесь нет и не нужно: у веб-Меркатора северная координата любой
-    /// величины даёт широту в пределах полюсов — `atan` ограничен сам, и даже
-    /// бесконечность отдаёт ровно ±90°.
+    /// There is no clamp here and none is needed: for Web Mercator a northern
+    /// coordinate of any magnitude yields a latitude within the poles — `atan`
+    /// is bounded by itself, and even infinity returns exactly ±90°.
     pub fn to_geodetic(&self, easting: f64, northing: f64) -> (f64, f64) {
         match self {
             Self::Transverse(system) => system.to_geodetic(easting, northing),
@@ -375,31 +387,30 @@ impl Projection {
     }
 }
 
-/// Поперечная цилиндрическая проекция со своими числами: UTM, шестиградусные
-/// зоны Гаусса-Крюгера и местные системы — это она, а не разные проекции.
+/// Transverse cylindrical projection with its own numbers: UTM, six-degree
+/// Gauss-Kruger zones, and local systems are all it, not different projections.
 ///
-/// Отличают их четыре числа и датум. Масштаб на осевом меридиане у UTM 0.9996,
-/// у Гаусса-Крюгера ровно единица; ложный сдвиг на восток у UTM всегда 500 км, у
-/// зон Гаусса-Крюгера в него вписан номер зоны, а у местных систем он свой и
-/// назначен приказом.
+/// Four numbers and a datum distinguish them. The scale on the central meridian
+/// is 0.9996 for UTM, exactly one for Gauss-Kruger; the false easting for UTM is
+/// always 500 km, for Gauss-Kruger zones the zone number is written into it,
+/// and local systems have their own, assigned by decree.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct System {
     pub datum: Datum,
     pub central_meridian_deg: f64,
-    /// Масштаб на осевом меридиане.
+    /// Scale on the central meridian.
     pub scale: f64,
     pub false_easting_m: f64,
     pub false_northing_m: f64,
 }
 
-/// Ложный сдвиг на восток у UTM — один на все зоны.
+/// False easting of UTM — one for all zones.
 const UTM_FALSE_EASTING: f64 = 500_000.0;
-/// Южным зонам UTM сдвигают северную координату, чтобы она оставалась
-/// положительной.
+/// Southern UTM zones shift the northern coordinate so that it stays positive.
 const UTM_FALSE_NORTHING_SOUTH: f64 = 10_000_000.0;
 
 impl System {
-    /// Зона UTM: шестиградусная, на WGS84.
+    /// UTM zone: six degrees, on WGS84.
     pub fn utm(number: u32, south: bool) -> Self {
         Self {
             datum: WGS84_DATUM,
@@ -410,14 +421,14 @@ impl System {
         }
     }
 
-    /// Шестиградусная зона Гаусса-Крюгера на СК-42 — та, которой нарезаны
-    /// советские топографические карты и всё, что из них выросло.
+    /// Six-degree Gauss-Kruger zone on SK-42 — the one the Soviet topographic
+    /// maps were cut into, and everything that grew out of them.
     ///
-    /// От UTM её отличают три вещи: масштаб на осевом меридиане ровно единица,
-    /// осевой меридиан считается от нуля (`6n − 3`, а не `6n − 183`), и номер
-    /// зоны вписан в саму координату — восточный отступ начинается с `n`
-    /// миллионов. Оттого координата зоны 8 всегда начинается с восьмёрки, и
-    /// зона читается из числа.
+    /// Three things distinguish it from UTM: the scale on the central meridian
+    /// is exactly one, the central meridian is counted from zero (`6n − 3`, not
+    /// `6n − 183`), and the zone number is written into the coordinate itself —
+    /// the easting starts with `n` millions. Hence the coordinate of zone 8
+    /// always starts with an eight, and the zone can be read off the number.
     pub fn gauss_kruger(zone: u32) -> Self {
         Self {
             datum: PULKOVO_1942,
@@ -428,16 +439,16 @@ impl System {
         }
     }
 
-    /// Зона МСК-61 — местной системы Ростовской области, той самой, которой
-    /// записаны земельные участки в ЕГРН.
+    /// MSK-61 zone — the local system of the Rostov region, the very one the
+    /// land plots are recorded with in the EGRN.
     ///
-    /// Устроена она как Гаусс-Крюгер на Красовском, но осевые меридианы и
-    /// отступы у неё свои, назначенные приказом: три трёхградусные зоны, общий
-    /// северный отступ и восточный, начинающийся с номера зоны. Меридианы
-    /// стоят не на круглых градусах (37°59′, 40°59′, 43°59′) — это не описка, а
-    /// определение системы.
+    /// It is arranged like Gauss-Kruger on Krasovsky, but its central meridians
+    /// and offsets are its own, assigned by decree: three three-degree zones, a
+    /// common northing offset, and an easting that starts with the zone number.
+    /// The meridians do not stand at round degrees (37°59′, 40°59′, 43°59′) —
+    /// this is not a typo but the definition of the system.
     ///
-    /// `None` — зоны с таким номером у МСК-61 нет.
+    /// `None` — MSK-61 has no zone with that number.
     pub fn msk61(zone: u32) -> Option<Self> {
         let central_meridian_deg = match zone {
             1 => 37.983_333_333_33,
@@ -454,20 +465,21 @@ impl System {
         })
     }
 
-    /// Система по коду EPSG. `None` — код называет не поперечную цилиндрическую
-    /// проекцию либо не назван вовсе, и выдумывать её не из чего.
+    /// System by EPSG code. `None` — the code names no transverse cylindrical
+    /// projection or names nothing at all, and there is nothing to invent one
+    /// from.
     ///
-    /// Границы полос проверяются, а не выводятся делением: 32600 и 32700 зонами
-    /// не являются, а 32661 и 32761 — полярная стереографическая, и принятая за
-    /// «зону 61» она положила бы снимок за тысячи километров.
+    /// The band bounds are checked, not derived by division: 32600 and 32700 are
+    /// not zones, and 32661 and 32761 are polar stereographic, and taken for
+    /// "zone 61" it would put a shot thousands of kilometres away.
     ///
-    /// Коды 63361xx международному набору EPSG не принадлежат: ими МСК-61
-    /// называют российские пересчётчики. Растром такой код не приходит и прийти
-    /// не может: наполняет его одно место — геоключ растра
-    /// (`image-tiler::adapters::tiff::geo_placement`), а геоключ
-    /// шестнадцатибитный, и семизначное число в него не влезает. Местная
-    /// система обычно и не записана в файле нигде, поэтому ветка эта проверена
-    /// тестом, а не растром, и ждёт того, кто сможет назвать её числом.
+    /// Codes 63361xx do not belong to the international EPSG set: Russian
+    /// converters name MSK-61 with them. Such a code does not arrive with a
+    /// raster and cannot: one place fills it — the raster geokey
+    /// (`image-tiler::adapters::tiff::geo_placement`), and the geokey is
+    /// sixteen-bit, and a seven-digit number does not fit. The local system is
+    /// usually written nowhere in the file, so this branch is checked by a test,
+    /// not by a raster, and it awaits someone who can name it with a number.
     pub fn from_epsg(code: u32) -> Option<Self> {
         match code {
             32601..=32660 => Some(Self::utm(code - 32600, false)),
@@ -478,24 +490,26 @@ impl System {
         }
     }
 
-    /// Широта и долгота WGS84 → метры системы (easting, northing).
+    /// Latitude and longitude of WGS84 → system metres (easting, northing).
     ///
-    /// В рабочем коде не зовётся: варп-сетка ходит только обратной, из метров
-    /// привязки в градусы. Живёт она затем, что без неё обратную нечем
-    /// проверить — пара, гоняемая друг через друга, и есть здесь единственная
-    /// проверка, не сводящаяся к переписыванию тех же формул в тест.
+    /// Not called in working code: the warp mesh walks only the inverse, from
+    /// georeference metres to degrees. It lives because without it the inverse
+    /// cannot be checked — a pair driven through each other is the only check
+    /// here that does not reduce to rewriting the same formulas in a test.
     pub fn from_geodetic(&self, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
         let (lat_deg, lon_deg) = self.datum.from_wgs84(lat_deg, lon_deg);
         let ellipsoid = self.datum.ellipsoid;
         let phi = lat_deg.to_radians();
-        // Долгота от осевого меридиана — как есть, без сворачивания в короткую
-        // сторону. Сворачивать нечего: ниже она входит в счёт только синусом и
-        // косинусом, а те периодичны, и точка за швом приходит той же парой
-        // чисел с любой ветви. Зона 1 стои́т на −177°, и 179° в.д. для неё
-        // ровно то же, что −181°.
+        // Longitude from the central meridian — as is, without wrapping to the
+        // short side. There is nothing to wrap: below it enters the computation
+        // only through sine and cosine, and those are periodic, so a point
+        // beyond the seam comes out with the same pair of numbers on either
+        // branch. Zone 1 stands at −177°, and 179° E is exactly the same as
+        // −181° for it.
         let lam = (lon_deg - self.central_meridian_deg).to_radians();
 
-        // Конформная широта: угол на сфере, сохраняющий углы эллипсоида.
+        // Conformal latitude: the angle on the sphere that preserves the angles
+        // of the ellipsoid.
         let e = ellipsoid.eccentricity_sq().sqrt();
         let tau = phi.tan();
         let sigma = (e * (e * tau / tau.hypot(1.0)).atanh()).sinh();
@@ -515,7 +529,8 @@ impl System {
         (self.false_easting_m + radius * y, self.false_northing_m + radius * x)
     }
 
-    /// Метры системы → широта и долгота WGS84. Обратная к [`System::from_geodetic`].
+    /// System metres → latitude and longitude of WGS84. The inverse of
+    /// [`System::from_geodetic`].
     pub fn to_geodetic(&self, easting: f64, northing: f64) -> (f64, f64) {
         let ellipsoid = self.datum.ellipsoid;
         let radius = self.scale * ellipsoid.rectifying_radius();
@@ -529,8 +544,8 @@ impl System {
             y -= b * (k * xi).cos() * (k * eta).sinh();
         }
 
-        // Тангенс конформной широты — не синус: знаменатель дополняет sin ξ' до
-        // гипотенузы наклона, а не до единицы.
+        // The tangent of the conformal latitude — not the sine: the denominator
+        // completes sin ξ' to the hypotenuse of the slope, not to one.
         let slope = y.sinh();
         let tau_c = x.sin() / (slope.hypot(x.cos()));
         let lam = slope.atan2(x.cos());
@@ -540,483 +555,15 @@ impl System {
 
         let (lat_deg, lon_deg) =
             self.datum.to_wgs84(phi.to_degrees(), self.central_meridian_deg + lam.to_degrees());
-        // Долгота — в непрерывную ветвь вокруг осевого меридиана, и это не
-        // пустая предосторожность: сам ряд отдаёт её непрерывной, а вот переход
-        // между датумами кончается `atan2` и сворачивает её в (−180, 180].
-        // Оттого без разворота поведение зависело бы от датума: у UTM перехода
-        // нет и ветвь цела, а у системы на Красовском, чей осевой меридиан лежит
-        // за швом (зона 32 Гаусса-Крюгера — это 189°), рамка рвалась бы по
-        // варп-сетке. Дальше трёх с небольшим градусов от осевого меридиана зона
-        // не уходит, так что ветвь по нему определена однозначно.
+        // Longitude onto the continuous branch around the central meridian,
+        // and this is not an empty precaution: the series itself returns it
+        // continuous, while the datum transition ends in `atan2` and wraps it
+        // into (−180, 180]. Hence without the unwind the behaviour would depend
+        // on the datum: for UTM there is no transition and the branch is intact,
+        // while for a system on Krasovsky whose central meridian lies beyond the
+        // seam (Gauss-Kruger zone 32 is 189°), the frame would tear along the
+        // warp mesh. The zone never goes more than three-odd degrees from the
+        // central meridian, so the branch about it is unambiguous.
         (lat_deg, unwind(self.central_meridian_deg, lon_deg))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Веб-Меркатор кладёт мир в квадрат со стороной в два раза по 20 037 508
-    /// метров — на этом стои́т вся тайловая сетка степеней двойки, и числа эти
-    /// не наши, а её.
-    #[test]
-    fn мир_веб_меркатора_квадратный() {
-        let map = Projection::WebMercator;
-        let side = 20_037_508.34;
-
-        let (x, y) = map.from_geodetic(0.0, 0.0);
-        assert!(x.abs() < 1e-6 && y.abs() < 1e-6, "нуль градусов — нуль метров: {x} {y}");
-
-        let (x, _) = map.from_geodetic(0.0, 180.0);
-        assert!((x - side).abs() < 0.5, "край по долготе: {x}");
-
-        let (_, y) = map.from_geodetic(WEB_MERCATOR_LIMIT_DEG, 0.0);
-        assert!((y - side).abs() < 0.5, "край по широте: {y}");
-    }
-
-    /// Числа настоящих мест — против таблиц, а не против нашей же формулы,
-    /// переписанной в тест.
-    #[test]
-    fn настоящие_места_ложатся_куда_положено() {
-        let map = Projection::WebMercator;
-        for (lat, lon, ex, ey) in [
-            (47.2357, 39.7015, 4_419_550.76, 5_980_631.53),
-            (-33.8688, 151.2093, 16_832_542.28, -4_011_198.65),
-        ] {
-            let (x, y) = map.from_geodetic(lat, lon);
-            assert!((x - ex).abs() < 0.5 && (y - ey).abs() < 0.5, "{lat} {lon} → {x} {y}");
-        }
-    }
-
-    /// Прямая и обратная сходятся. Это единственная проверка проекции, не
-    /// сводящаяся к переписыванию её же формул: ошибись в одной — пара
-    /// разойдётся.
-    #[test]
-    fn веб_меркатор_обратим() {
-        let map = Projection::WebMercator;
-        for lat in [-84.0, -45.0, -0.5, 0.0, 12.25, 60.0, 84.9] {
-            for lon in [-179.5, -90.0, 0.0, 33.3, 179.5] {
-                let (x, y) = map.from_geodetic(lat, lon);
-                let (back_lat, back_lon) = map.to_geodetic(x, y);
-                assert!(
-                    (back_lat - lat).abs() < 1e-9 && (back_lon - lon).abs() < 1e-9,
-                    "{lat} {lon} → {x} {y} → {back_lat} {back_lon}"
-                );
-            }
-        }
-    }
-
-    /// За пределом сетки широта зажимается — чтобы прямая оставалась
-    /// определённой и обратимой. Варп-сетка сюда не ходит (она зовёт только
-    /// обратную), так что защищает этот зажим не её, а саму пару.
-    #[test]
-    fn за_пределом_широта_зажимается() {
-        let map = Projection::WebMercator;
-        let (_, edge) = map.from_geodetic(WEB_MERCATOR_LIMIT_DEG, 0.0);
-        let (_, beyond) = map.from_geodetic(89.9, 0.0);
-        assert_eq!(edge, beyond, "за пределом координата обязана встать");
-        assert!(beyond.is_finite(), "и остаться конечной");
-    }
-
-    /// Код 3857 узнаётся, а неизвестный по-прежнему остаётся неизвестным:
-    /// растр с чужой системой ложится по контуру каталога, а не мимо себя.
-    #[test]
-    fn веб_меркатор_узнаётся_по_коду() {
-        assert_eq!(Projection::from_epsg(3857), Some(Projection::WebMercator));
-        assert!(matches!(Projection::from_epsg(32637), Some(Projection::Transverse(_))));
-        assert_eq!(Projection::from_epsg(3035), None, "равновеликую азимутальную мы не умеем");
-    }
-
-    /// Насколько разошлись две точки по земле, метры. Грубой метрики здесь
-    /// довольно: проверяется сходство в сантиметрах, а не форма Земли.
-    fn ground_m(first: (f64, f64), second: (f64, f64)) -> f64 {
-        let lat = ((first.0 + second.0) / 2.0).to_radians();
-        let per_lat = 111_132.92 - 559.82 * (2.0 * lat).cos();
-        let per_lon = 111_412.84 * lat.cos() - 93.5 * (3.0 * lat).cos();
-        ((first.0 - second.0) * per_lat).hypot((first.1 - second.1) * per_lon)
-    }
-
-    /// **Опорная проверка всей цепочки** — числами стороннего пересчётчика
-    /// (geobridge, коды 63361xx).
-    ///
-    /// Сходятся здесь сразу четыре вещи, и порознь ни одна не проверяема:
-    /// эллипсоид Красовского, ряды Крюгера с единичным масштабом, отступы зоны
-    /// и семь элементов Гельмерта. Ошибись любая — разъедется всё.
-    ///
-    /// Все точки лежат **внутри** своих зон, и это условие проверки, а не
-    /// удобство: вне зоны сверять не с чем. Классические формулы
-    /// Гаусса-Крюгера раскладываются по степеням разности долгот и объявлены
-    /// годными в пределах трёх градусов от осевого меридиана — в тринадцати
-    /// градусах от него пересчётчики расходятся между собой на метры, и
-    /// совпадение там означало бы лишь общую ошибку.
-    #[test]
-    fn the_local_grid_matches_an_outside_converter() {
-        // Зона, север, восток → широта и долгота WGS84.
-        let checks = [
-            (1, 500_000.0, 1_330_000.0, 47.932_102_711, 38.383_287_711),
-            (2, 500_000.0, 2_330_000.0, 47.932_149_061, 41.383_334_064),
-            (3, 500_000.0, 3_330_000.0, 47.932_194_230, 44.383_385_063),
-            (2, 500_000.0, 2_350_000.0, 47.930_905_649, 41.650_973_905),
-        ];
-        for (zone, north, east, lat, lon) in checks {
-            let system = System::msk61(zone).expect("зона МСК-61");
-            let got = system.to_geodetic(east, north);
-            let off = ground_m(got, (lat, lon));
-            // Два миллиметра, а не сантиметр: поправка масштаба действует почти
-            // целиком по высоте, и по горизонтали её переворот виден лишь на
-            // пять миллиметров. Собственное расхождение здесь — четыре десятых.
-            assert!(off < 0.002, "зона {}: {:?} против {:?} — {} м", zone, got, (lat, lon), off);
-        }
-    }
-
-    /// Перевод между датумами — не подмена эллипсоида: в Ростовской области он
-    /// сдвигает точку на сто с лишним метров, и почти всё это сдвиг центра.
-    /// Выброшенный, он оставил бы поле на соседнем поле.
-    #[test]
-    fn the_datum_shift_is_worth_a_hundred_metres() {
-        let rostov = (47.23, 39.72);
-        let moved = PULKOVO_1942.to_wgs84(rostov.0, rostov.1);
-        let shift = ground_m(rostov, moved);
-        assert!((100.0..130.0).contains(&shift), "{} м", shift);
-
-        // Сам WGS84 никуда не едет: переходить ему некуда.
-        assert_eq!(WGS84_DATUM.to_wgs84(rostov.0, rostov.1), rostov);
-    }
-
-    /// Гельмерт и обратный к нему — пара, и в геоцентрике она точная: сходится
-    /// до нанометра на радиусе Земли, то есть до последних разрядов f64.
-    ///
-    /// Проверяется здесь, а не на широте с долготой, потому что только здесь
-    /// пара полна: наружу уезжают два числа из трёх, и выброшенная высота даёт
-    /// свой остаток, к матрице отношения не имеющий (см. соседний тест).
-    /// Развёрнутый знаками вместо настоящей обратной, он разошёлся бы тут на
-    /// полмиллиметра — и спрятался бы за этим остатком, проверяй мы их вместе.
-    #[test]
-    fn the_helmert_and_its_inverse_are_exact() {
-        let points = [
-            [3_000_000.0, 2_000_000.0, 5_200_000.0],
-            [-1_500_000.0, 5_800_000.0, 2_000_000.0],
-            [4_000_000.0, -3_000_000.0, -3_500_000.0],
-        ];
-        // Второй датум — с тремя ненулевыми разворотами: у СК-42 разворот вокруг
-        // первой оси ровно нулевой, и на ней первая строка матрицы не
-        // проверяется вовсе. Числа его выдуманы, но проверяется здесь не они, а
-        // тождество матрицы с обратной.
-        let turned = Datum { rotate_sec: [-1.5, -0.35, -0.79], ..PULKOVO_1942 };
-        for datum in [PULKOVO_1942, turned] {
-            for point in points {
-                let back = datum.helmert_back(datum.helmert(point));
-                for axis in 0..3 {
-                    let off = (back[axis] - point[axis]).abs();
-                    assert!(off < 1e-6, "{:?}, ось {}: {} м", datum.rotate_sec, axis, off);
-                }
-            }
-        }
-    }
-
-    /// Переход между датумами и обратный сходятся и в градусах — но не точно, и
-    /// причина этому одна: наружу отсюда уезжают два числа из трёх.
-    ///
-    /// Гельмерт разворачивает и вертикаль, а высоту двумерный договор не несёт
-    /// — привязка растра её не знает. Оттого остаток пропорционален тому, на
-    /// сколько эллипсоиды разошлись по высоте: около двадцати микрон на каждый
-    /// метр этого расхождения. В Ростовской области, ради которой МСК-61 и
-    /// построена, это десяток микрон; на дальнем краю страны — шесть сотых
-    /// миллиметра.
-    #[test]
-    fn the_datum_shift_and_its_reverse_converge_where_it_is_fitted() {
-        // Область, ради которой СК-42 и построена.
-        for (lat, lon) in [(47.23, 39.72), (55.75, 37.62), (66.53, 66.60), (43.1, 131.9)] {
-            let (there_lat, there_lon) = PULKOVO_1942.to_wgs84(lat, lon);
-            let back = PULKOVO_1942.from_wgs84(there_lat, there_lon);
-            assert!(ground_m(back, (lat, lon)) < 1e-3, "{:?} → {:?}", (lat, lon), back);
-        }
-    }
-
-    /// Код EPSG называет систему только внутри своих полос, и границы у них
-    /// точные: соседние коды — не «зона ноль» и не «зона шестьдесят один», а
-    /// совсем другие системы, и принятые за UTM они увезли бы снимок за тысячи
-    /// километров.
-    #[test]
-    fn epsg_names_a_system_only_inside_its_bands() {
-        assert_eq!(System::from_epsg(32601), Some(System::utm(1, false)));
-        assert_eq!(System::from_epsg(32660), Some(System::utm(60, false)));
-        assert_eq!(System::from_epsg(32701), Some(System::utm(1, true)));
-        assert_eq!(System::from_epsg(32760), Some(System::utm(60, true)));
-        assert_eq!(System::from_epsg(28401), Some(System::gauss_kruger(1)));
-        assert_eq!(System::from_epsg(28408), Some(System::gauss_kruger(8)));
-        assert_eq!(System::from_epsg(28432), Some(System::gauss_kruger(32)));
-        assert_eq!(System::from_epsg(6_336_101), System::msk61(1));
-        assert_eq!(System::from_epsg(6_336_102), System::msk61(2));
-        assert_eq!(System::from_epsg(6_336_103), System::msk61(3));
-
-        assert_eq!(System::from_epsg(32600), None, "полоса начинается с первой зоны");
-        assert_eq!(System::from_epsg(32700), None, "полоса начинается с первой зоны");
-        assert_eq!(System::from_epsg(32661), None, "это полярная стереографическая");
-        assert_eq!(System::from_epsg(32761), None, "это полярная стереографическая");
-        assert_eq!(System::from_epsg(28400), None, "зоны с нулевым номером нет");
-        assert_eq!(System::from_epsg(28433), None, "зон Гаусса-Крюгера тридцать две");
-        assert_eq!(System::from_epsg(6_336_100), None, "зоны с нулевым номером нет");
-        assert_eq!(System::from_epsg(6_336_104), None, "у МСК-61 три зоны");
-        assert_eq!(System::from_epsg(4326), None, "градусы вообще не проекция");
-        assert_eq!(System::from_epsg(3031), None, "антарктическая полярная — не она");
-    }
-
-    /// Три семейства отличаются не устройством, а числами — и числа эти обязаны
-    /// быть именно теми. Осевой меридиан UTM отсчитывается от антимеридиана,
-    /// Гаусса-Крюгера — от нуля, и перепутанные, они разъедутся на полмира.
-    #[test]
-    fn each_family_keeps_its_own_numbers() {
-        let utm = System::from_epsg(32638).expect("зона 38 северная");
-        assert!((utm.central_meridian_deg - 45.0).abs() < 1e-12);
-        assert_eq!(utm.scale, 0.9996);
-        assert_eq!(utm.datum, WGS84_DATUM);
-
-        let gk = System::gauss_kruger(8);
-        assert!((gk.central_meridian_deg - 45.0).abs() < 1e-12, "тот же меридиан, другой счёт");
-        assert_eq!(gk.scale, 1.0);
-        assert_eq!(gk.false_easting_m, 8_500_000.0, "номер зоны вписан в координату");
-        assert_eq!(gk.datum.ellipsoid, KRASOVSKY);
-
-        let msk = System::msk61(2).expect("зона 2");
-        // Со счётом из определения, а не с копией той же литералы: 40°59′.
-        assert!((msk.central_meridian_deg - (40.0 + 59.0 / 60.0)).abs() < 1e-10);
-        assert_eq!(msk.false_easting_m, 2_300_000.0);
-        assert_eq!(msk.false_northing_m, -4_811_057.628);
-    }
-
-    /// Прямая и обратная сходятся по всей зоне — на этом стоит варп-сетка:
-    /// её узлы считаются обратной, а привязка растра задана прямой. Гоняется
-    /// это на всех трёх семействах: у каждого свой эллипсоид и свой датум, и
-    /// пара обязана сойтись у каждого.
-    #[test]
-    fn roundtrip_converges_across_zone() {
-        // Широты у каждого семейства свои, и не для удобства: UTM объявлен на
-        // всю Землю, а СК-42 подгонялась под страну, и гонять её у полюса
-        // значило бы мерить не проекцию, а остаток выброшенной высоты (см.
-        // `the_datum_shift_and_its_reverse_converge_where_it_is_fitted`).
-        // Допуск у семейств разный, и разница у него причина, а не снисхождение:
-        // у WGS84 перехода между датумами нет вовсе, и остаётся одна проекция —
-        // это доли микрона. У систем на Красовском к ней добавляется остаток
-        // выброшенной высоты, и меньше его не сделать, не расширив договор до
-        // трёх чисел.
-        let cases = [
-            (System::utm(40, false), [-79.0, -8.0, 0.0, 45.0, 83.5], 1e-4),
-            (System::utm(40, true), [-79.0, -8.0, 0.0, 45.0, 83.5], 1e-4),
-            (System::gauss_kruger(8), [42.0, 50.0, 55.0, 65.0, 75.0], 1e-3),
-            (System::msk61(2).expect("зона 2"), [46.0, 47.0, 48.0, 49.0, 50.0], 1e-3),
-        ];
-        for (system, latitudes, tolerance_m) in cases {
-            let middle = system.central_meridian_deg;
-            for lat in latitudes {
-                for offset in [-2.5, 0.0, 1.7, 2.9] {
-                    let lon = middle + offset;
-                    let (e, n) = system.from_geodetic(lat, lon);
-                    let back = system.to_geodetic(e, n);
-                    let off = ground_m(back, (lat, lon));
-                    assert!(off < tolerance_m, "{:?}: {:?} — {} м", system, back, off);
-                }
-            }
-        }
-    }
-
-    /// Точка за швом ложится в свою зону, а не в бессмыслицу. Зона 1 стои́т на
-    /// осевом меридиане −177°, и 179° в.д. лежит от него в четырёх градусах к
-    /// западу, хотя разность долгот выходит в триста пятьдесят шесть градусов к
-    /// востоку. Ряд эту разность берёт синусом и косинусом, и ветвь ему
-    /// безразлична — но безразлична она только ему, а не всякому счёту, и это
-    /// стои́т держать проверенным.
-    #[test]
-    fn a_longitude_across_the_seam_lands_in_its_zone() {
-        let zone = System::utm(1, false);
-        assert!((zone.central_meridian_deg + 177.0).abs() < 1e-12);
-
-        let (east, north) = zone.from_geodetic(10.0, 179.0);
-        // Четыре градуса к западу — меньше пятисот километров, то есть отступ
-        // заведомо не выходит за ложный сдвиг.
-        assert!((0.0..500_000.0).contains(&east), "{}", east);
-        assert!((1_000_000.0..1_200_000.0).contains(&north), "{}", north);
-
-        // И обратно — той же ветвью, что у осевого меридиана: 179° в.д. здесь
-        // называется −181°, потому что зона лежит по западную сторону шва.
-        let (lat, lon) = zone.to_geodetic(east, north);
-        assert!((lat - 10.0).abs() < 1e-9, "{}", lat);
-        assert!((lon + 181.0).abs() < 1e-9, "{}", lon);
-    }
-
-    /// Ветвь долготы одинакова при любом датуме. Зона 32 Гаусса-Крюгера стои́т
-    /// на осевом меридиане 189° — за швом, — а переход между датумами
-    /// кончается `atan2` и свернул бы её к −171°. У UTM перехода нет, и без
-    /// разворота эти двое вели бы себя по-разному: рвалась бы рамка только у
-    /// той системы, у которой датум свой.
-    #[test]
-    fn a_system_beyond_the_seam_keeps_its_branch() {
-        let far = System::gauss_kruger(32);
-        assert!((far.central_meridian_deg - 189.0).abs() < 1e-12);
-
-        let (lat, lon) = far.to_geodetic(far.false_easting_m, 5_000_000.0);
-        assert!(lon > 180.0, "долгота осталась за швом: {}", lon);
-        assert!((lon - 189.0).abs() < 0.01, "{}", lon);
-        assert!((44.0..46.0).contains(&lat), "{}", lat);
-    }
-
-    /// Короткое замыкание на WGS84 смотрит на весь датум, а не на его
-    /// эллипсоид: датум бывает на том же эллипсоиде и всё же сдвинутым, и
-    /// принятый за WGS84 он не сдвинул бы точку никуда.
-    #[test]
-    fn a_shifted_datum_on_the_same_ellipsoid_still_moves() {
-        let nudged = Datum { shift_m: [100.0, 0.0, 0.0], ..WGS84_DATUM };
-        // Точка выбрана там, где ось X лежит горизонтально: на экваторе под
-        // 90° в.д. сдвиг вдоль неё виден целиком, а на нулевом меридиане ушёл
-        // бы в одну высоту.
-        let here = (0.0, 90.0);
-        let moved = nudged.to_wgs84(here.0, here.1);
-        assert!((ground_m(moved, here) - 100.0).abs() < 0.5, "{:?}", moved);
-
-        let back = nudged.from_wgs84(moved.0, moved.1);
-        assert!(ground_m(back, here) < 1e-3, "{:?}", back);
-    }
-
-    /// Точка на самой полярной оси даёт полюс, а не не-число: счёт широты там
-    /// делит на косинус прямого угла. С нынешних мест вызова такая точка не
-    /// приходит, но молчаливое `NaN` уехало бы дальше рамкой, у которой
-    /// протяжённость формально есть.
-    #[test]
-    fn the_axis_gives_a_pole_and_not_a_nan() {
-        let polar = KRASOVSKY.semi_major_m * (1.0 - KRASOVSKY.flattening);
-        let (north, lon) = KRASOVSKY.from_earth_centred([0.0, 0.0, polar]);
-        assert!((north - 90.0).abs() < 1e-9, "{}", north);
-        assert_eq!(lon, 0.0, "на полюсе долгота произвольна");
-
-        let (south, _) = KRASOVSKY.from_earth_centred([0.0, 0.0, -polar]);
-        assert!((south + 90.0).abs() < 1e-9, "{}", south);
-    }
-
-    /// Якоря, известные без счёта: точка осевого меридиана на экваторе — это
-    /// ложный сдвиг в чистом виде, в обоих полушариях.
-    #[test]
-    fn axis_anchors_are_exact() {
-        let north = System::utm(31, false);
-        let (e, n) = north.from_geodetic(0.0, 3.0);
-        assert!((e - 500_000.0).abs() < 1e-6 && n.abs() < 1e-6, "{} {}", e, n);
-
-        let south = System::utm(31, true);
-        let (_, n) = south.from_geodetic(0.0, 3.0);
-        assert!((n - 10_000_000.0).abs() < 1e-6, "{}", n);
-    }
-
-    /// Полушария зеркальны: та же дуга к югу — тот же метраж вниз от экватора.
-    #[test]
-    fn hemispheres_mirror() {
-        let zone = System::utm(40, false);
-        let (e1, n1) = zone.from_geodetic(30.0, 58.0);
-        let (e2, n2) = zone.from_geodetic(-30.0, 58.0);
-        assert!((e1 - e2).abs() < 1e-6);
-        assert!((n1 + n2).abs() < 1e-6, "{} {}", n1, n2);
-    }
-
-    /// Оборотов у обратного перехода столько, что дальше улучшать нечего.
-    ///
-    /// Проверяется полосой широт, а не точкой: множитель сходимости зависит от
-    /// широты в сотню раз, и удобная точка сказала бы о числе оборотов не то.
-    /// Утверждается пол округления, а не последний разряд: разряд у нативной
-    /// libm и у той, с которой модуль отгружается, свой. Отсюда и то, чего
-    /// этот тест не сторожит: запас поверх сошедшегося можно срезать, и он
-    /// смолчит. Потребовать запаса он и не может — запас взят как раз на ту
-    /// libm, которой здесь нет.
-    #[test]
-    fn the_conformal_turn_has_nothing_left_to_improve() {
-        let ellipsoid = WGS84;
-        let e = ellipsoid.eccentricity_sq().sqrt();
-        let radius = ellipsoid.semi_major_m;
-
-        let (mut settled, mut short) = (0.0f64, 0.0f64);
-        for step in 0..=1680 {
-            let lat = f64::from(step) * 0.05;
-            // Конформная широта этой точки — вход цикла.
-            let tau_c = {
-                let phi = lat.to_radians();
-                (phi.tan().asinh() - e * (e * phi.sin()).atanh()).sinh()
-            };
-            let whole = geodetic_from_conformal(e, tau_c, CONFORMAL_ROUNDS + 4);
-            settled = settled
-                .max((geodetic_from_conformal(e, tau_c, CONFORMAL_ROUNDS) - whole).abs() * radius);
-            short = short.max((geodetic_from_conformal(e, tau_c, 4) - whole).abs() * radius);
-        }
-        assert!(settled < 1e-8, "оборотов не хватает: {} м", settled);
-        assert!(short > 1e-6, "проверять было бы нечего: четырёх хватило на {} м", short);
-    }
-
-    /// А у перехода от геоцентрики широта ищется зеркальным циклом, и худший
-    /// случай у него не экватор, а полюс.
-    ///
-    /// Проверяется на точке, снятой с эллипсоида: лежащую на нём цикл не
-    /// трогает вовсе — начальное приближение там точное, и тест, гоняющий его
-    /// через датум, прошёл бы и при нуле оборотов.
-    #[test]
-    fn the_centred_turn_works_only_above_the_ellipsoid() {
-        let ellipsoid = WGS84;
-        // Своим подъёмом, а не `to_earth_centred`: та кладёт точку ровно на
-        // эллипсоид, а цикл на такой точке холост.
-        let lifted = |lat_deg: f64, height_m: f64| {
-            let lat = lat_deg.to_radians();
-            let e2 = ellipsoid.eccentricity_sq();
-            let curvature = ellipsoid.semi_major_m / (1.0 - e2 * lat.sin() * lat.sin()).sqrt();
-            (
-                (curvature + height_m) * lat.cos(),
-                (curvature * (1.0 - e2) + height_m) * lat.sin(),
-            )
-        };
-
-        // На самом эллипсоиде цикл холост: сколько ни крути, ответ тот же.
-        for step in 0..=90 {
-            let (flat, z) = lifted(f64::from(step), 0.0);
-            assert_eq!(
-                ellipsoid.latitude_at(flat, z, 0),
-                ellipsoid.latitude_at(flat, z, CENTRED_ROUNDS),
-                "на широте {} цикл что-то делает над самим эллипсоидом",
-                step
-            );
-        }
-
-        let (mut settled, mut short) = (0.0f64, 0.0f64);
-        for step in 0..=1800 {
-            let (flat, z) = lifted(f64::from(step) * 0.05, 271.0);
-            let whole = ellipsoid.latitude_at(flat, z, CENTRED_ROUNDS + 6);
-            let radius = ellipsoid.semi_major_m;
-            settled = settled
-                .max((ellipsoid.latitude_at(flat, z, CENTRED_ROUNDS) - whole).abs() * radius);
-            short = short.max((ellipsoid.latitude_at(flat, z, 2) - whole).abs() * radius);
-        }
-        assert!(settled < 1e-8, "оборотов не хватает: {} м", settled);
-        assert!(short > 1e-7, "проверять было бы нечего: двух хватило на {} м", short);
-    }
-
-    /// Опорная точка гранулы Sentinel-2 T40WFC: её верхний левый угол
-    /// (ULX 600000, ULY 7800000 из MTD_TL.xml, EPSG:32640) обязан вернуться
-    /// теми градусами, где тайл и лежит — ~70.2° с.ш. у восточного края зоны.
-    #[test]
-    fn sentinel_tile_corner_lands_where_the_tile_is() {
-        let zone = System::utm(40, false);
-        let (lat, lon) = zone.to_geodetic(600_000.0, 7_800_000.0);
-        assert!((69.9..70.5).contains(&lat), "{}", lat);
-        assert!((59.0..60.3).contains(&lon), "{}", lon);
-        // И обратно в те же метры — не только здесь.
-        //
-        // Одной точкой это утверждение не держится: множитель сходимости у
-        // обратного перехода идёт от `e²` на экваторе до сотой его доли к
-        // восьмидесятым широтам, и здешние 70,3° — почти вдевятеро легче
-        // худшего случая. Проверка, стоящая на одном углу гранулы, зелена и
-        // при цикле, урезанном вдвое; полоса отступов её держит.
-        // До восьми с половиной миллионов, а не выше: дальше отступ уводит за
-        // предел UTM в восемьдесят четыре градуса, и точка вышла бы из своей
-        // зоны — условие, которое соседний тест держит намеренно.
-        for step in 0..9 {
-            let northing = 500_000.0 + f64::from(step) * 1_000_000.0;
-            let (lat, lon) = zone.to_geodetic(600_000.0, northing);
-            let (e, n) = zone.from_geodetic(lat, lon);
-            assert!((e - 600_000.0).abs() < 1e-6, "восток на {}: {}", northing, e);
-            assert!((n - northing).abs() < 1e-6, "север на {}: {}", northing, n);
-        }
     }
 }

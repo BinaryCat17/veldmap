@@ -1,5 +1,5 @@
-//! Форматы без потокового пути (gif/bmp/webp): кадр декодируется целиком —
-//! такие файлы малы по своей природе, и бюджет это закрепляет.
+//! Formats without a streaming path (gif/bmp/webp): the frame is decoded whole —
+//! such files are small by nature, and the budget enforces that.
 
 use std::io::{BufRead, Seek};
 
@@ -22,21 +22,21 @@ pub fn produce<R: BufRead + Seek>(
     format: ImageFormat,
     emit: Emit,
 ) -> Result<(), String> {
-    // Без BufReader: читатель уже буферизован своим окном (см. Metered поверх
-    // ResourceReader) — обёртка завела бы второй буфер и копировала окно в
-    // него целиком.
+    // No BufReader: the reader is already buffered by its own window (see Metered over
+    // ResourceReader) — a wrapper would create a second buffer and copy the window
+    // into it whole.
     let decoder = image::ImageReader::with_format(reader, format)
         .into_decoder()
         .map_err(|e| format!("{:?}: {}", format, e))?;
     let (w, h) = image::ImageDecoder::dimensions(&decoder);
     if !frame_fits(w, h) {
         return Err(format!(
-            "{:?} {}×{}: кадр целиком не влезает в бюджет ({} МБ)",
+            "{:?} {}×{}: the whole frame does not fit the budget ({} MB)",
             format, w, h, FULL_DECODE_BUDGET / (1024 * 1024)
         ));
     }
     if (w, h) != (info.width, info.height) {
-        return Err(format!("{:?}: размеры разошлись с заголовком", format));
+        return Err(format!("{:?}: dimensions disagree with the header", format));
     }
 
     let rgba = image::DynamicImage::from_decoder(decoder)

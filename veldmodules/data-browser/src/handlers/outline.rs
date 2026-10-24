@@ -1,25 +1,27 @@
-//! Выбор строк, контуры на шаре и то, чем они друг другу не приходятся.
+//! Row selection, outlines on the globe, and how the two do not match each other.
 //!
-//! Здесь проходит граница данных и представления. Провайдер отдаёт снимок с
-//! его геометрией и ничего не знает о том, что её кто-то рисует; глобус
-//! принимает ломаные и ничего не знает о снимках. Свести одно с другим может
-//! только тот, у кого на экране и список, и шар, — то есть мы.
+//! Here runs the boundary between data and presentation. The provider hands over
+//! a scene with its geometry and knows nothing about anyone drawing it; the globe
+//! accepts polylines and knows nothing about scenes. Only the one who has both
+//! the list and the globe on screen can bring the two together — that is us.
 //!
-//! Состояний у строки три, и они независимы: **выбор** коробочкой — набор для
-//! пакетных действий; **контур** — очерчен ли снимок на шаре; **показ** —
-//! лежит ли он там растром (см. handlers::overlay). Сведи любые два в одно —
-//! и одно начнёт отвечать за другое: снятый контур уносил бы набранное к
-//! удалению, а показ клал бы снимок в состав пакетного действия, которого
-//! никто не просил.
+//! A row has three states, and they are independent: **selection** by checkbox —
+//! the set for batch actions; **outline** — whether the scene is outlined on the
+//! globe; **display** — whether it lies there as a raster (see handlers::overlay).
+//! Merge any two into one and one starts to answer for the other: a cleared
+//! outline would carry away the set gathered for deletion, and display would put
+//! the scene into a batch action nobody asked for.
 //!
-//! Контуры одни на приложение, а не на вкладку: шар один, а списков сколько
-//! угодно, и «контуры этой вкладки» на вопрос «что на шаре» не отвечает.
-//! Выбор, наоборот, свой у каждого списка — им и действуют над списком.
+//! Outlines belong to the application as a whole, not to a tab: there is one
+//! globe, while lists are as many as you like, and "outlines of this tab" does
+//! not answer the question "what is on the globe". Selection, by contrast, is
+//! its own for every list — it is what acts over the list.
 //!
-//! Геометрия при этом под рукой не у всех: у найденного продукт с контуром уже
-//! есть, а у строки каталога или файла на диске — один ключ, и продукт по нему
-//! восстанавливает провайдер (`on_locate`). Ответы кэшируются: ключ строки не
-//! меняется, а ход к каталогу сетевой.
+//! Geometry, though, is not at hand for everyone: a found product already has
+//! its outline, while a catalogue row or a file on disk carries only a key, and
+//! the product under it is restored by the provider (`on_locate`). Answers are
+//! cached: the row key never changes, while a trip to the catalogue goes over
+//! the network.
 
 use crate::module::components::{arrange, rows};
 use crate::module::footprint;
@@ -31,24 +33,24 @@ use crate::module::state::{Highlight, Locate, Located, State, ViewId, ViewKind};
 use crate::proto::data_provider::{DataProduct, LocateRequest, LocateResponse};
 use crate::proto::globe::{GeoPoint, Outline, OutlineStyle, Outlines};
 
-/// Выбрать строку в списке или снять выбор.
+/// Select a row in the list or clear the selection.
 ///
-/// Шара это не касается вовсе: очерчивает [`toggle_outline`], кладёт растром
-/// показ, а выбор — набор для пакетных действий над списком.
+/// This does not touch the globe at all: [`toggle_outline`] outlines, display
+/// lays a raster down, and selection is the set for batch actions over the list.
 pub fn toggle(state: &mut State, view: ViewId, key: String) {
     let what = chosen_by_key(state, view, &key);
     let Some(listing) = state.listing_mut(view) else { return };
     listing.select(key, what);
 }
 
-/// Очертить снимок на шаре или убрать контур.
+/// Outline a scene on the globe or remove the outline.
 ///
-/// Ключ здесь всегда ключ снимка: контур бывает у него одного, а геометрию под
-/// этим ключом и спрашивают у каталога.
+/// The key here is always the scene key: the outline belongs to it alone, and
+/// the geometry under this key is what gets asked of the catalogue.
 pub fn toggle_outline(state: &mut State, key: String) {
-    // Не спросившееся переспрашиваем, а не снимаем: просьба уже записана, и
-    // жмут её именно затем, чтобы попробовать ещё раз. Снять её можно тем же
-    // значком, когда ответ придёт, или «Снять с шара».
+    // What failed to be asked we re-ask rather than drop: the request is already
+    // recorded, and it is pressed precisely to try again. It can be dropped with
+    // the same icon once the answer arrives, or with "Remove from globe".
     if state.outlines.contains(&key) && matches!(state.located.get(&key), Some(Located::Failed)) {
         state.located.remove(&key);
         refresh(state);
@@ -61,11 +63,11 @@ pub fn toggle_outline(state: &mut State, key: String) {
     refresh(state);
 }
 
-/// Что стои́т за строкой — род её выбора.
+/// What stands behind a row — the kind of its selection.
 ///
-/// Ключи файла снимаются со строки здесь, а не в момент действия: выбор
-/// переживает переход в другую папку, и к тому времени строки на экране может
-/// не быть вовсе.
+/// File keys are taken from the row here, not at the moment of the action: the
+/// selection survives moving to another folder, and by then the row may be gone
+/// from the screen altogether.
 fn chosen(row: &Row) -> Chosen {
     match row.is_snapshot() {
         true => Chosen::Snapshot,
@@ -77,12 +79,13 @@ fn chosen(row: &Row) -> Chosen {
     }
 }
 
-/// То же по ключу: строку под ним ищем среди показанных — там же, где её и
-/// нажали.
+/// The same by key: the row under it is looked for among the shown ones —
+/// exactly where it was pressed.
 ///
-/// Не нашлась — считаем снимком: род по одному ключу не восстановить. Такое
-/// бывает, когда список пересобрала рассылка библиотеки, пока ехало нажатие, —
-/// она приходит по десятку раз в секунду, пока что-нибудь качается.
+/// Not found — treat it as a scene: the kind cannot be restored from a single
+/// key. This happens when the library broadcast rebuilt the list while the
+/// press was in flight — it arrives about ten times a second while something is
+/// downloading.
 fn chosen_by_key(state: &State, view: ViewId, key: &str) -> Chosen {
     let rows = rows::of(state, view);
     let Some(listing) = state.get(view).and_then(ViewKind::listing) else {
@@ -94,21 +97,21 @@ fn chosen_by_key(state: &State, view: ViewId, key: &str) -> Chosen {
     }
 }
 
-/// Попросить заново — это и переспросить: сорвавшийся ход к каталогу просьбу
-/// не переживает (см. [`Located::Failed`]). Ответ каталога — «нет такого» —
-/// переживает: он не устаревает.
+/// Ask again — and that is also a re-ask: a trip to the catalogue that broke
+/// down does not survive the request (see [`Located::Failed`]). The catalogue's
+/// "no such thing" does survive: it never goes stale.
 fn retry(state: &mut State, key: &str) {
     if matches!(state.located.get(key), Some(Located::Failed)) {
         state.located.remove(key);
     }
 }
 
-/// Отметить или снять отметку разом со всего, что показано, — коробочка в
-/// шапке.
+/// Mark or unmark everything that is shown at once — the checkbox in the header.
 ///
-/// Набор берётся тот же, о котором она и говорит (`Arranged::marks`): страница
-/// со всем раскрытым на ней. Второго определения «что видно» здесь нет
-/// намеренно — разойдясь с первым, коробочка обещала бы одно, а делала другое.
+/// The set taken is the very one it speaks about (`Arranged::marks`): the page
+/// with everything expanded on it. A second definition of "what is visible" is
+/// deliberately absent here — were it to diverge from the first, the checkbox
+/// would promise one thing and do another.
 pub fn mark_shown(state: &mut State, view: ViewId, on: bool) {
     let rows = rows::of(state, view);
     let Some(listing) = state.get(view).and_then(ViewKind::listing) else { return };
@@ -130,11 +133,11 @@ pub fn mark_shown(state: &mut State, view: ViewId, on: bool) {
     }
 }
 
-/// Снять весь выбор этого списка — кнопка в заголовке.
+/// Clear the whole selection of this list — the button in the title.
 ///
-/// Весь, а не показанный: выбор переживает переход в другую папку, и «снять
-/// видимое» оставило бы набранным то, чего на экране уже нет, — а считаться в
-/// заголовке оно продолжало бы.
+/// The whole of it, not the shown part: the selection survives moving to
+/// another folder, and "clear the visible" would leave gathered what is no
+/// longer on screen — while continuing to count in the title.
 pub fn unmark_all(state: &mut State, view: ViewId) {
     let Some(listing) = state.listing_mut(view) else { return };
     if listing.selected.is_empty() {
@@ -143,9 +146,11 @@ pub fn unmark_all(state: &mut State, view: ViewId) {
     listing.selected.clear();
 }
 
-/// Убрать один контур — из списка «На просмотре», где он стоит своей строкой.
+/// Remove a single outline — from the "Being viewed" list, where it stands as
+/// its own row.
 ///
-/// Выбор в списках это не трогает: коробочка про другое.
+/// This does not touch the selection in the lists: the checkbox is about
+/// something else.
 pub fn drop_one(state: &mut State, key: &str) {
     if !state.outlines.remove(key) {
         return;
@@ -153,18 +158,19 @@ pub fn drop_one(state: &mut State, key: &str) {
     refresh(state);
 }
 
-/// Навести шар на снимок и выбрать его: обвести лентой, назвать полосой под
-/// шаром и перевести взгляд туда.
+/// Point the globe at the scene and select it: ring it with a ribbon, name it
+/// with the bar under the globe, and turn the gaze there.
 ///
-/// Один обработчик на контур и на слой: вопрос у них один — «покажи мне, где
-/// это», — и два ответа на него разошлись бы тем, что у слоя выбор не
-/// зажигался бы. Именно выбирает, а не гасит выбор: сюда идут за местом, и
-/// названо должно быть то, к чему привели.
+/// One handler for both the outline and the layer: their question is one —
+/// "show me where this is" — and two answers to it would differ in that a
+/// layer's selection would not light up. It selects, and does not clear the
+/// selection: one comes here for the place, and what was led to must be the
+/// thing named.
 ///
-/// Куда смотреть, спрашивается у того, у кого это точнее: у контура —
-/// нарисованная геометрия, у слоя — рамка, посчитанная в момент показа. Ход к
-/// каталогу за наводкой не делается: это сетевой запрос за тем, что уже
-/// известно.
+/// Where to look is asked of whoever knows it more precisely: for the outline —
+/// the drawn geometry, for the layer — the frame computed at the moment of
+/// display. No trip to the catalogue for the hint: that is a network request
+/// for something already known.
 pub fn focus(state: &mut State, key: &str) {
     let frame = state
         .outlined
@@ -183,22 +189,23 @@ pub fn focus(state: &mut State, key: &str) {
     super::nav::on_new_globe(state);
 }
 
-/// Выбрать контур — или снять выбор. Единственное место, где выбор меняется по
-/// воле человека, и потому же здесь гаснет подсветка перехода: подсвечена на
-/// экране одна строка, и выбор на шаре — свежий ответ на тот же вопрос
-/// (см. [`Highlight`]).
+/// Select the outline — or clear the selection. The only place where the
+/// selection changes by human will, and that is why the transition highlight
+/// goes out here too: one row is highlighted on the screen, and the selection on
+/// the globe is a fresh answer to the same question (see [`Highlight`]).
 ///
-/// Глобусу при этом уезжает весь набор контуров: о выборе ему говорит он же —
-/// а неизменившийся набор до шины не доходит.
+/// The globe meanwhile receives the whole set of outlines: it is told about the
+/// selection by that same set — and an unchanged set never reaches the bus.
 fn select(state: &mut State, key: Option<String>) {
     if state.picked_key() == key.as_deref().unwrap_or_default() {
         return;
     }
     match key {
-        // Щелчок мимо контуров гасит ленту — и только её. Отметку перехода
-        // ставил не он, живёт она до ухода из папки, и снимать её заодно
-        // значило бы убрать со экрана строку, к которой только что привели
-        // (`State::deselect` для того и написан).
+        // A click off the outlines puts out the ribbon — and only it. The
+        // transition mark was not set by that click, it lives until leaving the
+        // folder, and clearing it along the way would mean removing from the
+        // screen the row that was just led to (`State::deselect` is written
+        // for exactly that).
         None => {
             state.deselect();
         }
@@ -207,13 +214,15 @@ fn select(state: &mut State, key: Option<String>) {
     send(state);
 }
 
-/// Снять контуры с шара. Выбора в списках это не касается: коробочка про
-/// другое, и набранное к удалению кнопка про шар выбрасывать не должна.
+/// Clear the outlines from the globe. This does not touch the selection in the
+/// lists: the checkbox is about something else, and a button about the globe
+/// must not throw away what is gathered for deletion.
 pub fn clear(state: &mut State) {
-    // Следов у очерченного три — просьба, набор контуров и лента на шаре, — и
-    // снимаются они вместе. Уйти по первому же «контуров не было» нельзя:
-    // лента переживает контур, снятый руками, и строка осталась бы подсвеченной
-    // как лежащая на шаре, которого на ней уже нет.
+    // The traces of an outline are three — the request, the set of outlines, and
+    // the ribbon on the globe — and they are cleared together. One cannot leave
+    // at the very first "there were no outlines": the ribbon survives an outline
+    // removed by hand, and the row would stay highlighted as lying on a globe
+    // where it is no longer.
     let unmarked = !state.outlines.is_empty();
     state.outlines.clear();
     let unpicked = state.deselect();
@@ -224,9 +233,10 @@ pub fn clear(state: &mut State) {
     }
 }
 
-/// Погасить выбор контура, не трогая сами контуры. Нужно показу снимка на шаре
-/// (см. overlay): на шар лёг другой снимок, и подсвеченный контур прежнего
-/// рядом с ним — ложь о том, на что смотрят.
+/// Put out the outline selection without touching the outlines themselves.
+/// Needed by scene display on the globe (see overlay): another scene has been
+/// laid on the globe, and the highlighted outline of the previous one beside it
+/// is a lie about what is being looked at.
 pub fn deselect(state: &mut State) {
     if !state.deselect() {
         return;
@@ -234,12 +244,12 @@ pub fn deselect(state: &mut State) {
     send(state);
 }
 
-/// Выбрать снимок, накрывающий точку. `None` — щелчок пришёлся мимо Земли.
+/// Select the scene covering the point. `None` — the click missed the Earth.
 ///
-/// Из накрывших берём самый мелкий: одну съёмку каталог отдаёт несколькими
-/// продуктами с почти одинаковым контуром, а полоса радара накрывает собой
-/// целую плитку, — и «то, что помельче» единственное отвечает на вопрос «куда
-/// я ткнул».
+/// Among those covering it we take the smallest: the catalogue hands one shoot
+/// over as several products with nearly identical outlines, while a radar strip
+/// covers a whole tile — and "the smaller one" alone answers the question
+/// "where did I poke".
 pub fn pick(state: &mut State, at: Option<(f64, f64)>) {
     let chosen = at.and_then(|(lat, lon)| {
         state
@@ -252,19 +262,19 @@ pub fn pick(state: &mut State, at: Option<(f64, f64)>) {
     select(state, chosen);
 }
 
-/// Продукт по ключу приехал — или не приехал.
+/// The product by key has arrived — or has not.
 ///
-/// Три ответа, и запоминаются они по-разному: продукт живёт до конца запуска,
-/// «такого нет» тоже (оно не устареет), а «не спросилось» — только до
-/// следующей отметки той же строки. Свалив последнее в «такого нет», мы
-/// хоронили бы снимок из-за одной сетевой заминки.
+/// Three answers, and they are remembered differently: the product lives until
+/// the end of the run, "no such thing" as well (it will not go stale), while
+/// "failed to ask" — only until the next mark of the same row. Lumping the last
+/// one into "no such thing" would bury a scene over a single network hitch.
 pub fn located(state: &mut State, key: String, response: LocateResponse) {
     let answer = match (response.product, response.answered) {
         (Some(product), _) => Located::Found(product),
         (None, true) => Located::Missing,
         (None, false) => {
-            veldsdk::log::warn!(target: "handlers", "контур '{}': {}", key, response.error);
-            state.notice = Some(format!("Контур не спросился: {}", response.error));
+            veldsdk::log::warn!(target: "handlers", "outline '{}': {}", key, response.error);
+            state.notice = Some(format!("Outline request failed: {}", response.error));
             Located::Failed
         }
     };
@@ -272,13 +282,13 @@ pub fn located(state: &mut State, key: String, response: LocateResponse) {
     refresh(state);
 }
 
-/// Пересобрать набор контуров из [`State::outlines`] и отправить его глобусу.
+/// Rebuild the set of outlines from [`State::outlines`] and send it to the globe.
 ///
-/// Зовётся всякий раз, когда меняется просьба или то, из чего берётся
-/// геометрия: набор у глобуса заменяется целиком (см. `Outlines` в его
-/// types.proto), и другого способа сказать ему про контуры нет. Спрашивать
-/// перед отправкой «а изменился ли он» не нужно — топик объявлен снимком, и
-/// неизменившийся набор до шины не доходит.
+/// Called whenever the request or the source of geometry changes: the globe's
+/// set is replaced wholesale (see `Outlines` in its types.proto), and there is
+/// no other way to tell it about the outlines. Asking "has it changed" before
+/// sending is not needed — the topic is declared as a snapshot, and an
+/// unchanged set never reaches the bus.
 pub fn refresh(state: &mut State) {
     let mut wanted: Vec<Outlined> = Vec::new();
     let mut ask: Vec<String> = Vec::new();
@@ -286,13 +296,14 @@ pub fn refresh(state: &mut State) {
     for key in &state.outlines {
         match product(state, key) {
             Known::Have(found) => {
-                // Продукт из выдачи поиска кладём в кэш: выдача сменится, а
-                // контур переживёт её — и без кэша он моргнул бы, уехав в
-                // каталог за геометрией, которая только что была в руках.
+                // A product from the search results goes into the cache: the
+                // results will change, while the outline outlives them — and
+                // without the cache it would blink, going off to the catalogue
+                // for geometry that was in hand a moment ago.
                 //
-                // Пустую геометрию кэшируем тоже: выдача и `on_locate` идут к
-                // одному источнику, и второй ход принёс бы ту же пустоту —
-                // только секундой позже и по сети.
+                // Empty geometry is cached too: the search and `on_locate` go
+                // to one source, and a second trip would bring the same
+                // emptiness — only a second later and over the network.
                 if !state.located.contains_key(key) {
                     cache.push((key.clone(), found.clone()));
                 }
@@ -306,20 +317,22 @@ pub fn refresh(state: &mut State) {
                 }
             }
             Known::Ask => ask.push(key.clone()),
-            // Ответ либо ещё в пути, либо был и рисовать по нему нечего.
+            // The answer is either still on its way, or has arrived and there
+            // is nothing to draw from it.
             Known::Nothing => {}
         }
     }
     for (key, found) in cache {
         state.located.insert(key, Located::Found(found));
     }
-    // Порядок множества случаен, а набор уезжает целиком: без этого один и тот
-    // же набор выглядел бы новым на каждую пересборку.
+    // The order of the set is random, while the set travels wholesale: without
+    // this the same set would look new on every rebuild.
     wanted.sort_by(|left, right| left.key.cmp(&right.key));
 
     for key in ask {
-        // Отметка «спрашиваем» ставится здесь же: со следующей пересборки этот
-        // ключ уже известен, и второй раз в каталог не поедет (см. [`Located`]).
+        // The "asking" mark is set right here: from the next rebuild on, this
+        // key is already known, and it will not go to the catalogue a second
+        // time (see [`Located`]).
         state.located.insert(key.clone(), Located::Asking);
         let correlation = state.locates.begin(Locate::Outline(key.clone()));
         crate::calls::data_provider::on_locate(&LocateRequest { identifier: key }, &correlation);
@@ -330,16 +343,19 @@ pub fn refresh(state: &mut State) {
     send(state);
 }
 
-/// Погасить ленту, если снимка, который она обводит, на шаре больше нет.
+/// Put out the ribbon if the scene it rings is no longer on the globe.
 ///
-/// Выбранным остаётся всё, что на шаре хоть как-то есть: контур — им лента и
-/// держится, слой — он и без ленты назван полосой под шаром, и гасить выбор
-/// снимка, который на шаре виден, значило бы отвечать «ни на что не смотрим»,
-/// глядя прямо на него. Пропало и то, и другое — выбирать больше нечего.
+/// Everything that is on the globe in any way stays selected: the outline —
+/// that is what holds the ribbon, the layer — it is named by the bar under the
+/// globe even without the ribbon, and putting out the selection of a scene that
+/// is visible on the globe would mean answering "we are looking at nothing"
+/// while looking straight at it. Both are gone — there is nothing left to
+/// select.
 ///
-/// Зовётся отовсюду, откуда снимок с шара уходит: снятая отметка, снятый слой,
-/// сменившаяся выдача. Второе такое правило по месту разошлось бы с этим, и
-/// строка осталась бы подсвеченной как лежащая на шаре, которого на ней нет.
+/// Called from everywhere a scene leaves the globe: a cleared mark, a removed
+/// layer, changed search results. A second such rule kept locally would diverge
+/// from this one, and the row would stay highlighted as lying on a globe where
+/// it is not.
 pub fn forget_gone(state: &mut State) {
     let picked = state.picked_key();
     if picked.is_empty() {
@@ -352,25 +368,26 @@ pub fn forget_gone(state: &mut State) {
     }
 }
 
-/// Что известно про геометрию очерчиваемого снимка.
+/// What is known about the geometry of the scene being outlined.
 enum Known<'a> {
     Have(&'a DataProduct),
-    /// Продукта под рукой нет — надо спросить провайдера.
+    /// The product is not at hand — the provider must be asked.
     Ask,
-    /// Рисовать нечего и спрашивать нечего: ответ либо ещё в пути, либо был и
-    /// оказался пуст, либо не вышло спросить. Различать их здесь не по чему —
-    /// набор контуров от этого не меняется.
+    /// There is nothing to draw and nothing to ask: the answer is either still
+    /// on its way, or has arrived and turned out empty, or asking failed. There
+    /// is no telling them apart here — the set of outlines does not change
+    /// because of it.
     Nothing,
 }
 
-/// Продукт, из которого берётся контур: в выдаче поиска он под рукой, у
-/// прочих списков — только в ответах провайдера.
+/// The product the outline is taken from: in the search results it is at hand,
+/// for the other lists — only in the provider's answers.
 ///
-/// Ищется по ключу во всех выдачах сразу, а не в той вкладке, где ключ
-/// отмечен: один и тот же снимок отмечают и в каталоге, и в выдаче, а продукт
-/// с геометрией лежит только во второй. Спрашивай мы по вкладке — вторая
-/// отметка гасила бы уже нарисованный контур и слала бы в каталог запрос за
-/// тем, что лежит в соседнем виде.
+/// Looked up by key across all results at once, not in the tab where the key is
+/// marked: the same scene is marked both in the catalogue and in the results,
+/// while the product with geometry lies only in the second. Were we to ask by
+/// tab — the second mark would put out an already drawn outline and send a
+/// request to the catalogue for what lies in a neighboring view.
 fn product<'a>(state: &'a State, key: &str) -> Known<'a> {
     let found = state.views().iter().find_map(|view| match &view.kind {
         ViewKind::Search(search) => {
@@ -388,16 +405,16 @@ fn product<'a>(state: &'a State, key: &str) -> Known<'a> {
     }
 }
 
-/// Отправить глобусу весь набор. Единственный способ сказать ему про контуры —
-/// отсюда и одна точка вызова на каждое изменение, своё и чужое: набор
-/// наложений меняет этот тоже (см. `overlay::send_set`).
+/// Send the whole set to the globe. The only way to tell it about outlines —
+/// hence a single call site for every change, our own and foreign: the set of
+/// overlays changes this one too (see `overlay::send_set`).
 pub fn send(state: &State) {
     crate::calls::globe::on_outlines(&Outlines { outlines: drawn(state) });
 }
 
-/// Из чего складывается набор: очерченное по просьбе и место того, что на шар
-/// ещё едет. Отдельно от отправки, потому что это единственное, что здесь
-/// можно проверить, не заводя шины.
+/// What the set is made of: outlined on request and the place of what is still
+/// travelling to the globe. Separate from sending because this is the only
+/// thing here that can be checked without starting the bus.
 fn drawn(state: &State) -> Vec<Outline> {
     let picked = state.picked_key();
     let mut outlines: Vec<Outline> = Vec::new();
@@ -409,10 +426,10 @@ fn drawn(state: &State) -> Vec<Outline> {
         rings(&mut outlines, &outlined.rings, style);
     }
     for key in under_way(state) {
-        // Очерченный по просьбе второй раз не рисуется: контур у снимка один,
-        // и две ломаные по одному месту сложились бы в одну лишнюю линию.
-        // Просьба при этом старше: она переживёт приезд снимка, а штриховка —
-        // нет.
+        // An outline drawn on request is not drawn a second time: a scene has
+        // one outline, and two polylines over the same place would add up to
+        // one extra line. The request is meanwhile older: it will outlive the
+        // arrival of the scene, while the hatching will not.
         if state.outlined.iter().any(|outlined| outlined.key == key) {
             continue;
         }
@@ -422,7 +439,7 @@ fn drawn(state: &State) -> Vec<Outline> {
     outlines
 }
 
-/// Кольца одной геометрии — контурами названного вида.
+/// Rings of one geometry — as outlines of the named style.
 fn rings(outlines: &mut Vec<Outline>, geometry: &[crate::proto::data_provider::Ring], style: OutlineStyle) {
     outlines.extend(geometry.iter().map(|ring| Outline {
         points: ring.points.iter().map(|point| GeoPoint { lat: point.lat, lon: point.lon }).collect(),
@@ -430,446 +447,44 @@ fn rings(outlines: &mut Vec<Outline>, geometry: &[crate::proto::data_provider::R
     }));
 }
 
-/// Снимки, которые на шар только едут: показ попросили, а картинки ещё нет.
+/// Scenes that are only travelling to the globe: display has been requested,
+/// but the picture is not there yet.
 ///
-/// Их место и заштриховано на шаре. Без этого нажатие на значок глобуса
-/// не отвечает ничем: между просьбой и первой картинкой лежат десятки секунд —
-/// ход к каталогу, открытие растров, описание по сети, — и всё это время на
-/// шаре не появляется ровно ничего.
+/// Their place is hatched on the globe. Without this, pressing the globe icon
+/// answers with nothing: between the request and the first picture lie tens of
+/// seconds — a trip to the catalogue, opening rasters, describing over the
+/// network — and all that time exactly nothing appears on the globe.
 ///
-/// Двумя источниками, потому что просьба живёт в двух положениях: пока
-/// восстанавливают продукт по ключу ([`State::showing`]) и пока наложение уже
-/// заведено. А кончается штрих не с ними, а с первой картинкой, и спрашивается
-/// это одним общим правилом ([`rows::onto_globe`]) — тем же, которым полоса под
-/// строкой выбирает между долей и «идёт, а доли нет». Вопрос у них один:
-/// видно ли уже хоть что-нибудь. Своего ответа здесь быть не может — он
-/// разошёлся бы с полосой, и снимок стоял бы очерченным поверх собственной
-/// картинки.
+/// From two sources, because the request lives in two positions: while the
+/// product is being restored by key ([`State::showing`]) and while the overlay
+/// is already set up. But the hatching ends not with them, but with the first
+/// picture, and this is asked by one common rule ([`rows::onto_globe`]) — the
+/// same one by which the bar under the row chooses between a share and "going,
+/// but there is no share". Their question is one: is anything visible at all
+/// yet. There can be no answer of its own here — it would diverge from the bar,
+/// and the scene would stand outlined on top of its own picture.
 fn under_way(state: &State) -> Vec<String> {
     let laid = |key: &String| state.overlays.iter().any(|overlay| &overlay.identifier == key);
     state
         .overlays
         .iter()
-        // Скрытый не штрихуется: «скрыт» — это «не рисуется», и заштрихованное
-        // место спорило бы с глазом, которым его спрятали. Полосе под строкой
-        // это не мешает: работа по нему идёт, и о ней там сказано честно.
+        // A hidden one is not hatched: "hidden" means "not drawn", and a
+        // hatched place would argue with the very eye that hid it. It does not
+        // hinder the bar under the row: work on it goes on, and it says so
+        // honestly there.
         .filter(|overlay| !overlay.hidden)
         .map(|overlay| overlay.identifier.clone())
-        // Просьба под ключом заведённого слоя не бывает — её снимает тот же
-        // ответ, что слой заводит, — но держится это правилом в соседнем
-        // обработчике, а два одинаковых кольца по одному месту сложились бы в
-        // лишнюю линию.
+        // A request under the key of an already set up layer never exists — the
+        // same answer that sets up the layer clears it — but this is held by a
+        // rule in the neighboring handler, and two identical rings over the
+        // same place would add up to an extra line.
         .chain(state.showing.iter().filter(|key| !laid(key)).cloned())
         .filter(|key| matches!(rows::onto_globe(state, key).pace(), Pace::Unknown))
         .collect()
 }
 
-/// Насколько снимок велик — угловой радиус его контура. Без геометрии он
-/// бесконечен: такой не выиграет ни у одного настоящего.
+/// How big a scene is — the angular radius of its outline. Without geometry it
+/// is infinite: such a one loses to no real scene.
 fn extent(outlined: &Outlined) -> f64 {
     footprint::frame(&outlined.rings).map_or(f64::INFINITY, |frame| frame.radius_deg)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::module::handlers::browse;
-    use crate::module::state::BrowseState;
-    use crate::proto::data_provider::{GeoPoint as ProductPoint, Ring};
-
-    fn state() -> State {
-        State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние")
-    }
-
-    /// Снимок с квадратным контуром 10..20 по обеим осям.
-    fn square(key: &str) -> Outlined {
-        Outlined {
-            key: key.to_string(),
-            label: key.to_string(),
-            folder: false,
-            rings: vec![Ring {
-                points: [(10.0, 10.0), (10.0, 20.0), (20.0, 20.0), (20.0, 10.0)]
-                    .into_iter()
-                    .map(|(lat, lon)| ProductPoint { lat, lon })
-                    .collect(),
-            }],
-        }
-    }
-
-    /// У снимка, который на шар только едет, заштриховано занятое им место — и
-    /// перестаёт быть заштрихованным, как только он доехал.
-    ///
-    /// Без этого нажатие на значок глобуса не отвечает ничем: между просьбой и
-    /// первой картинкой лежат десятки секунд, и всё это время на шаре не видно
-    /// даже места, куда снимок ляжет.
-    #[test]
-    fn a_snapshot_on_its_way_has_its_place_hatched() {
-        use crate::proto::data_provider::DataProduct;
-        let key = "eodata/store/A.SAFE";
-        let product = DataProduct {
-            identifier: key.to_string(),
-            footprint: square(key).rings,
-            ..Default::default()
-        };
-
-        let mut state = state();
-        state.located.insert(key.to_string(), Located::Found(product.clone()));
-        assert!(drawn(&state).is_empty(), "неспрошенное на шаре не рисуется");
-
-        // Продукт восстанавливают по ключу — картинки нет, а место уже видно.
-        state.showing.insert(key.to_string());
-        let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
-        assert_eq!(styles, vec![OutlineStyle::OutlinePending as i32]);
-
-        // Наложение завелось, растров ещё нет — штриховка та же.
-        state.showing.remove(key);
-        crate::module::handlers::overlay::show(&mut state, &product, None);
-        let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
-        assert_eq!(styles, vec![OutlineStyle::OutlinePending as i32]);
-
-        // Растры уехали глобусу, но он их ещё описывает — видно по-прежнему
-        // ничего, и штрих на месте. Это и есть самая долгая часть пути: у
-        // растра по сети она длится десятки секунд.
-        if let Some(overlay) = state.overlays.first_mut() {
-            overlay.rasters = vec![Default::default()];
-            overlay.progress = crate::module::state::overlay::Progress {
-                working: true,
-                blank: true,
-                ..Default::default()
-            };
-        }
-        let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
-        assert_eq!(
-            styles,
-            vec![OutlineStyle::OutlinePending as i32],
-            "штриховка снята раньше картинки"
-        );
-
-        // Скрытый не штрихуется: «скрыт» — это «не рисуется», и место,
-        // заштрихованное вопреки глазу, спорило бы с ним.
-        if let Some(overlay) = state.overlays.first_mut() {
-            overlay.hidden = true;
-        }
-        assert!(drawn(&state).is_empty(), "скрытый слой заштриховал своё место");
-        if let Some(overlay) = state.overlays.first_mut() {
-            overlay.hidden = false;
-        }
-
-        // Растр описан — по нему уже есть что нарисовать, и место держать
-        // больше нечем: снимок виден сам, хотя добыча ещё идёт.
-        if let Some(overlay) = state.overlays.first_mut() {
-            overlay.progress = crate::module::state::overlay::Progress {
-                working: true,
-                blank: false,
-                ..Default::default()
-            };
-        }
-        assert!(drawn(&state).is_empty(), "штриховка пережила приезд картинки");
-    }
-
-    /// Очерченный по просьбе рисуется один раз, даже когда он же едет на шар:
-    /// контур у снимка один, и вторая ломаная по тому же месту — лишняя линия.
-    /// Заливки у него при этом не будет: просьба старше, она переживёт приезд
-    /// снимка, а штриховка — нет.
-    #[test]
-    fn an_asked_outline_is_not_doubled_by_the_hatch() {
-        let key = "eodata/store/A.SAFE";
-        let mut state = state();
-        state.outlined = vec![square(key)];
-        state.showing.insert(key.to_string());
-        state.located.insert(
-            key.to_string(),
-            Located::Found(crate::proto::data_provider::DataProduct {
-                identifier: key.to_string(),
-                footprint: square(key).rings,
-                ..Default::default()
-            }),
-        );
-
-        let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
-        assert_eq!(styles, vec![OutlineStyle::OutlinePlain as i32], "контур нарисован дважды");
-
-        // Выбранный — лентой, и штриховка её не подменяет.
-        state.highlight =
-            Some(Highlight { key: key.to_string(), view: None, on_globe: true });
-        let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
-        assert_eq!(styles, vec![OutlineStyle::OutlineSelected as i32]);
-    }
-
-    /// Подсвечена на экране одна строка, и владелец у подсветки один: щелчок по
-    /// шару гасит подсветку перехода, а переход к другой строке — ленту на
-    /// шаре. Без этого правила подсвеченными остаются обе — та, к которой
-    /// привели, и та, которую выбрали после.
-    #[test]
-    fn the_highlight_has_one_owner() {
-        let mut state = state();
-        let pane = state.focused();
-        let view = state.open_in(pane, ViewKind::Browse(BrowseState::default()));
-        state.outlined = vec![square("eodata/store/A.SAFE")];
-        let elsewhere = "eodata/store/B.SAFE".to_string();
-
-        browse::reveal(&mut state, view, elsewhere.clone());
-        assert_eq!(state.target_in(view), elsewhere);
-
-        pick(&mut state, Some((15.0, 15.0)));
-        assert_eq!(state.picked_key(), "eodata/store/A.SAFE");
-        assert_eq!(state.target_in(view), "", "подсветка перехода пережила выбор на шаре");
-
-        browse::reveal(&mut state, view, elsewhere);
-        assert_eq!(state.picked_key(), "", "лента на шаре пережила переход к другой строке");
-    }
-
-    /// Род выбора снимается со строки, а не назначается умолчанием.
-    ///
-    /// Снимок и файл сам по себе выбираются одной коробочкой, а пакетное
-    /// действие делает с ними разное: снимок разворачивают в его файлы, файл
-    /// адресуют собственными ключами. Записанный не тем родом, он получит
-    /// чужие пакетные кнопки.
-    #[test]
-    fn the_checkbox_remembers_what_the_row_was() {
-        use crate::proto::data_library::{LibraryEntry, LibraryStatus};
-
-        let lib = |name: &str, product: &str, identifier: &str| LibraryEntry {
-            name: name.to_string(),
-            identifier: identifier.to_string(),
-            product: product.to_string(),
-            done: 1,
-            total: 1,
-            status: LibraryStatus::LibComplete as i32,
-            modified: 0,
-            siblings: 1,
-            trouble: String::new(),
-        };
-
-        let mut state = state();
-        state.library.entries = vec![
-            lib("B1.TIF", "eodata/store/S2B_X.SAFE", "eodata/store/S2B_X.SAFE/B1.TIF"),
-            lib("dem.tif", "", "eodata/dem/dem.tif"),
-        ];
-        let pane = state.focused();
-        let view = state.open_in(pane, ViewKind::Downloaded(Default::default()));
-
-        toggle(&mut state, view, "eodata/store/S2B_X.SAFE".to_string());
-        toggle(&mut state, view, "eodata/dem/dem.tif".to_string());
-
-        let listing = state.get(view).and_then(ViewKind::listing).expect("список");
-        assert!(
-            matches!(listing.selected.get("eodata/store/S2B_X.SAFE"), Some(Chosen::Snapshot)),
-            "снимок записан не снимком"
-        );
-        match listing.selected.get("eodata/dem/dem.tif") {
-            Some(Chosen::File { identifier, name, .. }) => {
-                assert_eq!(identifier, "eodata/dem/dem.tif", "ключ файла нужен закачке");
-                assert_eq!(name, "dem.tif", "имя записи нужно удалению");
-            }
-            _ => panic!("файл записан не файлом"),
-        }
-
-        // Второе нажатие той же коробочкой снимает выбор.
-        toggle(&mut state, view, "eodata/dem/dem.tif".to_string());
-        let listing = state.get(view).and_then(ViewKind::listing).expect("список");
-        assert!(!listing.selected.contains_key("eodata/dem/dem.tif"));
-    }
-
-    /// Коробочка в шапке берёт показанные строки — и только их, и только в
-    /// выбор: шара она не касается так же, как и коробочка строки.
-    #[test]
-    fn the_header_box_takes_the_shown_rows_into_the_choice_only() {
-        let mut state = state();
-        state.library.entries = vec![crate::proto::data_library::LibraryEntry {
-            name: "dem.tif".to_string(),
-            identifier: "eodata/dem/dem.tif".to_string(),
-            product: String::new(),
-            done: 1,
-            total: 1,
-            status: crate::proto::data_library::LibraryStatus::LibComplete as i32,
-            modified: 0,
-            siblings: 1,
-            trouble: String::new(),
-        }];
-        let pane = state.focused();
-        let view = state.open_in(pane, ViewKind::Downloaded(Default::default()));
-
-        mark_shown(&mut state, view, true);
-        let listing = state.get(view).and_then(ViewKind::listing).expect("список");
-        assert_eq!(listing.selected.len(), 1, "показанная строка не выбрана");
-        assert!(state.outlines.is_empty(), "коробочка шапки полезла на шар");
-
-        mark_shown(&mut state, view, false);
-        let listing = state.get(view).and_then(ViewKind::listing).expect("список");
-        assert!(listing.selected.is_empty(), "второе нажатие не сняло выбор");
-    }
-
-    /// Граница выбора и шара — в обе стороны.
-    ///
-    /// «Снять с шара» не должно выбрасывать набранное к удалению, а «снять
-    /// выбор» — уносить контуры: это два независимых состояния, и кнопка
-    /// каждого отвечает только за своё.
-    #[test]
-    fn the_globe_and_the_choice_do_not_clear_each_other() {
-        let mut state = state();
-        let pane = state.focused();
-        let view = state.open_in(pane, ViewKind::Browse(BrowseState::default()));
-
-        state.outlines.insert("eodata/store/A.SAFE".to_string());
-        state.outlined = vec![square("eodata/store/A.SAFE")];
-        toggle(&mut state, view, "eodata/store/dem.tif".to_string());
-
-        clear(&mut state);
-        assert!(state.outlines.is_empty() && state.outlined.is_empty(), "контуры не сняты");
-        let listing = state.get(view).and_then(ViewKind::listing).expect("список");
-        assert_eq!(listing.selected.len(), 1, "«снять с шара» выбросило набранное");
-
-        state.outlines.insert("eodata/store/A.SAFE".to_string());
-        unmark_all(&mut state, view);
-        let listing = state.get(view).and_then(ViewKind::listing).expect("список");
-        assert!(listing.selected.is_empty(), "выбор не снят");
-        assert_eq!(state.outlines.len(), 1, "«снять выбор» унесло контур");
-    }
-
-    /// Не спросившийся контур нажатием переспрашивают, а не снимают: просьба
-    /// уже записана, и жмут её именно затем, чтобы попробовать ещё раз.
-    #[test]
-    fn a_failed_ask_is_retried_not_dropped() {
-        let mut state = state();
-        let key = "eodata/store/A.SAFE".to_string();
-        state.outlines.insert(key.clone());
-        state.located.insert(key.clone(), Located::Failed);
-
-        toggle_outline(&mut state, key.clone());
-        assert!(state.outlines.contains(&key), "просьба снята вместо переспроса");
-        assert!(matches!(state.located.get(&key), Some(Located::Asking)), "не переспросили");
-
-        // А не спросившийся, которого никто не просил, ставится заново — и тем
-        // же движением переспрашивается.
-        let other = "eodata/store/B.SAFE".to_string();
-        state.located.insert(other.clone(), Located::Failed);
-        toggle_outline(&mut state, other.clone());
-        assert!(state.outlines.contains(&other));
-        assert!(matches!(state.located.get(&other), Some(Located::Asking)));
-    }
-
-    /// Геометрия из выдачи поиска переживает саму выдачу.
-    ///
-    /// Без кэша контур моргнул бы на смене выдачи и уехал в каталог за тем,
-    /// что секунду назад было под рукой.
-    #[test]
-    fn geometry_from_the_search_survives_it() {
-        use crate::module::state::SearchState;
-
-        let mut state = state();
-        let key = "eodata/store/A.SAFE".to_string();
-        let pane = state.focused();
-        let found = DataProduct {
-            identifier: key.clone(),
-            name: "A.SAFE".to_string(),
-            footprint: vec![Ring {
-                points: [(10.0, 10.0), (10.0, 20.0), (20.0, 20.0), (20.0, 10.0)]
-                    .into_iter()
-                    .map(|(lat, lon)| ProductPoint { lat, lon })
-                    .collect(),
-            }],
-            ..Default::default()
-        };
-        let view = state.open_in(
-            pane,
-            ViewKind::Search(SearchState { results: vec![found], ..Default::default() }),
-        );
-
-        state.outlines.insert(key.clone());
-        refresh(&mut state);
-        assert_eq!(state.outlined.len(), 1, "контур из выдачи не нарисован");
-        assert!(matches!(state.located.get(&key), Some(Located::Found(_))), "геометрия не в кэше");
-
-        // Выдача сменилась — контур остался, и в каталог за ним не поехали.
-        if let Some(ViewKind::Search(search)) = state.get_mut(view) {
-            search.results.clear();
-        }
-        refresh(&mut state);
-        assert_eq!(state.outlined.len(), 1, "контур моргнул вместе с выдачей");
-        assert!(matches!(state.located.get(&key), Some(Located::Found(_))), "поехали спрашивать");
-    }
-
-    /// Коробочка контура не рисует и в каталог не ходит: очерчивает свой
-    /// значок, и это разные состояния строки.
-    ///
-    /// Ход по сети на каждую выбранную строку был бы особенно обиден там, ради
-    /// чего выбор и заведён: пакетом их набирают десятками, чтобы удалить.
-    #[test]
-    fn the_checkbox_neither_draws_nor_asks() {
-        let mut state = state();
-        let pane = state.focused();
-        let view = state.open_in(pane, ViewKind::Browse(BrowseState::default()));
-        let key = "eodata/store/A.SAFE".to_string();
-
-        toggle(&mut state, view, key.clone());
-        refresh(&mut state);
-        assert!(state.outlined.is_empty(), "у выбранного нашёлся контур");
-        assert!(state.located.is_empty(), "за выбранным сходили в каталог");
-
-        // А значок контура — ходит: геометрию знает каталог, и другого места
-        // взять её нет.
-        toggle_outline(&mut state, key.clone());
-        assert!(
-            matches!(state.located.get(&key), Some(Located::Asking)),
-            "за контуром в каталог не пошли"
-        );
-
-        // Второе нажатие убирает просьбу.
-        toggle_outline(&mut state, key.clone());
-        assert!(!state.outlines.contains(&key), "контур не снялся");
-    }
-
-    /// Слой без контура остаётся выбранным. Контур у снимка бывает не всегда —
-    /// геометрию каталог знает не про всё, а отметку с него могли снять, — но
-    /// на шаре он при этом лежит, и полоса под шаром называет его. Гасить такой
-    /// выбор на первой же пересборке значило бы отвечать «ни на что не смотрим»,
-    /// глядя прямо на снимок.
-    #[test]
-    fn a_layer_without_a_contour_keeps_its_selection() {
-        use crate::module::state::overlay::OverlayState;
-
-        let mut state = state();
-        let key = "eodata/store/A.SAFE".to_string();
-        state.overlays.push(OverlayState::new(
-            key.clone(),
-            "A.SAFE".to_string(),
-            false,
-            None,
-            None,
-            None,
-        ));
-
-        focus(&mut state, &key);
-        assert_eq!(state.picked_key(), key, "наводка на слой его не выбрала");
-
-        refresh(&mut state);
-        assert_eq!(state.picked_key(), key, "выбор слоя погас на пересборке контуров");
-
-        // А снимок, которого на шаре нет вовсе, выбранным не остаётся: ленте
-        // не на чем держаться, и назвать его нечем.
-        state.overlays.clear();
-        refresh(&mut state);
-        assert_eq!(state.picked_key(), "", "выбор пережил уход снимка с шара");
-    }
-
-    /// Переход к тому же снимку, что обведён на шаре, ленту не гасит: это одна
-    /// и та же подсветка, и гасить её значило бы отвечать не на тот вопрос.
-    /// Так и приводят к нему — полосой под самим шаром.
-    #[test]
-    fn walking_to_the_picked_row_keeps_its_ribbon() {
-        let mut state = state();
-        let pane = state.focused();
-        let view = state.open_in(pane, ViewKind::Browse(BrowseState::default()));
-        let key = "eodata/store/A.SAFE".to_string();
-        state.outlined = vec![square(&key)];
-
-        pick(&mut state, Some((15.0, 15.0)));
-        assert_eq!(state.picked_key(), key);
-
-        browse::reveal(&mut state, view, key.clone());
-        assert_eq!(state.picked_key(), key, "лента погасла под собственным переходом");
-        assert_eq!(state.target_in(view), key);
-    }
-}
-

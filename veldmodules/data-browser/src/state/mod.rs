@@ -3,278 +3,296 @@ pub use types::*;
 
 use veldsdk::Correlator;
 
-/// Кому едет ответ на data-provider/on_list_path. Топик один, а спрашивают его
-/// трое, и «чей это id» должно иметь ровно один ответ — перебором по видам на
-/// него не ответить.
+/// Who receives the data-provider/on_list_path reply. The topic is one, but
+/// three callers ask it, and "whose id is this" must have exactly one answer —
+/// iterating over views cannot answer it.
 pub enum Listing {
-    /// Содержимое папки, которую показывает вкладка.
+    /// Contents of the folder the tab shows.
     Path(ViewId),
-    /// Содержимое раскрытой строки: вкладка и ключ её папки.
+    /// Contents of an expanded row: the tab and the key of its folder.
     Children(ViewId, String),
-    /// Все файлы снимка — под закачку целиком. Вкладки здесь нет: качают в
-    /// библиотеку, а она одна на окно. Счётчики едут с запросом, а не лежат в
-    /// состоянии: снимков могут качать несколько сразу, и общий счётчик
-    /// оборвал бы второй на середине первого.
+    /// All files of a snapshot — for download as a whole. There is no tab here:
+    /// downloads go to the library, and there is one library per window. The
+    /// counters travel with the request instead of living in state: several
+    /// snapshots can download at once, and a shared counter would break the
+    /// second one halfway through the first.
     ///
-    /// `files` — сколько файлов снимка прошло мимо нас, `queued` — сколько из
-    /// них поставлено в закачку. Первое считается ради библиотеки: обойти
-    /// снимок в хранилище может только этот обход, и его итог — единственный
-    /// ответ на «сколько файлов должно быть».
+    /// `files` counts how many snapshot files passed by us, `queued` counts how
+    /// many of them were put into download. The first is counted for the
+    /// library: only this walk can traverse the snapshot in storage, and its
+    /// result is the only answer to "how many files there should be".
     Snapshot { product: String, files: u32, queued: usize },
 }
 
-/// Кому едет ответ на data-provider/on_locate_result. Ждут его двое, и по
-/// содержимому их не различить: продукт в обоих случаях один и тот же.
+/// Who receives the data-provider/on_locate_result reply. Two callers wait for
+/// it, and their contents cannot tell them apart: the product is the same in
+/// both cases.
 pub enum Locate {
-    /// Положить снимок на шар — нажали значок глобуса в строке. Тем же ходом
-    /// наполняется и кэш геометрии: контур этого снимка спросил бы у каталога
-    /// то же самое (см. `handlers::overlay::on_toggle_pressed`).
+    /// Put the snapshot on the globe — the globe icon in a row was pressed. The
+    /// same call also fills the geometry cache: the outline of this snapshot
+    /// would ask the catalogue for the same thing (see
+    /// `handlers::overlay::on_toggle_pressed`).
     Overlay(String),
-    /// Геометрия отмеченного снимка: очертить его. Ключ — тот, которым он
-    /// отмечен в списке; он же ключ кэша (см. `State::located`).
+    /// Geometry of the marked snapshot: to outline it. The key is the one by
+    /// which it is marked in the list; it is also the cache key (see
+    /// `State::located`).
     Outline(String),
 }
 
-/// Что известно про продукт по ключу строки.
+/// What is known about a product by row key.
 ///
-/// Одной таблицей на все три состояния, а не «кэш ответов» плюс «спрошенное»:
-/// это одно знание в трёх положениях, и два множества под него держались бы
-/// договором «ключ не бывает в обоих» — договором, который однажды нарушат.
+/// One table for all three states, not an "answer cache" plus "asked": this is
+/// one piece of knowledge in three positions, and two sets for it would be held
+/// by the convention "a key is never in both" — a convention that will be
+/// broken one day.
 pub enum Located {
-    /// Спрошено, ответа ещё нет. Второй раз спрашивать незачем: сборка контуров
-    /// идёт на каждую отметку, и без этого один ключ уехал бы в каталог десяток
-    /// раз.
+    /// Asked, no answer yet. Asking again is pointless: outline assembly runs on
+    /// every mark, and without this one key would travel to the catalogue a
+    /// dozen times.
     Asking,
-    /// Каталог его не знает. Тоже ответ, и запомнить его надо: иначе
-    /// ненайденное спрашивалось бы вечно.
+    /// The catalogue does not know it. That is an answer too, and it must be
+    /// remembered: otherwise the not-found would be asked forever.
     Missing,
-    /// Спросить не вышло — сеть или отказ службы. Про сам снимок это не
-    /// говорит ничего, поэтому метка временная: её снимает следующая отметка
-    /// той же строки, и «щёлкни ещё раз» и есть повтор. Само по себе не
-    /// повторяется — иначе ответ на сорвавшийся запрос звал бы следующий, и
-    /// так до конца запуска.
+    /// The ask failed — the network or a service refusal. This says nothing
+    /// about the snapshot itself, so the mark is temporary: the next mark of
+    /// the same row clears it, and "click again" is exactly the retry. It does
+    /// not repeat on its own — otherwise an answer to a failed request would
+    /// call the next one, and so on until the end of the run.
     Failed,
     Found(crate::proto::data_provider::DataProduct),
 }
 
-/// Что сейчас раскрыто на экране.
+/// What is expanded on screen right now.
 ///
-/// Одним полем на весь экран, а не полем у каждого носителя: раскрытым бывает
-/// только одно, и правило это про экран, а не про панель, вкладку или слой.
-/// Разложенное по носителям, оно держалось бы присвоениями в каждом
-/// обработчике — а забыть одно из них значит оставить два раскрытых меню, и
-/// заметить это можно только глазами.
+/// One field for the whole screen, not a field per carrier: only one thing can
+/// be expanded, and the rule is about the screen, not about a pane, tab, or
+/// layer. Spread across carriers, it would be held by assignments in every
+/// handler — and forgetting one of them means leaving two expanded menus, and
+/// only eyes can notice that.
 #[derive(Default, PartialEq, Eq)]
 pub enum Open {
     #[default]
     Nothing,
-    /// «Плюс» полосы вкладок названной панели.
+    /// The "plus" of the tab strip of the named pane.
     TabMenu(PaneId),
-    /// Меню самой вкладки: куда её деть.
+    /// The menu of the tab itself: where to put it.
     TabOptions(ViewId),
-    /// Меню слоя «На просмотре». Слой назван ключом снимка — им же он
-    /// адресуется везде ещё.
+    /// The menu of a "Now viewing" layer. The layer is named by the snapshot
+    /// key — the same key addresses it everywhere else.
     Layer(String),
-    /// Меню внутри списка названной вкладки: чип полосы или строка
-    /// (см. [`listing::Menu`]).
+    /// A menu inside the list of the named tab: a strip chip or a row
+    /// (see [`listing::Menu`]).
     Listing(ViewId, listing::Menu),
-    /// Список величин файла под кадром превью названной вкладки.
+    /// The variable list of the file under the preview frame of the named tab.
     Variables(ViewId),
-    /// Список величин лежащего подробным файла в строке слоя «На просмотре»,
-    /// названного ключом снимка.
+    /// The variable list of the detailed file in the row of the "Now viewing"
+    /// layer named by the snapshot key.
     LayerVariables(String),
 }
 
-/// Что на экране главное сейчас — один снимок на весь экран.
+/// What is the main thing on screen right now — one snapshot for the whole
+/// screen.
 ///
-/// Ставят подсветку двое: переход к строке и щелчок по контуру на шаре. Вопрос
-/// у них один, «что здесь главное сейчас», и двух ответов у него не бывает —
-/// поэтому и поле одно. Разложенная по носителям, подсветка держалась бы
-/// гашением из каждого обработчика, и подсвеченными оставались бы обе строки:
-/// та, к которой привели полчаса назад, и та, которую выбрали сейчас.
+/// Two things set the highlight: a jump to a row and a click on an outline on
+/// the globe. They ask one question, "what is the main thing here", and it has
+/// no two answers — hence one field. Spread across carriers, the highlight
+/// would be held by clearing from every handler, and both rows would stay lit:
+/// the one we were led to half an hour ago and the one chosen now.
 pub struct Highlight {
-    /// Ключ снимка. По нему подсвечена его строка в каждом списке, где она
-    /// есть: отмечают в одном, а видно должно быть везде.
+    /// The snapshot key. By it its row is lit in every list where it exists:
+    /// marking happens in one, but it must be visible everywhere.
     pub key: String,
-    /// Вкладка, чей переход к этой строке привёл: в ней она ещё и выведена на
-    /// свою страницу и подкручена под глаз. `None` — подсветку поставил шар, и
-    /// вкладки у неё нет.
+    /// The tab whose jump led to this row: in it the row is also brought to its
+    /// page and scrolled into view. `None` means the globe set the highlight and
+    /// there is no tab.
     pub view: Option<ViewId>,
-    /// Обведён ли снимок на шаре лентой. Ставит её щелчок по контуру; переход
-    /// к строке ленту не зажигает — на шар в этот момент не смотрят.
+    /// Whether the snapshot is ringed on the globe by the ribbon. A click on an
+    /// outline sets it; a jump to a row does not light the ribbon — the globe is
+    /// not being looked at at that moment.
     pub on_globe: bool,
 }
 
-/// Насколько узкой человек вправе сделать панель, в точках разметки. Уже этого
-/// в ней не видно ни полосы вкладок, ни того, что в них.
+/// How narrow a pane may be made, in layout points. Narrower than this, neither
+/// the tab strip nor its contents is visible in it.
 pub const MIN_PANE: f32 = 180.0;
 
 pub struct State {
-    /// Открытые виды в порядке вкладок. Порядок — свойство разметки, а не
-    /// набора: закрытие соседа не должно менять, где стоит остальное. Панель,
-    /// в которой вкладка лежит, — её собственное поле (см. `View::pane`), а
-    /// порядок внутри панели — порядок этого же списка.
+    /// Open views in tab order. Order is a property of the layout, not of the
+    /// set: closing a neighbor must not change where the rest sit. The pane a
+    /// tab lies in is its own field (see `View::pane`), and the order within a
+    /// pane is the order of this same list.
     views: Vec<View>,
-    /// Как сложен экран: дерево панелей с их долями и активными вкладками
-    /// (см. state::layout).
+    /// How the screen is composed: a tree of panes with their shares and active
+    /// tabs (see state::layout).
     layout: Layout,
-    /// Панель, чья активная вкладка получает события виджетов. Событие приходит
-    /// от виджета, а не от панели, и назвать себя умеют не все — поэтому у
-    /// экрана есть одна панель, которая «сейчас под рукой».
+    /// The pane whose active tab receives widget events. An event comes from a
+    /// widget, not from a pane, and not all widgets can name themselves — so the
+    /// screen has one pane that is "at hand right now".
     focus: PaneId,
     next_id: u64,
-    /// С чего начинать, когда вспоминать нечего, — из конфига. Сохранённая
-    /// раскладка старше: конфиг говорит, с чего начать первый запуск, а не что
-    /// показывать вместо того, на чём человек остановился.
+    /// Where to start when there is nothing to recall — from the config. A saved
+    /// layout wins: the config says where the first run starts, not what to show
+    /// instead of where the person stopped.
     pub start: crate::module::NewTab,
-    /// Отпечаток последней записанной раскладки. По нему видно, изменилось ли
-    /// что-то с тех пор: раскладку пишут на каждое действие с вкладками, а
-    /// большинство действий её не трогает (см. handlers::persist).
+    /// Fingerprint of the last written layout. It shows whether anything has
+    /// changed since: the layout is written on every tab action, while most
+    /// actions do not touch it (see handlers::persist).
     pub last_saved: u64,
-    /// Кэш состояния библиотеки — один на модуль: он приходит рассылкой и
-    /// нужен всем видам сразу (см. state::library).
+    /// Cache of the library state — one per module: it arrives by broadcast and
+    /// all views need it at once (see state::library).
     pub library: library::LibraryState,
-    /// Отказ библиотеки. Ставит и гасит его она сама: она рассылает состояние
-    /// на каждое изменение, и «нет ответа» в этой рассылке значит «жалобы
-    /// больше нет». Ход своей работы каждый вид показывает у себя: строка
-    /// состояния одна, а видов много, и «12 items» из фоновой вкладки под
-    /// заголовком активной — неправда.
+    /// A library failure. The library sets and clears it itself: it broadcasts
+    /// state on every change, and "no error" in that broadcast means "the
+    /// complaint is gone". Each view shows the progress of its own work: there
+    /// is one status line and many views, and "12 items" from a background tab
+    /// under the active one's title would be a lie.
     pub error: Option<String>,
-    /// Что не вышло по нажатию: снимок без растров, снимок, обрезанный
-    /// потолком, продукт, не найденный в каталоге.
+    /// What failed on a press: a snapshot without rasters, a snapshot clipped by
+    /// the ceiling, a product not found in the catalogue.
     ///
-    /// Отдельно от отказа библиотеки, а не в том же поле: библиотека рассылает
-    /// состояние на каждый поставленный в очередь файл и гасит им своё
-    /// сообщение — а поставила эти файлы как раз та работа, о которой
-    /// извещение. В общем поле оно стиралось бы раньше, чем его успевали
-    /// прочесть, причём не случайно, а всегда.
+    /// Separate from the library failure, not in the same field: the library
+    /// broadcasts state for every queued file and clears its own message with it
+    /// — and the work the notice is about is exactly what queued those files. In
+    /// a shared field it would be erased before anyone could read it, and not by
+    /// accident but always.
     ///
-    /// Живёт до следующего действия: его и гасит (см. `module::on_ui_event`).
-    /// Своего «закрыть» у него нет — извещение о том, что только что не
-    /// вышло, переживать следующее нажатие не должно.
+    /// It lives until the next action, which also clears it (see
+    /// `module::on_ui_event`). It has no "close" of its own — a notice about what
+    /// just failed must not outlive the next press.
     pub notice: Option<String>,
-    /// Render-таргет нашего окна: аллоцируется в ответ на app/window_resized
-    /// и делегируется рендереру (см. handlers::window).
+    /// Render target of our window: allocated in response to
+    /// app/window_resized and delegated to the renderer (see handlers::window).
     pub window_surface: Option<veldsdk::surface::Delegated>,
-    /// Размер окна в физических пикселях (app/window_resized). Нужен как
-    /// потолок для превью: рисовать картинку крупнее окна незачем.
+    /// Window size in physical pixels (app/window_resized). Serves as the
+    /// ceiling for previews: drawing a picture larger than the window is
+    /// pointless.
     pub window: (u32, u32),
-    /// Масштаб интерфейса оттуда же. Вместе с размером даёт ширину окна в
-    /// точках разметки — по ней считается, сколько знаков имени влезает в свою
-    /// колонку (см. components::table).
+    /// Interface scale from the same place. With the size it gives the window
+    /// width in layout points — by it the number of name characters that fit
+    /// into their column is computed (see components::table).
     pub scale: f32,
-    /// Что раскрыто на экране — одно на всех (см. [`Open`]).
+    /// What is expanded on screen — one for all (see [`Open`]).
     pub open: Open,
-    /// Скорость закачки, байт в секунду: выводится из двух соседних состояний
-    /// библиотеки (см. handlers::library). Своего поля у библиотеки под это
-    /// нет — она рассылает то, что есть сейчас, а не то, как быстро оно росло.
+    /// Download speed in bytes per second: derived from two adjacent library
+    /// states (see handlers::library). The library has no field for it — it
+    /// broadcasts what is there now, not how fast it grew.
     pub speed: f32,
-    /// Прошлый замер: когда и сколько было скачано.
+    /// The previous measurement: when and how much was downloaded.
     pub measured: Option<(i64, u64)>,
-    /// Что сейчас очерчено на шаре. Не в состоянии вкладки глобуса: контуры —
-    /// свойство отмеченного в списках, а не экрана, и уезжают они к рисующему
-    /// независимо от того, открыта ли вкладка (см. handlers::outline).
+    /// What is outlined on the globe right now. Not in the globe tab's state:
+    /// outlines are a property of what is marked in the lists, not of the
+    /// screen, and they travel to the renderer regardless of whether the tab is
+    /// open (see handlers::outline).
     ///
-    /// Сводится сюда из пакетного выделения всех списков сразу — потому и не в
-    /// состоянии вида: шар один, а списков, отмечающих на нём снимки, сколько
-    /// угодно.
+    /// Gathered here from the batch selection of all lists at once — hence not
+    /// in a view's state: there is one globe, and any number of lists that mark
+    /// snapshots on it.
     pub outlined: Vec<globe::Outlined>,
-    /// Что подсвечено на экране (см. [`Highlight`]).
+    /// What is highlighted on screen (see [`Highlight`]).
     pub highlight: Option<Highlight>,
-    /// Продукт каталога по ключу строки: что спрошено и что отвечено
-    /// (см. [`Located`]). У строк поиска продукт под рукой, и сюда они не
-    /// попадают.
+    /// Catalogue product by row key: what was asked and what was answered (see
+    /// [`Located`]). Search rows have the product at hand and never get here.
     pub located: std::collections::HashMap<String, Located>,
-    /// Наложения снимков на шар — то, что собирается или уже показано
-    /// (см. handlers::overlay). Порядок — порядок слоёв снизу вверх, тот же,
-    /// которым его понимает глобус; список «На просмотре» переворачивает его
-    /// сам, потому что «сверху новые» — свойство экрана, а не набора.
+    /// Snapshot overlays on the globe — what is being assembled or already shown
+    /// (see handlers::overlay). The order is the layer order bottom to top, the
+    /// same the globe understands; the "Now viewing" list reverses it itself,
+    /// because "new ones on top" is a property of the screen, not of the set.
     pub overlays: Vec<overlay::OverlayState>,
-    /// Снимки, которые попросили очертить на шаре.
+    /// Snapshots asked to be outlined on the globe.
     ///
-    /// Своё множество, а не производное от выбора в списках: контур, показ
-    /// растром и выбор строки — три независимых вещи, и сведённые в одну они
-    /// отвечали бы друг за друга. Одно на приложение, а не на вкладку: шар
-    /// один, и «контуры этой вкладки» на вопрос «что на шаре» не отвечает.
+    /// Its own set, not derived from selection in the lists: an outline, a
+    /// raster show, and a row selection are three independent things, and merged
+    /// into one they would answer for each other. One per application, not per
+    /// tab: there is one globe, and "the outlines of this tab" does not answer
+    /// the question "what is on the globe".
     ///
-    /// Это просьба, а не нарисованное: геометрию знает каталог, и до его
-    /// ответа ключ здесь уже есть, а в [`State::outlined`] его ещё нет.
+    /// This is a request, not a drawing: the geometry is known to the catalogue,
+    /// and before its answer the key is already here, while in
+    /// [`State::outlined`] it is not there yet.
     pub outlines: std::collections::HashSet<String>,
-    /// Снимки, для которых показ ждёт ответа каталога.
+    /// Snapshots whose show awaits a catalogue answer.
     ///
-    /// Показ — не выбор: он кладёт слой во «На просмотре» и коробочку в списке
-    /// не трогает (см. handlers::overlay). Поэтому и «а не расхотели ли» по
-    /// выбору не спросить: ход к каталогу живёт секунды, убить его нечем, а
-    /// «Снять с шара» за это время нажать успевают.
+    /// A show is not a selection: it puts a layer into "Now viewing" and does
+    /// not touch the checkbox in the list (see handlers::overlay). So "did they
+    /// change their mind" cannot be asked from the selection: the catalogue
+    /// request lives for seconds, there is no way to kill it, and "Remove from
+    /// globe" gets pressed in the meantime.
     pub showing: std::collections::HashSet<String>,
-    /// Файл, которым просили положить снимок на шар (`Msg::GlobeFile`), по
-    /// ключу снимка — пока показ не завёлся: продукт восстанавливается у
-    /// провайдера ходом к каталогу, и просьба ждёт его здесь (см.
-    /// `handlers::overlay::show`).
+    /// The file with which a snapshot was asked to be put on the globe
+    /// (`Msg::GlobeFile`), by snapshot key — until the show starts: the product
+    /// is restored at the provider by the catalogue request, and the request
+    /// waits for it here (see `handlers::overlay::show`).
     pub file_wishes: std::collections::HashMap<String, String>,
-    /// Снимки, которые показать не вышло, и почему — по ключу снимка.
+    /// Snapshots that could not be shown, and why — by snapshot key.
     ///
-    /// Помнится затем, что отказ этот про сам снимок, а не про попытку:
-    /// «изображения в продукте нет вовсе» и «файл читается только целиком»
-    /// вторым нажатием не лечатся, а ждать их приходится десятки секунд.
-    /// Сказанное строкой состояния живёт до следующего слова и пропадает
-    /// вместе с ним; вернувшись в список через минуту, человек видит тот же
-    /// зовущий значок и жмёт его снова.
+    /// Remembered because this failure is about the snapshot itself, not about
+    /// the attempt: "the product has no imagery at all" and "the file only reads
+    /// whole" are not cured by a second press, and waiting for them takes tens
+    /// of seconds. What the status line says lives until the next word and
+    /// vanishes with it; returning to the list a minute later, the person sees
+    /// the same inviting icon and presses it again.
     ///
-    /// Не отменяет действие, а объясняет его: значок остаётся нажимаемым —
-    /// сорваться попытка могла и по сети, — но горит предупреждением и носит
-    /// причину подсказкой. Снимается причина новой попыткой: держать её после
-    /// удавшегося показа значило бы врать.
+    /// It does not cancel the action, it explains it: the icon stays pressable —
+    /// the attempt could also fail over the network — but it glows with a
+    /// warning and carries the reason as a tooltip. A new attempt clears the
+    /// reason: keeping it after a successful show would be lying.
     pub unshowable: std::collections::HashMap<String, String>,
 
-    // -- Маршруты ответов --
+    // -- Reply routing --
     //
-    // Таблица заводится на топик ответа, а не на вид (см. veldsdk::Correlator):
-    // «чей это id» должно иметь один ответ. Перебор по видам на этот вопрос не
-    // отвечает — вид могли закрыть, пока ответ шёл, а приехавший в нём ресурс
-    // всё равно наш, и опознать его можно только здесь.
-    /// Превью: открытие ресурса (data-library или data-provider). Дальше
-    /// показ ведёт канва, и правда о нём приходит рассылкой on_view_state,
-    /// адресованной именем вида, — корреляций там нет.
+    // A table is keyed by the reply topic, not by the view (see
+    // veldsdk::Correlator): "whose id is this" must have one answer. Iterating
+    // over views does not answer this question — the view could be closed while
+    // the reply was in flight, and the resource that arrived in it is still ours,
+    // and only here can it be recognized.
+    /// Previews: opening a resource (data-library or data-provider). From there
+    /// the canvas leads the show, and the truth about it arrives by the
+    /// on_view_state broadcast addressed by view name — there are no
+    /// correlations there.
     pub previews: Correlator<ViewId>,
-    /// Растры наложений: открытие ресурса у провайдера. Контекст — ключ
-    /// наложения и роль растра; сборка помнит свои корреляции, чтобы снять их
-    /// отсюда, когда наложение убирают (см. overlay::Assembly).
+    /// Overlay rasters: opening a resource at the provider. The context is the
+    /// overlay key and the raster role; the assembly remembers its correlations
+    /// to release them from here when the overlay is removed (see
+    /// overlay::Assembly).
     pub opens: Correlator<(String, crate::proto::globe::OverlayRole, u32, overlay::Part)>,
-    /// data-provider/on_imagery_result — какие растры у продукта. Контекст —
-    /// ключ наложения, которое их ждёт.
+    /// data-provider/on_imagery_result — which rasters the product has. The
+    /// context is the key of the overlay that waits for them.
     pub imageries: Correlator<String>,
-    /// Тот же топик, но для превью: снимок, лежащий папкой, открыть напрямую
-    /// нельзя (GET по пути каталога отвечает 404), и растр внутри него
-    /// выбирает провайдер. Контекст — вкладка превью, которая его ждёт.
+    /// The same topic, but for previews: a snapshot stored as a folder cannot be
+    /// opened directly (a GET on the catalogue path answers 404), and the
+    /// provider picks the raster inside it. The context is the preview tab that
+    /// waits for it.
     ///
-    /// Отдельной таблицей, а не общей с наложениями: ответ один и тот же, а
-    /// ждущих двое, и «чей это id» должно иметь ровно один ответ.
+    /// A separate table, not shared with the overlays: the answer is the same,
+    /// but there are two waiters, and "whose id is this" must have exactly one
+    /// answer.
     pub preview_imagery: Correlator<ViewId>,
-    /// data-provider/on_list_path_result. Контекст — кому этот листинг
-    /// (см. [`Listing`]).
+    /// data-provider/on_list_path_result. The context is who this listing is
+    /// for (see [`Listing`]).
     pub listings: Correlator<Listing>,
     /// data-provider/on_search_result.
     pub searches: Correlator<ViewId>,
-    /// globe/on_probe — «что под указателем». Не таблица, а последний вопрос:
-    /// ответ на предыдущий уже не нужен, указатель с тех пор уехал.
+    /// globe/on_probe — "what is under the pointer". Not a table, but the last
+    /// question: the answer to the previous one is no longer needed, the pointer
+    /// has moved on since.
     pub probe: veldsdk::Latest,
-    /// data-provider/on_locate_result — продукт по ключу хранилища. Контекст —
-    /// зачем его спросили (см. [`Locate`]): положить на шар или очертить.
+    /// data-provider/on_locate_result — a product by storage key. The context is
+    /// why it was asked (see [`Locate`]): to put on the globe or to outline.
     pub locates: Correlator<Locate>,
-    /// fs/on_write раскладки: корреляция → регион, отданный службе. Освобождает
-    /// его ответ — до него регион наш (см. handlers::persist).
+    /// fs/on_write of the layout: correlation → region handed to the service.
+    /// The reply releases it — until then the region is ours (see
+    /// handlers::persist).
     pub layout_writes: Correlator<u64>,
-    /// Чтение сохранённой раскладки. Не таблица, а последний вопрос: спрашивают
-    /// её один раз, на старте, и ответ на позапрошлый вопрос значил бы, что
-    /// экран собирают дважды.
+    /// Reading the saved layout. Not a table, but the last question: it is asked
+    /// once, at startup, and an answer to the question before the last would
+    /// mean the screen is assembled twice.
     pub layout_read: veldsdk::Latest,
 }
 
 impl State {
     pub fn new(config: crate::module::handlers::Config) -> anyhow::Result<Self> {
-        // Стартовая вкладка — из конфига; умолчание и поведение при неизвестном
-        // значении — Search (этот вид существует всегда).
+        // The starting tab comes from the config; the default and the behavior
+        // on an unknown value is Search (this view always exists).
         let start = match config.initial_view.as_deref() {
             None | Some("search") => crate::module::NewTab::Search,
             Some("browse") => crate::module::NewTab::Browse,
@@ -323,28 +341,28 @@ impl State {
         })
     }
 
-    /// Заводит панель с названной стороны и сразу задаёт ей долю — так экран
-    /// собирают из сохранённого (см. handlers::persist). Живой путь к делению
-    /// экрана другой: делит его перенос вкладки (см. [`Self::move_aside`]).
+    /// Creates a pane on the named side and immediately gives it a share — this
+    /// is how the screen is assembled from a save (see handlers::persist). The
+    /// live path to splitting the screen is different: a tab move splits it (see
+    /// [`Self::move_aside`]).
     pub fn split_pane(&mut self, pane: PaneId, side: Side, fraction: f32) -> Option<PaneId> {
         let fresh = self.layout.split(pane, side)?;
         if let Some(split) = self.layout.split_of(fresh) {
             self.layout.set_fraction(split, fraction);
-            // Тот же предел, что у живой границы, и тем же способом: доля
-            // приезжает из файла, а он бывает и правленым, и писанным другой
-            // раскладкой окна. Открывшаяся в ноль панель не показывает ни
-            // вкладок, ни границы, за которую ей вернуть место.
+            // The same limit as the live boundary, and in the same way: the
+            // share comes from a file, and it can be both edited and written by
+            // a different window layout. A pane opened at zero shows neither its
+            // tabs nor the boundary to pull to give it room back.
             self.divide(split, 0.0);
         }
         Some(fresh)
     }
 
-    // -- Вкладки --
+    // -- Tabs --
 
-    /// Открывает вид в названной панели и делает его в ней активным, а саму
-    /// панель — той, что под рукой. Открытие — это всегда новая вкладка:
-    /// «переиспользовать похожую» решает вызывающий, у него для этого есть
-    /// [`Self::find`].
+    /// Opens a view in the named pane and makes it active there, and the pane
+    /// itself the one at hand. Opening is always a new tab: "reuse a similar
+    /// one" is the caller's decision, it has [`Self::find`] for that.
     pub fn open_in(&mut self, pane: PaneId, kind: ViewKind) -> ViewId {
         let id = ViewId(self.next_id);
         self.next_id += 1;
@@ -355,9 +373,9 @@ impl State {
         id
     }
 
-    /// Место в списке сразу за последней вкладкой этой панели: туда встаёт и
-    /// открытое, и перенесённое — конец полосы и есть то место, куда человек
-    /// смотрит после такого действия. У панели без вкладок это конец списка.
+    /// The place in the list right after the last tab of this pane: both opened
+    /// and moved tabs go there — the end of the strip is where the person looks
+    /// after such an action. For a pane without tabs this is the end of the list.
     fn after_last(&self, pane: PaneId) -> usize {
         self.views
             .iter()
@@ -365,9 +383,10 @@ impl State {
             .map_or(self.views.len(), |at| at + 1)
     }
 
-    /// Убирает вид из набора и отдаёт его вызывающему: закрытие превью гасит
-    /// показ у канвы, а публиковать состояние не вправе — исходящая связь
-    /// модуля должна быть видна в схеме (см. handlers::nav).
+    /// Removes the view from the set and hands it to the caller: closing a
+    /// preview stops the show at the canvas, and it may not publish state itself
+    /// — the module's outgoing link must be visible in the schema (see
+    /// handlers::nav).
     pub fn close(&mut self, id: ViewId) -> Option<View> {
         let at = self.views.iter().position(|view| view.id == id)?;
         let view = self.views.remove(at);
@@ -378,14 +397,14 @@ impl State {
         Some(view)
     }
 
-    /// Убирает опустевшую панель: место отдаётся соседней, к ней же переходит
-    /// взгляд. Последняя панель остаётся пустой — отдавать её место некому, а
-    /// «все вкладки закрыты» надо где-то показать.
+    /// Removes an emptied pane: its room goes to the neighbor, and the eye goes
+    /// there too. The last pane stays empty — there is no one to give its room
+    /// to, and "all tabs are closed" has to be shown somewhere.
     ///
-    /// Публично не только ради закрытия вкладки: пустой панель выходит и из
-    /// сохранённой раскладки, где синглтон назван дважды (см.
-    /// `handlers::persist::restore`), а правило «пустых панелей не бывает» на
-    /// то и правило, чтобы быть одним.
+    /// Public not just for closing a tab: an empty pane also comes out of a
+    /// saved layout where a singleton is named twice (see
+    /// `handlers::persist::restore`), and the rule "there are no empty panes" is
+    /// a rule precisely to be one.
     pub fn forget_if_empty(&mut self, pane: PaneId) {
         if self.views_in(pane).next().is_some() {
             return;
@@ -397,18 +416,18 @@ impl State {
         }
     }
 
-    /// Кто занимает место закрытой вкладки: следующая в той же панели, иначе
-    /// предыдущая.
+    /// Who takes the place of a closed tab: the next one in the same pane,
+    /// otherwise the previous one.
     ///
-    /// Считается по общему списку, а не по отфильтрованному: индексы в нём и
-    /// есть порядок вкладок, а соседство — это соседство внутри своей панели.
+    /// Computed over the whole list, not the filtered one: its indices are the
+    /// tab order, and adjacency means adjacency within one's own pane.
     fn neighbour(&self, pane: PaneId, at: usize) -> Option<ViewId> {
         let right = self.views.iter().skip(at).find(|view| view.pane == pane);
         let left = self.views.iter().take(at).rev().find(|view| view.pane == pane);
         right.or(left).map(|view| view.id)
     }
 
-    /// Делает вид активным в его панели, а её — той, что под рукой.
+    /// Makes the view active in its pane, and the pane the one at hand.
     pub fn focus(&mut self, id: ViewId) {
         let Some(view) = self.views.iter().find(|view| view.id == id) else { return };
         let pane = view.pane;
@@ -416,42 +435,44 @@ impl State {
         self.focus = pane;
     }
 
-    /// Панель, чьи виджеты сейчас отвечают за события без адресата.
+    /// The pane whose widgets currently handle events without an addressee.
     pub fn focused(&self) -> PaneId {
         self.focus
     }
 
-    /// Дерево панелей — то, по чему собирается экран.
+    /// The pane tree — what the screen is assembled from.
     pub fn layout(&self) -> &Layout {
         &self.layout
     }
 
-    /// Свести всё в одну панель: вкладки собираются в ту, что под рукой, — на
-    /// неё и смотрели, — а порядок их сохраняется, он свойство списка.
+    /// Merge everything into one pane: the tabs gather into the one at hand —
+    /// that is what was being looked at — and their order is preserved, it is a
+    /// property of the list.
     pub fn collapse(&mut self) {
         let kept = self.layout.collapse(self.focus);
         for view in &mut self.views {
             view.pane = kept;
         }
-        // Активной остаётся та, что была под рукой. Если под рукой была пустая
-        // панель — первая же из оставшихся: вкладки есть, и «все вкладки
-        // закрыты» вместо них было бы неправдой.
+        // The one that was at hand stays active. If the one at hand was an empty
+        // pane — the first of the remaining ones: there are tabs, and "all tabs
+        // are closed" instead of them would be a lie.
         let active = self.layout.active(kept).or_else(|| self.views.first().map(|view| view.id));
         self.layout.set_active(kept, active);
         self.focus = kept;
     }
 
-    /// Перенести вкладку в названную панель — и туда же перевести взгляд.
+    /// Move a tab into the named pane — and move the eye there too.
     pub fn move_to(&mut self, id: ViewId, pane: PaneId) {
         let Some(at) = self.views.iter().position(|view| view.id == id) else { return };
         let from = self.views[at].pane;
         if !self.layout.contains(pane) {
             return;
         }
-        // Переносить внутри своей же панели нечего, но показать — есть что:
-        // зовут это и «плюс», которому ответили уже открытым синглтоном, и
-        // бросок вкладки в свою полосу. Молчаливый выход отсюда значил бы, что
-        // на просьбу «покажи мне поиск здесь» экран не меняется вовсе.
+        // There is nothing to move within one's own pane, but there is
+        // something to show: this is called both by the "plus" answered with an
+        // already open singleton and by dropping a tab onto its own strip. A
+        // silent exit here would mean that the request "show me search here"
+        // does not change the screen at all.
         if from == pane {
             self.layout.set_active(pane, Some(id));
             self.focus = pane;
@@ -459,8 +480,8 @@ impl State {
         }
 
         let mut view = self.views.remove(at);
-        // Кто останется показанным в прежней панели — считается до вставки:
-        // вставка сдвигает индексы, по которым ищется сосед.
+        // Who stays shown in the former pane is computed before the insert:
+        // the insert shifts the indices the neighbor is searched by.
         let left_behind = self.neighbour(from, at);
         view.pane = pane;
         let to = self.after_last(pane);
@@ -474,13 +495,13 @@ impl State {
         self.forget_if_empty(from);
     }
 
-    /// Перенести вкладку туда, где человек видит названную сторону: в соседнюю
-    /// панель, а если её там нет — в заведённую с этой стороны.
+    /// Move a tab to where the person sees the named side: into the neighbor
+    /// pane, and if there is none there — into one created on that side.
     ///
-    /// Деление экрана поэтому не отдельное действие, а следствие переноса:
-    /// делят его не сами по себе, а затем, чтобы что-то показать рядом, — и
-    /// пустая панель, которую надо ещё чем-то наполнить, была бы лишним шагом
-    /// ровно там, где человек уже сказал, чем.
+    /// Splitting the screen is therefore not a separate action but a consequence
+    /// of the move: it is split not in itself, but to show something alongside —
+    /// and an empty pane that still needs filling would be an extra step right
+    /// where the person already said with what.
     pub fn move_aside(&mut self, id: ViewId, side: Side) {
         if !self.can_move(id, side) {
             return;
@@ -496,16 +517,16 @@ impl State {
         self.move_to(id, target);
     }
 
-    /// Положить вкладку рядом с названной панелью, поделив её место, — так
-    /// кончается бросок на край (см. `handlers::nav::on_tab_drop`).
+    /// Put a tab beside the named pane, splitting its room — this is how a drop
+    /// onto an edge ends (see `handlers::nav::on_tab_drop`).
     ///
-    /// От [`Self::move_aside`] отличается тем, что делит место названной
-    /// панели, а не той, в которой вкладка лежала: у броска эти две разные, и
-    /// спрашивают его о первой.
+    /// Differs from [`Self::move_aside`] in that it splits the room of the named
+    /// pane, not of the one the tab lay in: for a drop those two differ, and it
+    /// is asked about the first.
     pub fn drop_beside(&mut self, id: ViewId, pane: PaneId, side: Side) {
-        // Единственная вкладка своей же панели, брошенная на её край, не
-        // двигает ничего: заведённая панель тут же осталась бы одна вместо
-        // прежней, а экран — прежним.
+        // The only tab of its own pane dropped onto its edge moves nothing: the
+        // created pane would at once be left alone in place of the former one,
+        // and the screen unchanged.
         if self.pane_of(id) == Some(pane) && self.views_in(pane).count() < 2 {
             return;
         }
@@ -513,15 +534,15 @@ impl State {
         self.move_to(id, fresh);
     }
 
-    /// Изменит ли такой перенос экран. Меню спрашивает об этом заранее: пункт,
-    /// который ничего не сделает, обещает выбор и молчит в ответ.
+    /// Whether such a move changes the screen. The menu asks this in advance: an
+    /// item that does nothing promises a choice and answers with silence.
     pub fn can_move(&self, id: ViewId, side: Side) -> bool {
         let Some(from) = self.pane_of(id) else { return false };
         match self.layout.neighbour(from, side) {
-            // В соседнюю переносить есть смысл всегда: она другая.
+            // Moving into a neighbor always makes sense: it is different.
             Some(_) => true,
-            // Единственная вкладка панели уедет вместе с самой панелью: та
-            // опустеет и уйдёт из дерева, а экран останется прежним.
+            // The only tab of a pane travels with the pane itself: it empties
+            // and leaves the tree, and the screen stays the same.
             None => self.views_in(from).count() > 1,
         }
     }
@@ -530,17 +551,17 @@ impl State {
         &self.views
     }
 
-    /// Вкладки одной панели, в порядке их списка.
+    /// Tabs of one pane, in their list order.
     pub fn views_in(&self, pane: PaneId) -> impl Iterator<Item = &View> {
         self.views.iter().filter(move |view| view.pane == pane)
     }
 
-    /// Активная вкладка названной панели — то, что в ней показано.
+    /// The active tab of the named pane — what is shown in it.
     pub fn active_in(&self, pane: PaneId) -> Option<ViewId> {
         self.layout.active(pane)
     }
 
-    /// Панель, в которой лежит вкладка. `None` — её уже закрыли.
+    /// The pane the tab lies in. `None` — it has already been closed.
     pub fn pane_of(&self, id: ViewId) -> Option<PaneId> {
         self.views.iter().find(|view| view.id == id).map(|view| view.pane)
     }
@@ -553,37 +574,37 @@ impl State {
         self.views.iter_mut().find(|view| view.id == id).map(|view| &mut view.kind)
     }
 
-    /// Первый вид, удовлетворяющий условию, — для «открыть или показать уже
-    /// открытое».
+    /// The first view satisfying the condition — for "open or show the already
+    /// open one".
     pub fn find(&self, matches: impl Fn(&ViewKind) -> bool) -> Option<ViewId> {
         self.views.iter().find(|view| matches(&view.kind)).map(|view| view.id)
     }
 
-    // -- Доступ к состоянию названного вида --
+    // -- Access to the state of the named view --
     //
-    // Именно названного, а не активного: панелей на экране сколько угодно, и
-    // «активный вид» на вопрос «чей это щелчок» не отвечает. Кто именно —
-    // говорит само сообщение (см. `Msg::In`).
+    // Exactly the named one, not the active one: there can be any number of
+    // panes on screen, and "the active view" does not answer "whose click is
+    // this". Who exactly — the message itself says (see `Msg::In`).
 
-    /// Ширина окна в точках разметки.
+    /// Window width in layout points.
     pub fn logical_width(&self) -> f32 {
         self.window.0 as f32 / self.scale.max(1.0)
     }
 
-    /// Высота, доставшаяся дереву панелей: окно без строки состояния под ним.
-    /// Ею меряется перетаскивание горизонтальной границы — доли считаются от
-    /// места дерева, а не от окна.
+    /// The height allotted to the pane tree: the window without the status line
+    /// beneath it. Dragging a horizontal boundary is measured by it — shares are
+    /// counted from the tree's room, not from the window.
     fn layout_height(&self) -> f32 {
         let chrome = crate::module::theme::BAR_HEIGHT + crate::module::theme::HAIRLINE;
         (self.window.1 as f32 / self.scale.max(1.0) - chrome).max(0.0)
     }
 
-    /// Границу деления потянули: сдвиг в точках разметки становится сдвигом
-    /// доли. Считается он от места, доставшегося самому делению, — деления
-    /// бывают вложенными, и доля вложенного меряется не окном.
+    /// A division boundary was dragged: a shift in layout points becomes a shift
+    /// of the share. It is counted from the room allotted to the division itself
+    /// — divisions can nest, and a nested share is not measured by the window.
     ///
-    /// Сами границы в этой арифметике не учитываются: каждая из них тоньше
-    /// точности, с которой её тянут мышью.
+    /// The boundaries themselves are not accounted for in this arithmetic: each
+    /// of them is thinner than the precision it is dragged with.
     pub fn divide(&mut self, split: SplitId, delta: f32) {
         let Some(axis) = self.layout.axis_of(split) else { return };
         let (wide, tall) = self.layout.split_share(split);
@@ -597,31 +618,31 @@ impl State {
         self.layout.nudge(split, delta / room, MIN_PANE / room);
     }
 
-    /// Ширина панели, в которой лежит вид, — то, чем меряется место под колонки
-    /// списка. Считать его по окну нельзя: панель у́же, а колонки от этого не
-    /// худеют, и тянущееся имя схлопнулось бы в ноль (см. `table::fit`).
+    /// The width of the pane the view lies in — what the room for the list
+    /// columns is measured by. It cannot be counted from the window: the pane is
+    /// narrower, the columns do not get thinner because of that, and the
+    /// stretching name would collapse to zero (see `table::fit`).
     ///
-    /// Доля берётся у дерева: делений может быть несколько, и вложенные доли
-    /// перемножаются (см. `Layout::share`).
+    /// The share comes from the tree: there can be several divisions, and nested
+    /// shares multiply (see `Layout::share`).
     pub fn pane_width(&self, id: ViewId) -> f32 {
         let share = self.pane_of(id).map_or(1.0, |pane| self.layout.share(pane).0);
         self.logical_width() * share
     }
 
-    /// Настройки показа списка: их правят сообщения, одинаковые для всех
-    /// списочных видов.
+    /// List display settings: messages edit them, the same for all list views.
     pub fn listing_mut(&mut self, id: ViewId) -> Option<&mut listing::ListingState> {
         self.get_mut(id)?.listing_mut()
     }
 
-    /// Закрыть раскрытое. Зовут это отовсюду, где действие уводит с того
-    /// места, над которым меню стоит.
+    /// Close whatever is expanded. Called from everywhere an action leads away
+    /// from the place the menu stands over.
     pub fn close_menus(&mut self) {
         self.open = Open::Nothing;
     }
 
-    /// Раскрыть названное — или закрыть, если оно уже раскрыто: повторное
-    /// нажатие на чип закрывает его меню.
+    /// Expand the named thing — or close it if already expanded: pressing a chip
+    /// again closes its menu.
     pub fn toggle_open(&mut self, what: Open) {
         self.open = match self.open == what {
             true => Open::Nothing,
@@ -629,8 +650,8 @@ impl State {
         };
     }
 
-    /// Раскрытое меню списка названной вкладки. `None` — раскрыто не оно:
-    /// меню другой вкладки, меню слоя, полоса вкладок или ничего.
+    /// The expanded list menu of the named tab. `None` means something else is
+    /// expanded: another tab's menu, a layer menu, the tab strip, or nothing.
     pub fn menu_in(&self, view: ViewId) -> Option<&listing::Menu> {
         match &self.open {
             Open::Listing(id, menu) if *id == view => Some(menu),
@@ -638,24 +659,26 @@ impl State {
         }
     }
 
-    /// Раскрыто ли меню названного слоя «На просмотре».
+    /// Whether the menu of the named "Now viewing" layer is expanded.
     pub fn layer_menu(&self, key: &str) -> bool {
         matches!(&self.open, Open::Layer(open) if open == key)
     }
 
-    /// Раскрыт ли список величин под кадром названной вкладки превью.
+    /// Whether the variable list under the frame of the named preview tab is
+    /// expanded.
     pub fn variables_menu(&self, view: ViewId) -> bool {
         matches!(&self.open, Open::Variables(open) if *open == view)
     }
 
-    /// Раскрыт ли список величин в строке названного слоя «На просмотре».
+    /// Whether the variable list in the row of the named "Now viewing" layer is
+    /// expanded.
     pub fn layer_variables(&self, key: &str) -> bool {
         matches!(&self.open, Open::LayerVariables(open) if open == key)
     }
 
-    /// Смена отбора в списке: страница сбрасывается, раскрытое гаснет. Общий
-    /// хвост у всех правок отбора — набранное меняет состав списка, и прежняя
-    /// страница относилась к другому списку.
+    /// A change of the list filter: the page resets, the expanded thing closes.
+    /// A common tail for all filter edits — what is typed changes the list's
+    /// composition, and the previous page belonged to a different list.
     pub fn refine(&mut self, view: ViewId) {
         self.close_menus();
         if let Some(listing) = self.listing_mut(view) {
@@ -664,13 +687,14 @@ impl State {
     }
 
 
-    /// Ключ снимка, обведённого на шаре лентой; пусто — подсвечено не это.
+    /// Key of the snapshot ringed on the globe by the ribbon; empty — this is
+    /// not what is highlighted.
     pub fn picked_key(&self) -> &str {
         self.highlight.as_ref().filter(|it| it.on_globe).map_or("", |it| it.key.as_str())
     }
 
-    /// Строка, к которой привёл переход в названной вкладке; пусто — переход
-    /// был не сюда либо его не было.
+    /// The row a jump led to in the named tab; empty — the jump was not here or
+    /// there was none.
     pub fn target_in(&self, view: ViewId) -> &str {
         self.highlight
             .as_ref()
@@ -678,22 +702,22 @@ impl State {
             .map_or("", |it| it.key.as_str())
     }
 
-    /// Погасить ленту на шаре, не трогая подсветку перехода: ставил её не он.
-    /// `true` — было что гасить.
+    /// Put out the ribbon on the globe without touching the jump highlight: the
+    /// jump did not set it. `true` — there was something to put out.
     pub fn deselect(&mut self) -> bool {
         let Some(highlight) = self.highlight.as_mut().filter(|it| it.on_globe) else {
             return false;
         };
         highlight.on_globe = false;
-        // Подсветка без ленты и без вкладки не подсвечивает ничего.
+        // A highlight without a ribbon and without a tab lights nothing.
         if highlight.view.is_none() {
             self.highlight = None;
         }
         true
     }
 
-    /// Погасить подсветку перехода в названной вкладке: ушли с её страницы, и
-    /// на другой она говорила бы неправду. Лента на шаре остаётся.
+    /// Put out the jump highlight in the named tab: we left its page, and on
+    /// another it would speak untruth. The ribbon on the globe stays.
     pub fn drop_target_in(&mut self, view: ViewId) {
         let Some(highlight) = self.highlight.as_mut().filter(|it| it.view == Some(view)) else {
             return;
@@ -718,8 +742,8 @@ impl State {
         }
     }
 
-    /// Глобус названного вида. `None` — вкладку закрыли или подменили, пока
-    /// событие шло.
+    /// The globe of the named view. `None` — the tab was closed or swapped while
+    /// the event was in flight.
     pub fn globe_mut(&mut self, id: ViewId) -> Option<&mut globe::GlobeState> {
         match self.get_mut(id)? {
             ViewKind::Globe(globe) => Some(globe),
@@ -727,8 +751,9 @@ impl State {
         }
     }
 
-    /// Превью названного вида. `None` — вкладку закрыли, пока ответ шёл;
-    /// приехавший ресурс всё равно наш, освобождает его вызывающий.
+    /// The preview of the named view. `None` — the tab was closed while the
+    /// answer was in flight; the resource that arrived is still ours, the caller
+    /// releases it.
     pub fn preview_mut(&mut self, id: ViewId) -> Option<&mut preview::PreviewState> {
         match self.get_mut(id)? {
             ViewKind::Preview(preview) => Some(preview),
@@ -736,9 +761,9 @@ impl State {
         }
     }
 
-    /// Выбранный щелчком по шару снимок вместе с геометрией. `None` — не
-    /// выбран ни один: щёлкнули мимо контуров либо убрали контур, и
-    /// контура больше нет.
+    /// The snapshot selected by a click on the globe, together with its
+    /// geometry. `None` — nothing is selected: the click missed the outlines or
+    /// the outline was removed, and there is no outline anymore.
     pub fn picked(&self) -> Option<&globe::Outlined> {
         let key = self.picked_key();
         self.outlined.iter().find(|outlined| outlined.key == key)
@@ -746,16 +771,16 @@ impl State {
 
 }
 
-/// Поддаётся ли выбранное пакетному действию — по ответу на действие.
+/// Whether the selection takes a batch action — by the answer to the action.
 ///
-/// Считает его сам обработчик (`handlers::library::batch`), тем же перебором,
-/// каким потом и действует: числа эти решают, показывать ли кнопку, и второй
-/// ответ на вопрос «что будет сделано» однажды разошёлся бы с первым — кнопка
-/// обещала бы действие и не совершала его.
+/// The handler counts it itself (`handlers::library::batch`), by the same
+/// iteration it later acts with: these numbers decide whether to show the
+/// button, and a second answer to "what will be done" would one day diverge
+/// from the first — the button would promise an action and not perform it.
 pub struct Batch {
-    /// Есть ли что удалять — хоть одна запись библиотеки.
+    /// Whether there is anything to delete — at least one library record.
     pub deletable: bool,
-    /// Есть ли что ставить в закачку.
+    /// Whether there is anything to put into download.
     pub fetchable: bool,
 }
 

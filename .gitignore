@@ -9,7 +9,7 @@ build
 
 # Temporary and log files
 *.log
-# Логи и снимки кадра отладочного прогона (см. capture.rs) — всё про последний запуск
+# Logs and frame captures of a debug run (see capture.rs) — all about the last run
 runtime/logs/
 .env
 .DS_Store
@@ -24,10 +24,11 @@ project_context.txt
 generated
 .venv
 runtime/data
-# Запомненное приложением между запусками — раскладка окна (см. data-browser)
+# Remembered by the application between runs — the window layout (see data-browser)
 runtime/state
 .qwen
 .claude
 __pycache__
 .pytest_cache
 rustc-ice*
+.mimocode

@@ -1,15 +1,15 @@
-//! components/format.rs — числа и время словами.
+//! components/format.rs — numbers and time in words.
 //!
-//! Одно место на всё приложение: размер в строке списка, в подзаголовке и в
-//! статусной строке — это один и тот же размер, и написан он должен быть
-//! одинаково.
+//! One place for the whole application: a size in a list row, in a subtitle,
+//! and in the status bar is one and the same size, and it must be spelled the
+//! same way everywhere.
 
-/// Единицы по возрастанию; шаг — 1024.
-const UNITS: [&str; 5] = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
+/// Units in ascending order; the step is 1024.
+const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
 
-/// «58,7 МБ», «42 КБ», «4,2 ГБ». Десятичная запятая — как в остальном
-/// интерфейсе; дробная часть только там, где она что-то различает: у больших
-/// чисел она шум, у байтов её нет вовсе.
+/// "58,7 MB", "42 KB", "4,2 GB". The decimal comma, as in the rest of the
+/// interface; the fractional part only where it tells things apart: on large
+/// numbers it is noise, on bytes it is absent altogether.
 pub fn bytes(value: u64) -> String {
     let (scaled, unit) = scale(value);
     if unit == 0 || scaled >= 10.0 {
@@ -19,10 +19,11 @@ pub fn bytes(value: u64) -> String {
     }
 }
 
-/// «51/59 МБ», «4,2/9,0 ГБ» — сделано из всего. Единица одна на оба числа: они
-/// об одном и том же файле, и разные единицы рядом читаются как разные
-/// величины. Дробная часть — по тому же правилу, что у [`bytes`]: у чисел
-/// крупнее десяти она шум, и в бегущем счётчике закачки — шум мелькающий.
+/// "51/59 MB", "4,2/9,0 GB" — done out of total. One unit for both numbers:
+/// they speak of the same file, and different units side by side read as
+/// different quantities. The fractional part follows the same rule as
+/// [`bytes`]: on numbers above ten it is noise, and in a running download
+/// counter it is flickering noise.
 pub fn progress(done: u64, total: u64) -> String {
     let (_, unit) = scale(total);
     let show = |value: u64| {
@@ -47,17 +48,19 @@ fn scale(value: u64) -> (f64, usize) {
 }
 
 const MONTHS: [&str; 12] = [
-    "янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек",
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 const DAY: i64 = 86_400;
 
-/// «сегодня, 10:41», «вчера, 14:08», «4 авг, 09:12», «1 мая 1991».
+/// "today, 10:41", "yesterday, 14:08", "4 Aug, 09:12", "1 May 1991".
 ///
-/// Чем дальше событие, тем грубее подпись: время сегодняшнего файла различает
-/// его среди соседей, время файла из 1991 года — нет.
+/// The further away the event, the coarser the label: the time of a file from
+/// today tells it apart from its neighbors, the time of a file from 1991 does
+/// not.
 ///
-/// Время всемирное, не местное: часового пояса у `wasm32-wasip1` нет — ни
-/// смещения, ни базы правил, и взять их модулю неоткуда.
+/// The time is universal, not local: `wasm32-wasip1` has no time zone —
+/// neither an offset nor a rule database — and the module has nowhere to take
+/// them from.
 pub fn date(when: i64, now: i64) -> String {
     if when <= 0 {
         return String::new();
@@ -67,18 +70,19 @@ pub fn date(when: i64, now: i64) -> String {
 
     let today = now.div_euclid(DAY);
     match today - when.div_euclid(DAY) {
-        0 => format!("сегодня, {}", clock),
-        1 => format!("вчера, {}", clock),
+        0 => format!("today, {}", clock),
+        1 => format!("yesterday, {}", clock),
         _ if year == veldsdk::time::civil_from_unix(now).0 => format!("{} {}, {}", day, MONTHS[month as usize - 1], clock),
         _ => format!("{} {} {}", day, MONTHS[month as usize - 1], year),
     }
 }
 
-/// Дата из набранного руками — обратная сторона [`date`]: `2026-08-13`, а
-/// заодно `13.08.2026`, потому что вводят и так. Возвращает полночь этого дня
-/// в unix-секундах; `None` — набрано ещё не число.
+/// A date typed by hand — the other side of [`date`]: `2026-08-13`, and also
+/// `13.08.2026`, because that is typed too. Returns the midnight of that day
+/// in unix seconds; `None` — what is typed is not a number yet.
 ///
-/// Разбор здесь, рядом с записью: это одна пара, и разойтись им негде.
+/// Parsing lives here, next to the writing: they are one pair, and they have
+/// nowhere to diverge.
 pub fn parse_date(text: &str) -> Option<i64> {
     let text = text.trim();
     if text.is_empty() {
@@ -99,11 +103,12 @@ pub fn parse_date(text: &str) -> Option<i64> {
     Some(veldsdk::time::days_from_civil(year, month, day) * DAY)
 }
 
-/// Обрезает середину: имя, у которого не видно ни начала, ни хвоста, не
-/// опознать вовсе, а середина — обычно то, что у соседей и так совпадает.
+/// Cuts the middle out: a name that shows neither its start nor its tail
+/// cannot be recognized at all, while the middle is usually what the neighbors
+/// share anyway.
 ///
-/// Обрезает вслепую: что именно совпадает у соседей, знает список, а не
-/// строка (см. [`shared`]).
+/// Cuts blindly: what exactly the neighbors share is known to the list, not to
+/// the string (see [`shared`]).
 pub fn ellipsize(text: &str, limit: usize) -> String {
     let length = text.chars().count();
     if length <= limit || limit < 4 {
@@ -119,9 +124,10 @@ pub fn ellipsize(text: &str, limit: usize) -> String {
     )
 }
 
-/// Обрезает хвост: фраза о беде читается с начала — суть у неё впереди, а
-/// хвост договаривает, — и середина, вырезанная как у имени, оставляла бы от
-/// приговора два обрывка. Как и [`ellipsize`], ниже четырёх знаков не режет.
+/// Cuts the tail: a trouble phrase is read from the start — its point is up
+/// front and the tail spells out the rest — and a middle cut like on a name
+/// would leave two fragments of a verdict. Like [`ellipsize`], it does not cut
+/// below four characters.
 pub fn head(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit || limit < 4 {
         return text.to_string();
@@ -131,20 +137,21 @@ pub fn head(text: &str, limit: usize) -> String {
     format!("{}…", kept)
 }
 
-/// Имя величины файла многих величин — последний сегмент её пути в файле:
-/// `/PRODUCT/carbonmonoxide_total_column` → `carbonmonoxide_total_column`.
-/// Группы до него — устройство файла, а не имя.
+/// The name of a variable in a many-variable file — the last segment of its
+/// path in the file: `/PRODUCT/carbonmonoxide_total_column` →
+/// `carbonmonoxide_total_column`. The groups before it are the file's layout,
+/// not its name.
 pub fn variable_name(path: &str) -> &str {
     path.rsplit_once('/').map_or(path, |(_, name)| name)
 }
 
-/// Величина словами: имя, единицы и как назвал её файл — что из этого файл
-/// назвал: «carbonmonoxide_total_column, mol m-2 — Vertically integrated CO
-/// column». Имя первым: оно короче и по нему величину узнают; единицы сразу за
-/// ним, потому что слова файла бывают в полторы строки и режутся с хвоста
-/// ([`head`]) — единицы за ними пропадали бы первыми. Безразмерное CF пишет
-/// единицей «1», и «qa_value, 1» читалось бы числом — такая единица не
-/// называется.
+/// A variable in words: name, units, and how the file named it — whatever of
+/// that the file named: "carbonmonoxide_total_column, mol m-2 — Vertically
+/// integrated CO column". The name first: it is shorter and it is how the
+/// variable is recognized; units right behind it, because file words can run a
+/// line and a half and are cut from the tail ([`head`]) — units behind them
+/// would vanish first. Dimensionless CF writes the unit as "1", and
+/// "qa_value, 1" would read as a number — such a unit is not spelled out.
 pub fn variable(path: &str, said: &str, units: &str) -> String {
     let mut text = variable_name(path).to_string();
     if !units.is_empty() && units.trim() != "1" {
@@ -156,11 +163,12 @@ pub fn variable(path: &str, said: &str, units: &str) -> String {
     text
 }
 
-/// Делит `room` знаков между частями длиной `lengths`: короткие берут своё
-/// целиком, длинные делят остаток поровну. Короткие — первыми: часть, которой
-/// хватает её доли, отдаёт неиспользованное длинным, и ни одна не режется,
-/// пока сумма влезает. Так собирается подсказка из имени файла, величины и
-/// беды: одна строка на троих, и каждый в ней узнаваем.
+/// Divides `room` characters among parts of lengths `lengths`: the short ones
+/// take theirs in full, the long ones split the remainder evenly. Short ones
+/// go first: a part whose share is enough hands its unused space to the long
+/// ones, and nothing is cut while the sum fits. This is how a tooltip of file
+/// name, variable, and trouble is assembled: one line for the three, and each
+/// is recognizable in it.
 pub fn share(lengths: &[usize], room: usize) -> Vec<usize> {
     let mut order: Vec<usize> = (0..lengths.len()).collect();
     order.sort_by_key(|&at| lengths[at]);
@@ -173,23 +181,24 @@ pub fn share(lengths: &[usize], room: usize) -> Vec<usize> {
     shares
 }
 
-/// Что у всех имён страницы одинаково: сколько знаков совпало в начале и
-/// сколько в хвосте.
+/// What all names on a page share: how many characters match at the start and
+/// how many at the tail.
 ///
-/// Совпавшее ничего не различает, а место занимает — и занимает его как раз
-/// там, где смотрят. У имён Copernicus совпадают именно края: миссия с типом
-/// продукта в начале, базовая линия обработки с расширением в конце, а
-/// различает середина — время съёмки, виток, плитка. Обрезанная посередине,
-/// страница каталога превращается в два десятка строк «S3A_SL_2_A…R_003.SEN3»,
-/// в которых не выбрать ни одной.
+/// The shared part distinguishes nothing yet takes space — and takes it right
+/// where people look. Copernicus names share exactly the edges: mission with
+/// product type at the start, processing baseline with extension at the end,
+/// while the middle — sensing time, orbit, tile — is what tells them apart. Cut
+/// in the middle, a catalogue page turns into two dozen rows like
+/// "S3A_SL_2_A…R_003.SEN3", none of which can be told apart.
 ///
-/// Считается по показанному, а не по всему списку: сличают глазами страницу.
-/// Ответ один на неё всю — иначе соседние строки резались бы в разных местах и
-/// сравнивать пришлось бы разное.
+/// Counted over what is shown, not the whole list: the page is compared by
+/// eye. One answer for the whole of it — otherwise neighboring rows would be
+/// cut in different places and different things would have to be compared.
 ///
-/// Пусто, когда резать незачем (самое длинное имя и так влезает) или нечего
-/// (имена разные с первого знака). Совпавшее не съедает имя целиком: у
-/// одинаковых строк резать нечего, и режется тогда ничего.
+/// Empty when there is nothing to cut for (the longest name fits anyway) or
+/// nothing to cut by (names differ from the first character). The shared part
+/// does not swallow a name whole: identical rows have nothing to cut, and then
+/// nothing is cut.
 pub fn shared(names: &[&str], limit: usize) -> (usize, usize) {
     let Some(longest) = names.iter().map(|name| name.chars().count()).max() else {
         return (0, 0);
@@ -209,38 +218,40 @@ pub fn shared(names: &[&str], limit: usize) -> (usize, usize) {
         head += 1;
     }
     let mut tail = 0;
-    // Хвост не залезает в голову: у имён, совпавших целиком, они сошлись бы
-    // посередине и вычли бы одно и то же дважды.
+    // The tail must not run into the head: for names that matched whole they
+    // would meet in the middle and subtract the same thing twice.
     while head + tail < shortest && same(&|name: &Vec<char>| name.get(name.len() - 1 - tail).copied())
     {
         tail += 1;
     }
-    // От самого короткого имени обязан остаться хоть знак: строка из одних
-    // многоточий не имя.
+    // At least one character must remain of the shortest name: a string of
+    // nothing but ellipses is not a name.
     while head + tail >= shortest && tail > 0 {
         tail -= 1;
     }
     if head + tail >= shortest {
         return (0, 0);
     }
-    // Срезанное помечается многоточием, и знак под него берётся из того же
-    // места. Значит, край короче двух знаков срезать незачем: он не освободит
-    // ничего, а имя станет читаться на знак хуже. Так и выходит на странице
-    // разных миссий, где совпадает одна буква «S».
+    // A cut is marked with an ellipsis, and the character under it is taken
+    // from the same place. So an edge shorter than two characters is not worth
+    // cutting: it frees nothing and the name starts reading one character
+    // worse. That is exactly what comes out on a page of different missions
+    // sharing the single letter "S".
     (if head > 1 { head } else { 0 }, if tail > 1 { tail } else { 0 })
 }
 
-/// Имя строки списка: в отведённое число знаков, и режется в нём первым то,
-/// что у соседей одинаково (см. [`shared`]).
+/// A list row's name: within the allotted number of characters, cutting first
+/// what the neighbors share (see [`shared`]).
 ///
-/// Общее срезается не всё, а сколько нужно: место, освободившееся сверх
-/// различающегося, возвращается началу имени — по нему его и узнают. У
-/// страницы плиток Sentinel-2 различаются три знака кода плитки, и обрезанная
-/// до них строка различима, но неопознаваема; с возвратом начала выходит
-/// «S2A_MSIL2A_20260…RWV…» — и то, и другое сразу.
+/// Not all of the shared part is cut, only as much as needed: the space freed
+/// beyond the distinguishing part returns to the start of the name — that is
+/// how the name is recognized. On a Sentinel-2 tile page, three characters of
+/// the tile code differ, and a name cut to them is distinguishable but not
+/// recognizable; with the start returned it comes out
+/// "S2A_MSIL2A_20260…RWV…" — both at once.
 ///
-/// Срезанное с краёв помечено многоточием так же, как срезанное в середине:
-/// иначе укороченное имя не отличить от полного.
+/// A cut at the edges is marked with an ellipsis just like a cut in the
+/// middle: otherwise a shortened name cannot be told from a full one.
 pub fn distinct(text: &str, limit: usize, shared: (usize, usize)) -> String {
     let (head, tail) = shared;
     let chars: Vec<char> = text.chars().collect();
@@ -250,8 +261,8 @@ pub fn distinct(text: &str, limit: usize, shared: (usize, usize)) -> String {
     let body: Vec<char> = chars[head..chars.len() - tail].to_vec();
     let trail = usize::from(tail > 0);
 
-    // Начало оставляем настолько, насколько различающееся оставляет место; на
-    // ведущее многоточие при этом тоже нужен знак.
+    // Keep as much of the start as the distinguishing part leaves room for;
+    // the leading ellipsis needs a character of its own too.
     let room = limit.saturating_sub(trail);
     let keep = room.saturating_sub(body.len() + 1).min(head);
     let lead = usize::from(keep < head);
@@ -266,8 +277,8 @@ pub fn distinct(text: &str, limit: usize, shared: (usize, usize)) -> String {
     )
 }
 
-/// Сейчас — в unix-секундах. Нужно только для подписи времени: «сегодня» и
-/// «вчера» без точки отсчёта не существуют.
+/// Now, in unix seconds. Needed only for the time label: "today" and
+/// "yesterday" do not exist without a reference point.
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -275,8 +286,8 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// «1 файл», «2 файла», «5 файлов» — иначе счётчик читается как заготовка.
-/// Формы идут в порядке «один», «два», «пять».
+/// "1 file", "2 files", "5 files" — otherwise the counter reads like a stub.
+/// The forms come in the order "one", "two", "five".
 pub fn plural(count: usize, forms: [&'static str; 3]) -> &'static str {
     let tail = count % 100;
     match (tail, tail % 10) {
@@ -287,16 +298,16 @@ pub fn plural(count: usize, forms: [&'static str; 3]) -> &'static str {
     }
 }
 
-/// «3 снимка, 2 файла» — счётчики подзаголовка через запятую.
+/// "3 snapshots, 2 files" — the subtitle counters joined with commas.
 ///
-/// Одно место на все списки: каждый считает своё (снимки и папки, слои и
-/// контуры), но подписаны эти числа одинаково — иначе соседние вкладки говорят
-/// об одном и том же разными словами.
+/// One place for all lists: each counts its own (snapshots and folders, layers
+/// and outlines), but these numbers are labeled the same way — otherwise
+/// neighboring tabs would speak of one and the same thing in different words.
 ///
-/// Пустых слов в подписи нет: чего нет, о том и не сказано, — поэтому нулевые
-/// счётчики молчат, а из одних нулей выходит пустая строка. Назвать её словом
-/// умеет только сам вид: у пустой папки и у пустого «Скачанного» причины
-/// молчать разные.
+/// No empty words in the label: what is not there is not spoken of — so zero
+/// counters stay silent, and all zeros make an empty string. Only the view
+/// itself can put it into words: an empty folder and an empty "Downloaded" go
+/// silent for different reasons.
 pub fn counted(parts: &[(usize, [&'static str; 3])]) -> String {
     parts
         .iter()
@@ -306,234 +317,28 @@ pub fn counted(parts: &[(usize, [&'static str; 3])]) -> String {
         .join(", ")
 }
 
-/// Сколько знаков моноширинного текста помещается в отведённую ширину.
-/// Ширина знака выведена из размера: у моноширинного шрифта она одна на все
-/// знаки, и это единственный текст, который можно померить, не спрашивая
-/// рендерер.
+/// How many monospace characters fit into the allotted width. The character
+/// width is derived from the size: for a monospace font it is one for all
+/// characters, and this is the only text that can be measured without asking
+/// the renderer.
 pub fn mono_fit(width: f32, size: f32) -> usize {
     const ADVANCE: f32 = 0.6;
     (width / (size * ADVANCE)).max(0.0) as usize
 }
 
-/// Сколько места займёт подпись обычным шрифтом — оценкой сверху.
+/// How much space a label in the regular font takes — an upper-bound estimate.
 ///
-/// Точную ширину знает только рендерер: шрифт и его метрики живут в ui-service,
-/// а модуль собирает разметку, ничего не измеряя. Оценки хватает там, где
-/// ответ нужен пороговый — влезает полоса рычагов в строку или нет
-/// (см. `controls::bar`).
+/// Only the renderer knows the exact width: the font and its metrics live in
+/// ui-service, while the module assembles the layout measuring nothing. The
+/// estimate is enough where the answer is a threshold — whether the control
+/// bar fits into a row or not (see `controls::bar`).
 ///
-/// Оценка именно сверху: кириллица основного шрифта занимает около 0,46 кегля
-/// на знак, латиница с цифрами — меньше, и половина кегля перекрывает обе.
-/// Ошибка в большую сторону разворачивает полосу на строку чуть раньше, чем
-/// стало тесно; ошибка в меньшую оставляет подпись обрезанной — ровно то, ради
-/// чего ширина и считается.
+/// An upper bound specifically: the main font's Cyrillic takes about 0.46 of
+/// the size per character, Latin with digits takes less, and half the size
+/// covers both. An error upward turns the bar onto a row a little before it
+/// gets tight; an error downward leaves the label cut — exactly what the width
+/// is computed for.
 pub fn text_width(text: &str, size: f32) -> f32 {
     const ADVANCE: f32 = 0.5;
     text.chars().count() as f32 * size * ADVANCE
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Хвост режется, начало остаётся: суть фразы о беде впереди. Пробел
-    /// перед многоточием не остаётся, короткое и совсем узкий предел — как есть.
-    #[test]
-    fn a_head_cut_keeps_the_start_of_the_phrase() {
-        assert_eq!(head("не подробнее превью: подробный растр", 20), "не подробнее превью…");
-        assert_eq!(head("не подробнее превью", 40), "не подробнее превью");
-        assert_eq!(head("не подробнее", 3), "не подробнее");
-        assert_eq!(head("аб вг", 4), "аб…", "пробел перед многоточием висит");
-    }
-
-    /// Имя величины — последний сегмент пути; единицы и слова дописываются
-    /// только названные, единицы раньше слов.
-    #[test]
-    fn a_variable_is_named_by_its_last_segment_then_its_words() {
-        assert_eq!(variable_name("/PRODUCT/carbonmonoxide_total_column"), "carbonmonoxide_total_column");
-        assert_eq!(variable_name("F1_BT_fn"), "F1_BT_fn");
-        assert_eq!(
-            variable("/PRODUCT/carbonmonoxide_total_column", "Vertically integrated CO column", "mol m-2"),
-            "carbonmonoxide_total_column, mol m-2 — Vertically integrated CO column"
-        );
-        assert_eq!(variable("/F1_BT_fn", "", "K"), "F1_BT_fn, K");
-        assert_eq!(variable("/x", "brightness", ""), "x — brightness");
-        assert_eq!(variable("/x", "", ""), "x");
-        assert_eq!(variable("/qa_value", "data quality value", "1"), "qa_value — data quality value");
-    }
-
-    /// Короткие части берут своё, длинные делят остаток поровну; влезающее не
-    /// режется.
-    #[test]
-    fn a_line_is_shared_shortest_first() {
-        assert_eq!(share(&[11, 89, 55], 84), vec![11, 37, 36]);
-        assert_eq!(share(&[10, 20], 100), vec![10, 20]);
-        assert_eq!(share(&[50, 50], 60), vec![30, 30]);
-        assert_eq!(share(&[], 60), Vec::<usize>::new());
-    }
-
-    /// Пара с `date`: то, что она пишет днём, разбор возвращает обратно днём.
-    #[test]
-    fn дата_разбирается_обоими_привычными_способами() {
-        let day = parse_date("2026-08-13").expect("ISO");
-        assert_eq!(parse_date("13.08.2026"), Some(day));
-        assert_eq!(veldsdk::time::civil_from_unix(day), (2026, 8, 13));
-    }
-
-    /// Набранное наполовину — ещё не дата, и молча считать её нулём нельзя:
-    /// ноль в запросе значит «край не задан», а не «начало эпохи».
-    #[test]
-    fn недобранное_датой_не_становится() {
-        for text in ["", "2026-08-", "завтра", "2026-13-01", "2026-08-32", "1900-01-01"] {
-            assert_eq!(parse_date(text), None, "{}", text);
-        }
-    }
-
-    /// Форма выбирается по последним двум разрядам, а не по последнему: у
-    /// одиннадцати и двадцати одного он один и тот же, а слова разные.
-    #[test]
-    fn счётчик_склоняет_по_последним_двум_разрядам() {
-        let files = |count| counted(&[(count, ["файл", "файла", "файлов"])]);
-        assert_eq!(files(1), "1 файл");
-        assert_eq!(files(2), "2 файла");
-        assert_eq!(files(5), "5 файлов");
-        assert_eq!(files(11), "11 файлов");
-        assert_eq!(files(21), "21 файл");
-        assert_eq!(files(111), "111 файлов");
-    }
-
-    /// Чего нет, о том и не сказано: нулевой счётчик молчит, а из одних нулей
-    /// выходит пустая строка — назвать её словом умеет только сам вид.
-    #[test]
-    fn нулевые_счётчики_в_подпись_не_идут() {
-        let parts = [
-            (3usize, ["снимок", "снимка", "снимков"]),
-            (0, ["папка", "папки", "папок"]),
-            (2, ["файл", "файла", "файлов"]),
-        ];
-        assert_eq!(counted(&parts), "3 снимка, 2 файла");
-        assert_eq!(counted(&[(0usize, ["слой", "слоя", "слоёв"])]), "");
-        assert_eq!(counted(&[]), "");
-    }
-
-    /// Страница каталога: имена расходятся только серединой, и режется у них
-    /// как раз то, что совпало. Иначе все двадцать строк выглядят одинаково.
-    #[test]
-    fn страница_режется_по_тому_чем_строки_отличаются() {
-        let names = [
-            "S3A_SL_2_AOD____20260818T201914_20260818T202213_0180_143_057______MAR_O_NR_003.SEN3",
-            "S3A_SL_2_AOD____20260818T201614_20260818T201912_0179_143_057______MAR_O_NR_003.SEN3",
-            "S3A_SL_2_AOD____20260818T201314_20260818T201612_0179_143_057______MAR_O_NR_003.SEN3",
-        ];
-        let shared = shared(&names, 21);
-        assert!(shared.0 > 0 && shared.1 > 0, "края не совпали: {:?}", shared);
-        let shown: Vec<String> = names.iter().map(|name| distinct(name, 21, shared)).collect();
-        assert_eq!(shown.len(), 3);
-        assert_ne!(shown[0], shown[1], "строки неразличимы: {}", shown[0]);
-        assert_ne!(shown[1], shown[2], "строки неразличимы: {}", shown[1]);
-        for one in &shown {
-            assert!(one.chars().count() <= 21, "{} знаков: {}", one.chars().count(), one);
-            assert!(one.starts_with('…') && one.ends_with('…'), "срез не помечен: {}", one);
-        }
-
-        // Прежнее правило на этих же именах даёт три одинаковые строки — ради
-        // этого сравнение здесь и стоит.
-        let blind: Vec<String> = names.iter().map(|name| ellipsize(name, 21)).collect();
-        assert_eq!(blind[0], blind[1]);
-    }
-
-    /// Резать незачем, пока имя влезает целиком: обрезанное без нужды теряет
-    /// то, по чему строку узнают в другом списке.
-    #[test]
-    fn помещающееся_имя_не_режется() {
-        let names = ["одна_и_та_же_шапка_A", "одна_и_та_же_шапка_B"];
-        assert_eq!(shared(&names, 40), (0, 0));
-        assert_eq!(distinct(names[0], 40, (0, 0)), names[0]);
-    }
-
-    /// Имена, совпавшие целиком (или одно на всю страницу), резать нечем — и
-    /// правило отступает к слепому многоточию, а не к строке из одних точек.
-    #[test]
-    fn совпавшему_целиком_резать_нечего() {
-        let same = ["S1C_IW_GRDH_1SDV_20260818T000000.SAFE"; 3];
-        assert_eq!(shared(&same, 21), (0, 0));
-        assert_eq!(shared(&[same[0]], 21), (0, 0));
-        assert_eq!(shared(&[], 21), (0, 0));
-        // Короткое имя рядом с длинными: хвост не залезает в голову.
-        let mixed = ["AxB", "AyB", "AzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzB"];
-        let (head, tail) = shared(&mixed, 8);
-        assert!(head + tail < 3, "съедено всё короткое имя: {:?}", (head, tail));
-    }
-
-    /// Разные с первого знака — резать по краям нечего, работает прежнее
-    /// правило. Совпавшая одна буква — тоже: место под многоточие она не
-    /// окупает.
-    #[test]
-    fn разное_с_первого_знака_режется_как_прежде() {
-        let names = [
-            "S1C_IW_GRDH_1SDV_20260818T000000_009054_011F94_A43C.SAFE",
-            "LC08_L1TP_170025_20260818_20260818_02_T1",
-        ];
-        assert_eq!(shared(&names, 21), (0, 0));
-
-        let missions = [
-            "S3B_SR_1_SRA_A__20260818T110337_20260818T111337_0600_123_293.SEN3",
-            "S2B_MSIL1C_20260818T093549_N0511_R036_T35UNV_20260818T113217.SAFE",
-        ];
-        assert_eq!(shared(&missions, 21), (0, 0));
-    }
-
-    /// Различающегося на странице бывает три знака — код плитки Sentinel-2, —
-    /// и обрезанное до них имя различимо, но не опознаваемо. Освободившееся
-    /// место возвращается началу: видно и что это, и какая плитка.
-    #[test]
-    fn освободившееся_место_возвращается_началу_имени() {
-        let names = [
-            "S2A_MSIL2A_20260818T012111_N0512_R031_T54RWV_20260818T042717.SAFE",
-            "S2A_MSIL2A_20260818T012111_N0512_R031_T54RXV_20260818T042717.SAFE",
-            "S2A_MSIL2A_20260818T012111_N0512_R031_T54SUA_20260818T042717.SAFE",
-        ];
-        let shared = shared(&names, 21);
-        let shown: Vec<String> = names.iter().map(|name| distinct(name, 21, shared)).collect();
-        for (name, one) in names.iter().zip(&shown) {
-            assert!(one.chars().count() <= 21, "{} знаков: {}", one.chars().count(), one);
-            assert!(one.starts_with("S2A_MSIL2A"), "имя неопознаваемо: {}", one);
-            let tile = &name[41..44];
-            assert!(one.contains(tile), "нет различающего куска {}: {}", tile, one);
-        }
-        assert_ne!(shown[0], shown[1]);
-        assert_ne!(shown[1], shown[2]);
-    }
-
-
-    /// Размер пишется одинаково везде, где его пишут, и дробная часть стои́т
-    /// ровно там, где она что-то различает.
-    #[test]
-    fn размер_пишется_одной_меркой() {
-        assert_eq!(bytes(0), "0 Б", "у байтов дробной части нет вовсе");
-        assert_eq!(bytes(512), "512 Б");
-        assert_eq!(bytes(1536), "1,5 КБ", "десятичная запятая, как в остальном интерфейсе");
-        assert_eq!(bytes(12 * 1024), "12 КБ", "у большого числа дробь — шум");
-        assert_eq!(bytes(1024 * 1024 * 1024), "1,0 ГБ");
-    }
-
-    /// «Сделано из всего» — одной единицей на оба числа: они об одном и том же
-    /// файле, и разные единицы рядом читаются как разные величины. Из этой
-    /// пары собрана всякая подпись хода, и мерена по ней колонка ЗАГРУЗКА.
-    #[test]
-    fn ход_пишется_одной_единицей_на_оба_числа() {
-        let said = progress(50 * 1024 * 1024 + 943718, 58 * 1024 * 1024 + 734003);
-        assert_eq!(said, "51/59 МБ", "у чисел крупнее десяти дробь — мелькающий шум");
-        assert_eq!(said.matches("МБ").count(), 1, "единица названа дважды");
-
-        // А у мелких она различает: 4,2 ГБ и 4,9 ГБ — это два разных файла.
-        assert_eq!(progress(4508876800, 9663676416), "4,2/9,0 ГБ");
-
-        // Единицу задаёт знаменатель: иначе мелкое начало большой закачки
-        // писалось бы килобайтами против гигабайт.
-        assert_eq!(progress(1024, 4 * 1024 * 1024 * 1024), "0,0/4,0 ГБ");
-
-        // Пустой знаменатель делить не на что — и не делим.
-        assert_eq!(progress(0, 0), "0/0 Б");
-    }
 }

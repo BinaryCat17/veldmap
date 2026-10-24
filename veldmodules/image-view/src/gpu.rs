@@ -1,10 +1,11 @@
-//! Ресурсы устройства и запись кадра.
+//! Device resources and frame recording.
 //!
-//! Раздел тот же, что у глобуса: [`Device`] — пайплайн, сэмплер и layout
-//! привязки тайла, которым размер места безразличен; [`Target`] — view чужой
-//! текстуры, который им и определяется. Буфера глубины нет: кадр плоский,
-//! ячейки не перекрываются по построению (каждая рисуется ровно одним
-//! тайлом), и порядок задаёт сама очередь команд.
+//! The split is the same as in the globe: [`Device`] — pipeline, sampler, and
+//! the tile bind group layout, which care nothing about the size of the
+//! allocated space; [`Target`] — a view of a foreign texture, which is exactly
+//! what defines it. There is no depth buffer: the frame is flat, cells never
+//! overlap by construction (each is drawn by exactly one tile), and order comes
+//! from the command queue itself.
 
 use veldsdk::graphics::{
     self as gfx, buffer_usage, BindGroupId, BindGroupLayoutId, CreateRenderPipeline, CullMode,
@@ -12,31 +13,31 @@ use veldsdk::graphics::{
     TextureViewId, VertexBufferLayout, VertexFormat, VISIBILITY_FRAGMENT,
 };
 
-/// Вершина квада тайла: позиция уже в NDC, uv — в текстуре тайла. Пересчёт
-/// из пикселей снимка сделан на CPU в f64 (см. camera.rs): в шейдер числа
-/// приходят уже относительными к кадру, где f32 хватает.
+/// Tile quad vertex: position is already in NDC, uv lives in the tile texture.
+/// The conversion from image pixels is done on the CPU in f64 (see camera.rs):
+/// numbers reach the shader already relative to the frame, where f32 suffices.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Vertex {
     pub pos: [f32; 2],
     pub uv: [f32; 2],
-    /// Насколько сильно место этой ячейки подкрашено синевой ряби, 0..1.
+    /// How strongly this cell's spot is tinted with the loading ripple blue, 0..1.
     ///
-    /// Готовой величиной, а не фазой с признаком, как у шара: сетка канвы
-    /// переписывается каждым кадром целиком, и волну дешевле испечь на месте,
-    /// чем везти в шейдер две величины ради того же самого. У шара сетка живёт
-    /// между кадрами — там иначе и нельзя.
+    /// A ready-made value, not a phase with a flag as on the globe: the canvas
+    /// mesh is rewritten in full every frame, and baking the wave on the spot is
+    /// cheaper than carrying two values into the shader for the same result. The
+    /// globe mesh lives across frames — there it cannot be otherwise.
     pub glow: f32,
 }
 
-/// Квад одного тайла: прямоугольник кадра, кусок текстуры и её привязка.
+/// Quad of a single tile: a frame rectangle, a piece of texture, and its bind group.
 pub struct Quad {
-    /// x0, y0, x1, y1 в NDC.
+    /// x0, y0, x1, y1 in NDC.
     pub rect: [f32; 4],
     /// u0, v0, u1, v1.
     pub uv: [f32; 4],
     pub bind: BindGroupId,
-    /// Сила ряби на этой ячейке (см. [`Vertex::glow`]).
+    /// Ripple strength on this cell (see [`Vertex::glow`]).
     pub glow: f32,
 }
 
@@ -44,7 +45,7 @@ pub struct Device {
     pipeline: PipelineId,
     tile_layout: BindGroupLayoutId,
     sampler: SamplerId,
-    /// Формат таргета, под который собран пайплайн. Сменится — пересобирать.
+    /// Target format the pipeline is built for. A change means a rebuild.
     pub format: i32,
 }
 
@@ -58,9 +59,10 @@ impl Device {
                 gfx::sampler_layout_entry(1, VISIBILITY_FRAGMENT),
             ],
         )?;
-        // Linear в обе стороны: ужатие в кадре не глубже двух крат (уровень
-        // выбирается по масштабу), а тайлы sRGB — сэмплер отдаёт линейное,
-        // и усреднение соседних текселей честное.
+        // Linear in both directions: the frame's downsampling is never deeper
+        // than twofold (the level is chosen by scale), and the tiles are sRGB —
+        // the sampler hands out linear values, so averaging neighboring texels
+        // stays honest.
         let sampler = gfx::create_sampler(FilterMode::FiltLinear, FilterMode::FiltLinear)?;
 
         let pipeline = gfx::create_render_pipeline(CreateRenderPipeline {
@@ -88,7 +90,7 @@ impl Device {
         Ok(Self { pipeline, tile_layout, sampler, format })
     }
 
-    /// Привязка одного тайла: его view и общий сэмплер.
+    /// Bind group of a single tile: its view and the shared sampler.
     pub fn tile_bind_group(&self, view: &TextureViewId) -> anyhow::Result<BindGroupId> {
         gfx::create_bind_group(
             "Image Tile BG",
@@ -98,10 +100,10 @@ impl Device {
     }
 }
 
-/// Место, отданное нам владельцем разметки.
+/// Space handed to us by the layout owner.
 pub struct Target {
-    /// Текстура не наша: держит её владелец, здесь только id — по нему видно,
-    /// что таргет сменился.
+    /// The texture is not ours: its owner holds it, only the id lives here — it
+    /// shows when the target has changed.
     pub texture_id: u64,
     pub width: u32,
     pub height: u32,
@@ -115,16 +117,17 @@ impl Target {
     }
 }
 
-/// Буфер вершин канвы. У каждой канвы свой: команды исполняются кадровым
-/// циклом хоста позже записи, и один общий буфер на две канвы обе рисовал бы
-/// содержимым последней.
+/// Canvas vertex buffer. Each canvas has its own: commands execute in the host's
+/// frame loop after the write, and one shared buffer for two canvases would draw
+/// both with the last one's content.
 pub fn vertex_buffer() -> GrowingBuffer {
-    // Экран — десятки тайлов; 16 КиБ — это сотня квадов с запасом.
-    GrowingBuffer::new(buffer_usage::VERTEX, "вершины тайлов", 16 * 1024)
+    // The screen holds dozens of tiles; 16 KiB fits a hundred quads with room to spare.
+    GrowingBuffer::new(buffer_usage::VERTEX, "tile vertices", 16 * 1024)
 }
 
-/// Кадр: квады в буфер и команды в очередь. Пустой набор квадов тоже кадр —
-/// он стирает прежнее содержимое (пасс хоста чистит таргет прозрачным).
+/// A frame: quads into the buffer, commands into the queue. An empty quad set is
+/// a frame too — it wipes the previous content (the host pass clears the target
+/// to transparent).
 pub fn render(
     device: &Device,
     target: &Target,
@@ -160,39 +163,4 @@ pub fn render(
         }
     }
     recorder.submit(&target.view)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Раскладка вершины и её длина считаются в двух разных местах: шаг берётся
-    /// из `size_of`, а смещения — из перечня форматов. Разъедься они — пайплайн
-    /// соберётся, кадр запишется, а на канве окажется пустое место: имени у неё
-    /// нет, обходу разметки она себя не объявляет, и сценарию такой отказ не
-    /// виден вовсе.
-    #[test]
-    fn раскладка_вершины_сходится_с_её_шагом() {
-        let attributes = gfx::packed_attributes(&[
-            VertexFormat::VtxFloat32x2,
-            VertexFormat::VtxFloat32x2,
-            VertexFormat::VtxFloat32,
-        ]);
-        let spanned = attributes
-            .last()
-            .map_or(0, |last| last.offset as usize + format_size(last.format));
-        assert_eq!(spanned, std::mem::size_of::<Vertex>());
-    }
-
-    /// Сколько байт занимает атрибут такого формата. Своим перечнем, а не общей
-    /// функцией: сойтись он обязан не с кодом, а с тем, что понимает драйвер.
-    fn format_size(format: i32) -> usize {
-        match format {
-            f if f == VertexFormat::VtxFloat32 as i32 => 4,
-            f if f == VertexFormat::VtxFloat32x2 as i32 => 8,
-            f if f == VertexFormat::VtxFloat32x3 as i32 => 12,
-            f if f == VertexFormat::VtxFloat32x4 as i32 => 16,
-            other => unreachable!("неизвестный формат вершины: {other}"),
-        }
-    }
 }

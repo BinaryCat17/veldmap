@@ -1,8 +1,8 @@
-//! view/browse.rs — сетевой каталог.
+//! view/browse.rs — the network catalog.
 //!
-//! Своего здесь только подпись: строки собирает `components::rows` (их
-//! спрашивает не одна разметка), а показывает общий экран списка
-//! (см. components::list_screen).
+//! Only the signature is its own here: rows are assembled by `components::rows`
+//! (asked for by more than one layout), while the shared list screen shows them
+//! (see components::list_screen).
 
 use crate::proto::ui_service::Element;
 use crate::module::components::{format, list_screen, rows, Row, RowKind, Screen};
@@ -13,23 +13,25 @@ pub fn view(state: &State, view: ViewId, browse: &BrowseState) -> Element<Msg> {
     let rows: Vec<Row> = rows::browse(state, browse);
 
     let subtitle = match &browse.error {
-        // Причина отказа стои́т посреди пустого списка, а не здесь: там ей есть
-        // где поместиться целиком, а считать в отказе нечего.
+        // The reason for the failure stands in the middle of an empty list, not
+        // here: there it has room to fit in full, while there is nothing to count
+        // in a failure.
         Some(_) => String::new(),
-        None if browse.request.is_pending() => "загружается…".to_string(),
-        // Снимки считаются отдельно от папок: в списке они и выглядят иначе, а
-        // «шесть папок» там, где четыре из них — снимки, не сообщает главного.
+        None if browse.request.is_pending() => "loading…".to_string(),
+        // Snapshots are counted apart from folders: in the list they also look
+        // different, and "six folders" where four of them are snapshots does not
+        // tell the main thing.
         None => {
             let products = rows.iter().filter(|row| row.kind.is_product()).count();
             let folders = rows.iter().filter(|row| matches!(row.kind, RowKind::Folder)).count();
             let files = rows.len() - products - folders;
             let said = format::counted(&[
-                (products, ["снимок", "снимка", "снимков"]),
-                (folders, ["папка", "папки", "папок"]),
-                (files, ["файл", "файла", "файлов"]),
+                (products, ["snapshot", "snapshots", "snapshots"]),
+                (folders, ["folder", "folders", "folders"]),
+                (files, ["file", "files", "files"]),
             ]);
             match said.is_empty() {
-                true => "пусто".to_string(),
+                true => "empty".to_string(),
                 false => said,
             }
         }
@@ -38,18 +40,18 @@ pub fn view(state: &State, view: ViewId, browse: &BrowseState) -> Element<Msg> {
     list_screen::view(
         view,
         Screen {
-            title: "Сетевой каталог",
+            title: "Network catalog",
             picked: state.picked_key(),
             batch: crate::module::handlers::library::batch(state, view),
             subtitle,
             path: Some(&browse.current_path),
-            // «Папка пуста» после отказа — неправда: пуста она или нет, мы так
-            // и не узнали. Причина отказа и есть то единственное, что тут можно
-            // сказать.
+            // "Folder is empty" after a failure is a lie: whether it is empty or
+            // not, we never found out. The failure reason is the only thing that
+            // can be said here.
             empty: match (&browse.error, browse.request.is_pending()) {
                 (Some(error), _) => error.as_str(),
-                (None, true) => "Загружается…",
-                (None, false) => "Папка пуста",
+                (None, true) => "Loading…",
+                (None, false) => "Folder is empty",
             },
             controls: None,
             rows,

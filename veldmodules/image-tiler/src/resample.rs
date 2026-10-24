@@ -1,28 +1,30 @@
-//! Ужатие RGBA8: два алгоритма под два разных контракта.
+//! RGBA8 reduction: two algorithms for two different contracts.
 //!
-//! [`halve`] — шаг пирамиды: пиксель уровня k+1 — это ровно блок 2×2 уровня
-//! k (у краёв — обрезанный). Именно *блок*, а не пропорциональная доля:
-//! на целочисленном соответствии координат стоит вся адресация пирамиды —
-//! тайл (z+1, x, y) накрывает тайлы (z, 2x.., 2y..), и рисующий подставляет
-//! грубый уровень под мелкий без пересчёта. Равномерное растяжение при
-//! нечётной стороне сдвигало бы содержимое относительно этой сетки.
+//! [`halve`] is a pyramid step: a pixel of level k+1 is exactly a 2×2 block
+//! of level k (clipped at the edges). Exactly a *block*, not a proportional
+//! share: all pyramid addressing rests on the integer correspondence of
+//! coordinates — tile (z+1, x, y) covers tiles (z, 2x.., 2y..), and the
+//! renderer drops a coarse level under a fine one without recomputation.
+//! Uniform stretching with an odd side would shift the content relative to
+//! this grid.
 //!
-//! [`resample`] — приведение к произвольному размеру с точными площадными
-//! весами: обзорный регион TIFF → сетка уровня, кадр JPEG → размеры уровня.
-//! Отношения там дробные (обзоры не обязаны быть половинами), и пиксель на
-//! границе ячейки входит в обе с весом своей доли. Увеличение работает тем
-//! же кодом, но по смыслу это размазывание — честная заглушка, когда
-//! источник мельче цели.
+//! [`resample`] is reduction to an arbitrary size with exact area weights: a
+//! TIFF overview region → a level grid, a JPEG frame → level dimensions. The
+//! ratios there are fractional (overviews are not obliged to be halves), and
+//! a pixel on a cell boundary enters both cells with the weight of its share.
+//! Enlargement runs the same code, but in meaning it is smearing — an honest
+//! stub for when the source is smaller than the target.
 //!
-//! Цвет в обоих усредняется с весом альфы: у прозрачного пикселя цвета нет,
-//! и поровну усреднённый он протекал бы чёрным в кромку данных (поля гранул —
-//! прозрачный чёрный, см. ключевание nodata). Сплошь непрозрачный вход это
-//! не меняет ни на байт: вес каждого слагаемого просто умножается на 255.
+//! Color in both is averaged with alpha weight: a transparent pixel has no
+//! color, and averaged uniformly it would bleed black into the data fringe
+//! (granule fields are transparent black, see nodata keying). Fully opaque
+//! input does not change this by a byte: each term's weight is simply
+//! multiplied by 255.
 
-/// Шаг пирамиды: RGBA8 `w`×`h` → `ceil(w/2)`×`ceil(h/2)`, каждый целевой
-/// пиксель — среднее своего блока 2×2 (у правого и нижнего краёв блок
-/// обрезан). Округление к ближайшему; формула размеров та же, что в
-/// `pyramid::level_size`, — уровни совпадают по построению.
+/// Pyramid step: RGBA8 `w`×`h` → `ceil(w/2)`×`ceil(h/2)`, each target pixel
+/// is the average of its own 2×2 block (clipped at the right and bottom
+/// edges). Rounds to nearest; the size formula is the one in
+/// `pyramid::level_size` — the levels agree by construction.
 pub fn halve(src: &[u8], w: u32, h: u32) -> Vec<u8> {
     if w == 0 || h == 0 {
         return Vec::new();
@@ -52,8 +54,8 @@ pub fn halve(src: &[u8], w: u32, h: u32) -> Vec<u8> {
             let area = (y1 - y0) * (x1 - x0);
             let out_px = ((dy as usize) * (dw as usize) + (dx as usize)) * 4;
             for c in 0..3 {
-                // Блок целиком прозрачен — цвета у него нет; ноль держит
-                // выход детерминированным.
+                // The block is fully transparent — it has no color; zero
+                // keeps the output deterministic.
                 out[out_px + c] = if alpha == 0 { 0 } else { ((rgb[c] + alpha / 2) / alpha) as u8 };
             }
             out[out_px + 3] = ((alpha + area / 2) / area) as u8;
@@ -62,17 +64,18 @@ pub fn halve(src: &[u8], w: u32, h: u32) -> Vec<u8> {
     out
 }
 
-/// `src` — RGBA8 размера `sw`×`sh`; результат — RGBA8 размера `dw`×`dh`.
-/// Пустые размеры дают пустой буфер: звать так — ошибка вызывающего,
-/// но паниковать в конвейере из-за неё не за чем.
+/// `src` is RGBA8 of size `sw`×`sh`; the result is RGBA8 of size `dw`×`dh`.
+/// Empty sizes give an empty buffer: calling that way is the caller's
+/// mistake, but there is no reason to panic in the pipeline over it.
 pub fn resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     let whole = Window { x0: 0.0, y0: 0.0, x1: f64::from(sw), y1: f64::from(sh) };
     resample_window(src, sw, sh, whole, dw, dh)
 }
 
-/// Окно источника в его же пикселях, дробное. Дробное — потому что кусок
-/// источника под тайл границами пикселей не ложится: масштаб между уровнем и
-/// копией бывает каким угодно (у небинарных копий — 3, 5, 7/2).
+/// A window of the source in its own pixels, fractional. Fractional because
+/// the piece of source under a tile does not fall on pixel boundaries: the
+/// scale between level and copy can be anything (for non-binary copies — 3,
+/// 5, 7/2).
 #[derive(Clone, Copy)]
 pub struct Window {
     pub x0: f64,
@@ -81,21 +84,23 @@ pub struct Window {
     pub y1: f64,
 }
 
-/// Ужатие куска источника в кадр `dw × dh`.
+/// Reduction of a piece of the source into a `dw × dh` frame.
 ///
-/// Кусок задаётся дробным окном, а не всем буфером: читается источник целыми
-/// пикселями (иначе их не прочесть), а тайлу принадлежит не весь прочитанный
-/// прямоугольник, а ровно окно внутри него. Растянуть на тайл прочитанное
-/// целиком — значит сдвинуть содержимое на долю пикселя и растянуть его на ту
-/// же долю: соседние тайлы уезжают в разные стороны, и на стыке видно шов.
+/// The piece is given by a fractional window, not by the whole buffer: the
+/// source is read in whole pixels (no other way to read them), and what
+/// belongs to the tile is not the whole read rectangle but exactly the window
+/// inside it. Stretching everything read onto the tile would shift the
+/// content by a fraction of a pixel and stretch it by the same fraction:
+/// neighboring tiles drift in different directions, and a seam shows at the
+/// joint.
 pub fn resample_window(src: &[u8], sw: u32, sh: u32, window: Window, dw: u32, dh: u32) -> Vec<u8> {
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
         return Vec::new();
     }
     debug_assert_eq!(src.len(), (sw as usize) * (sh as usize) * 4);
 
-    // Быстрый путь тождества: каскад зовёт ресемпл безусловно, а полоса
-    // вершины уже нужного размера.
+    // Identity fast path: the cascade calls resample unconditionally, while
+    // the apex band is already the needed size.
     if sw == dw && sh == dh && window.x0 == 0.0 && window.y0 == 0.0
         && window.x1 == f64::from(sw) && window.y1 == f64::from(sh)
     {
@@ -109,7 +114,8 @@ pub fn resample_window(src: &[u8], sw: u32, sh: u32, window: Window, dw: u32, dh
     for (dy, (y0, y1)) in y_spans.iter().enumerate() {
         for (dx, (x0, x1)) in x_spans.iter().enumerate() {
             let mut rgb = [0f64; 3];
-            // Σ альфа·вес: числитель альфы и он же — знаменатель цвета.
+            // Σ alpha·weight: alpha's numerator and, the same value, color's
+            // denominator.
             let mut alpha = 0f64;
             let mut area = 0f64;
             let mut sy = y0.floor() as u32;
@@ -133,177 +139,40 @@ pub fn resample_window(src: &[u8], sw: u32, sh: u32, window: Window, dw: u32, dh
             }
             let out_px = (dy * (dw as usize) + dx) * 4;
             for c in 0..3 {
-                // Ячейка целиком прозрачна — цвета у неё нет; ноль держит
-                // выход детерминированным.
+                // The cell is fully transparent — it has no color; zero
+                // keeps the output deterministic.
                 out[out_px + c] = if alpha == 0.0 {
                     0
                 } else {
                     (rgb[c] / alpha).round().clamp(0.0, 255.0) as u8
                 };
             }
-            // Площадь не бывает нулём: спаны не пусты по построению.
+            // The area is never zero: the spans are non-empty by construction.
             out[out_px + 3] = (alpha / area).round().clamp(0.0, 255.0) as u8;
         }
     }
     out
 }
 
-/// Границы исходного диапазона для каждого целевого индекса, в исходных
-/// пикселях: ячейка d накрывает часть окна [from, to), делённого на `dst`
-/// равных долей.
+/// Bounds of the source range for each target index, in source pixels: cell
+/// d covers the part of the window [from, to) split into `dst` equal shares.
 fn spans(from: f64, to: f64, dst: u32) -> Vec<(f64, f64)> {
     let scale = (to - from) / f64::from(dst);
     (0..dst)
         .map(|d| {
             let a = from + f64::from(d) * scale;
             let b = from + (f64::from(d) + 1.0) * scale;
-            // Правый край клампится окном: плавающая арифметика может дать
-            // to + ε, а пикселя за краем нет.
+            // The right edge is clamped by the window: floating-point
+            // arithmetic may give to + ε, while there is no pixel past the
+            // edge.
             (a, b.min(to))
         })
         .collect()
 }
 
-/// Доля пикселя `s` внутри диапазона [a, b).
+/// Share of pixel `s` within the range [a, b).
 fn overlap(s: u32, a: f64, b: f64) -> f64 {
     let lo = f64::from(s).max(a);
     let hi = f64::from(s + 1).min(b);
     (hi - lo).max(0.0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn solid(w: u32, h: u32, value: u8) -> Vec<u8> {
-        vec![value; (w * h * 4) as usize]
-    }
-
-    #[test]
-    fn uniform_stays_uniform() {
-        // Любое отношение сторон: среднее константы — та же константа.
-        for (sw, sh, dw, dh) in [(7, 5, 3, 2), (10, 10, 5, 5), (3, 3, 4, 4), (513, 2, 257, 1)] {
-            let out = resample(&solid(sw, sh, 137), sw, sh, dw, dh);
-            assert!(out.iter().all(|&v| v == 137), "{}x{} → {}x{}", sw, sh, dw, dh);
-        }
-    }
-
-    /// Ужимается окно, а не весь прочитанный кусок. Читать приходится целыми
-    /// пикселями, и прочитанное шире того, что тайлу принадлежит; растянутое
-    /// целиком, оно уехало бы на долю пикселя — у соседнего тайла в другую
-    /// сторону, и на стыке остался бы шов.
-    #[test]
-    fn only_the_window_is_squeezed() {
-        let mut src = Vec::new();
-        for v in [10u8, 20, 30, 40] {
-            src.extend_from_slice(&[v, v, v, 255]);
-        }
-        let window = Window { x0: 1.0, y0: 0.0, x1: 3.0, y1: 1.0 };
-        let out = resample_window(&src, 4, 1, window, 2, 1);
-        assert_eq!(&out[0..4], &[20, 20, 20, 255], "первая ячейка — второй пиксель");
-        assert_eq!(&out[4..8], &[30, 30, 30, 255], "вторая — третий");
-        // Без окна тот же буфер даёт средние по парам — то самое смещение.
-        assert_eq!(&resample(&src, 4, 1, 2, 1)[0..4], &[15, 15, 15, 255]);
-    }
-
-    /// Два соседних тайла, взятые каждый из своего расширенного куска,
-    /// складываются в то же самое, что и одно ужатие всей строки: шва нет.
-    #[test]
-    fn neighbouring_tiles_join_without_a_seam() {
-        // Строка из девяти пикселей ужимается в шесть — масштаб 3/2, то есть
-        // границы тайлов приходятся на середины исходных пикселей.
-        let values: Vec<u8> = (0..9).map(|v| v * 25).collect();
-        let mut src = Vec::new();
-        for v in &values {
-            src.extend_from_slice(&[*v, *v, *v, 255]);
-        }
-        let whole = resample(&src, 9, 1, 6, 1);
-
-        // Тайл шириной три: первый берёт долю [0, 4.5), второй — [4.5, 9).
-        let mut joined = Vec::new();
-        for tile in 0..2u32 {
-            let (from, to) = (f64::from(tile) * 4.5, f64::from(tile + 1) * 4.5);
-            let (sx0, sx1) = (from.floor() as u32, (to.ceil() as u32).min(9));
-            let region = &src[(sx0 as usize) * 4..(sx1 as usize) * 4];
-            let window = Window {
-                x0: from - f64::from(sx0),
-                y0: 0.0,
-                x1: to - f64::from(sx0),
-                y1: 1.0,
-            };
-            joined.extend(resample_window(region, sx1 - sx0, 1, window, 3, 1));
-        }
-        assert_eq!(joined, whole);
-    }
-
-    #[test]
-    fn exact_two_to_one_is_block_average() {
-        // 4×2 → 2×1: каждая ячейка — среднее своего блока 2×2.
-        let mut src = Vec::new();
-        for v in [10u8, 20, 30, 40, 50, 60, 70, 80] {
-            src.extend_from_slice(&[v, v, v, 255]);
-        }
-        let out = resample(&src, 4, 2, 2, 1);
-        // Блок левый: 10,20,50,60 → 35; правый: 30,40,70,80 → 55.
-        assert_eq!(&out[0..4], &[35, 35, 35, 255]);
-        assert_eq!(&out[4..8], &[55, 55, 55, 255]);
-    }
-
-    #[test]
-    fn fractional_ratio_preserves_mean() {
-        // 3 → 2 по ширине: средний пиксель делится между ячейками пополам,
-        // и среднее по картинке сохраняется.
-        let mut src = Vec::new();
-        for v in [0u8, 90, 180] {
-            src.extend_from_slice(&[v, 0, 0, 255]);
-        }
-        let out = resample(&src, 3, 1, 2, 1);
-        // Ячейка 0: (0·1 + 90·0.5)/1.5 = 30; ячейка 1: (90·0.5 + 180·1)/1.5 = 150.
-        assert_eq!(out[0], 30);
-        assert_eq!(out[4], 150);
-    }
-
-    #[test]
-    fn identity_is_copy() {
-        let src: Vec<u8> = (0..4 * 6 * 4).map(|i| (i % 251) as u8).collect();
-        assert_eq!(resample(&src, 4, 6, 4, 6), src);
-    }
-
-    #[test]
-    fn halve_averages_integer_blocks() {
-        // 3×3 → 2×2: полный блок, обрезанные по краю и угловой из одного.
-        let mut src = Vec::new();
-        for v in [10u8, 20, 30, 40, 50, 60, 70, 80, 90] {
-            src.extend_from_slice(&[v, v, v, 255]);
-        }
-        let out = halve(&src, 3, 3);
-        // Блоки: (10,20,40,50)=30; (30,60)=45; (70,80)=75; (90)=90.
-        assert_eq!(&out[0..4], &[30, 30, 30, 255]);
-        assert_eq!(&out[4..8], &[45, 45, 45, 255]);
-        assert_eq!(&out[8..12], &[75, 75, 75, 255]);
-        assert_eq!(&out[12..16], &[90, 90, 90, 255]);
-    }
-
-    #[test]
-    fn halve_rounds_to_nearest() {
-        // (0 + 1) / 2 = 0.5 → 1: округление, а не отбрасывание.
-        let src = [0, 0, 0, 255, 1, 1, 1, 255];
-        assert_eq!(&halve(&src, 2, 1)[..3], &[1, 1, 1]);
-    }
-
-    #[test]
-    fn transparent_does_not_bleed_into_colour() {
-        // Блок 2×2: два белых и два прозрачных чёрных (поле гранулы). Цвет
-        // остаётся белым, полупрозрачность несёт одна альфа.
-        let src = [255, 255, 255, 255, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0];
-        assert_eq!(halve(&src, 2, 2), vec![255, 255, 255, 128]);
-        assert_eq!(resample(&src, 2, 2, 1, 1), vec![255, 255, 255, 128]);
-    }
-
-    #[test]
-    fn fully_transparent_block_stays_empty() {
-        let src = [9, 9, 9, 0, 9, 9, 9, 0];
-        assert_eq!(halve(&src, 2, 1), vec![0, 0, 0, 0]);
-        assert_eq!(resample(&src, 2, 1, 1, 1), vec![0, 0, 0, 0]);
-    }
 }

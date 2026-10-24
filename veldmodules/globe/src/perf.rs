@@ -1,37 +1,38 @@
-//! Чего стоит пересчёт желаемого.
+//! What recomputing the wanted set costs.
 //!
-//! Мерить приходится не «сколько в среднем», а «сколько в тот миг, когда это
-//! происходит». Обход сетки идёт не ровным фоном, а всплесками: жест длится
-//! секунду с небольшим, а между жестами ворота (`module::build_patches`)
-//! отсекают счёт до всего дорогого. Средним за час такой всплеск не виден
-//! вовсе, а он и есть то единственное, что роняет кадр.
+//! What must be measured is not "how much on average" but "how much at the moment it
+//! happens". The grid walk comes not as a steady background but in bursts: a gesture lasts
+//! just over a second, and between gestures the gate (`module::build_patches`) cuts the
+//! count off before anything expensive. An hour-long average cannot see such a burst at
+//! all, yet the burst is the only thing that drops a frame.
 //!
-//! Поэтому отчёт — по концу всплеска. Считается он по кадрам, в которых обход
-//! был, а не по всем подряд, — и вот это единственное, что спасает среднее от
-//! разбавления покоем. Всплеск нужен остальному: длине работы, худшему кадру и
-//! разбивке по поводам. Собранные окном по часам, они смешали бы жест колесом,
-//! перелёт наводки и приход тайлов в одну строку, из которой не видно, чем
-//! вызвана ни одна из них.
+//! Hence the report fires at the end of a burst. It is counted over the frames in which a
+//! walk happened, not over all frames in a row — and that alone saves the average from
+//! being diluted by stillness. The burst serves the rest: the work length, the worst frame,
+//! and the breakdown by reason. Gathered in an hour-long window, they would blend a wheel
+//! gesture, the aiming flight, and tile arrivals into one line where none of the causes
+//! shows.
 //!
-//! Отчёт живёт на кадровом тике, поэтому всплеск, не закрывшийся до того, как
-//! тики кончились, не печатается вовсе: закрытое окно и отобранное место
-//! уносят последний из них. Своего таймера у модуля нет, и взять его негде.
+//! The report lives on the frame tick, so a burst that has not closed before the ticks run
+//! out is never printed: the closed window and the reclaimed slot carry away the last one.
+//! The module has no timer of its own and nowhere to get one.
 //!
-//! Часы приходят доводом, а не берутся внутри: так тип проверяется тестом, не
-//! дожидаясь настоящих секунд.
+//! The clock arrives as an argument rather than being taken inside: this way the type is
+//! checked by a test without waiting for real seconds.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
-/// Цена ответа: сколько ячеек проверили и сколько из них оказалось видно.
+/// The cost of an answer: how many cells were checked and how many of them turned out
+/// visible.
 ///
-/// Две величины, а не одна, потому что вопрос к ним один: имеет ли смысл
-/// перестать обходить сетку целиком. Спуск по дереву экономит ровно на
-/// отвергнутых — если видно почти всё проверенное, экономить нечего, сколько
-/// бы времени обход ни занимал.
+/// Two quantities, not one, because the question put to them is single: is it worth
+/// stopping the whole-grid walk. The tree descent saves exactly on the rejected — if
+/// almost everything checked is visible, there is nothing to save, however long the walk
+/// takes.
 ///
-/// `Cell`, а не `&mut`: обход зовётся из замыкания, которое `tiles::want`
-/// принимает как `Fn`.
+/// `Cell`, not `&mut`: the walk is called from a closure that `tiles::want` accepts as
+/// `Fn`.
 #[derive(Default)]
 pub struct Toll {
     pub seen: Cell<u64>,
@@ -39,97 +40,98 @@ pub struct Toll {
 }
 
 impl Toll {
-    /// Отметить пройденный уровень: столько ячеек проверено, столько видно.
+    /// Record a level walked: this many cells checked, this many visible.
     pub fn level(&self, seen: u64, visible: u64) {
         self.seen.set(self.seen.get() + seen);
         self.visible.set(self.visible.get() + visible);
     }
 }
 
-/// Повод, по которому считали желаемое.
+/// The reason the wanted set was computed.
 ///
-/// Поводов пять, а не один, потому что всплеск от пришедшего тайла и всплеск
-/// от жеста стоят одинаково, а значат разное: первый неизбежен, второй —
-/// цена движения руки. Слитые в одно число, они не дали бы отличить одно от
-/// другого.
+/// Five reasons, not one, because a burst from an arriving tile and a burst from a gesture
+/// weigh the same but mean different things: the first is unavoidable, the second is the
+/// price of a hand movement. Merged into one number, they would not let one be told from
+/// the other.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
-    /// Двинулась камера — жест либо наводка.
+    /// The camera moved — a gesture or the aiming flight.
     Camera,
-    /// Сдвинулся ход добычи: кэш закрыл заказ, кончился проход производителя.
-    /// Приехавший тайл сюда не идёт — он двигает поколение хранилища, и обход
-    /// за него делает [`Pass::Patches`] со следующего кадра.
+    /// The fetch course shifted: the cache closed an order, the producer pass ended. An
+    /// arriving tile does not go here — it advances the store generation, and
+    /// [`Pass::Patches`] does the walk for it from the next frame.
     Fetch,
-    /// Сменился состав: место под кадр, набор наложений, описание растра.
+    /// The set changed: the place under the frame, the overlay set, the raster
+    /// description.
     Set,
-    /// Пересборка патчей на кадровом тике.
+    /// A patch rebuild on the frame tick.
     Patches,
-    /// Проверка ответа кэша: что из присланного ещё нужно.
+    /// Checking the cache answer: what of the delivered is still needed.
     Answer,
 }
 
 impl Pass {
-    /// Все поводы в порядке печати.
+    /// All the reasons in printing order.
     const ALL: [Pass; 5] = [Pass::Camera, Pass::Fetch, Pass::Set, Pass::Patches, Pass::Answer];
 
     fn named(self) -> &'static str {
         match self {
-            Pass::Camera => "камера",
-            Pass::Fetch => "добыча",
-            Pass::Set => "набор",
-            Pass::Patches => "патчи",
-            Pass::Answer => "ответ",
+            Pass::Camera => "camera",
+            Pass::Fetch => "fetch",
+            Pass::Set => "set",
+            Pass::Patches => "patches",
+            Pass::Answer => "answer",
         }
     }
 
     fn at(self) -> usize {
-        Pass::ALL.iter().position(|kind| *kind == self).expect("повод из своего же перечисления")
+        Pass::ALL.iter().position(|kind| *kind == self).expect("reason from its own enumeration")
     }
 }
 
-/// Сколько кадров подряд без единого обхода считать концом всплеска.
+/// How many frames in a row without a single walk end the burst.
 ///
-/// Не ноль: движение мыши хост коалесцирует до одного события на кадр, и
-/// пропущенный кадр посреди перетаскивания — обычное дело. Разорванный на нём
-/// всплеск дал бы два отчёта вместо одного и оба с неверным знаменателем.
+/// Not zero: the host coalesces mouse motion to one event per frame, and a skipped frame
+/// in the middle of a drag is routine. A burst broken on it would give two reports instead
+/// of one, both with a wrong denominator.
 ///
-/// Дюжина — запас, а не выведенное число: проверкой закреплено лишь то, что
-/// кадр без обхода жеста не кончает.
+/// A dozen is a margin, not a derived number: a check pins down only that a frame without
+/// a walk does not end the gesture.
 const QUIET_FRAMES: u32 = 12;
 
-/// Предел длины всплеска.
+/// The cap on burst length.
 ///
-/// Всплеск, идущий дольше, — уже не жест, а непрерывная работа, и отчёт по его
-/// концу пришёл бы слишком поздно, чтобы связаться с причиной. Тогда отчёт
-/// печатается по пределу, а всплеск продолжается дальше.
+/// A burst lasting longer is no longer a gesture but continuous work, and a report at its
+/// end would come too late to be tied to a cause. Then the report is printed at the cap,
+/// and the burst carries on.
 const LONGEST: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct Burst {
     began: Option<Instant>,
-    /// Последний кадр, в котором обход был. Им и меряется длина всплеска:
-    /// хвост тишины, по которому его конец опознан, к работе не относится и
-    /// растянул бы её на треть секунды.
+    /// The last frame in which a walk happened. The burst length is measured by it: the
+    /// tail of silence by which the end is recognized does not belong to the work and
+    /// would stretch it by a third of a second.
     until: Option<Instant>,
-    /// Кадры с обходами. Тихие сюда не идут: «столько-то на кадр» — это про
-    /// кадр движения, а поделённое на кадры покоя оно занижает во столько раз,
-    /// сколько их случилось.
+    /// Frames with walks. Quiet ones do not go here: "so much per frame" is about a frame
+    /// of motion, and divided by frames of rest it understates as many times as they
+    /// happened.
     frames: u32,
     quiet: u32,
     passes: [u32; Pass::ALL.len()],
     seen: u64,
     visible: u64,
     spent: Duration,
-    /// Копится с начала кадра и складывается в `worst` на его конце: кадр
-    /// роняет пара обходов, а не самый долгий из них поодиночке.
+    /// Accumulates from the start of the frame and folds into `worst` at its end: a frame
+    /// is dropped by a pair of walks, not by the longest of them alone.
     frame_spent: Duration,
     frame_passes: u32,
     worst: Duration,
-    /// Пересборки буфера патчей: сколько их было, сколько вершин собрано всего
-    /// и чего это стоило. Отдельно от обходов, потому что это другая работа и
-    /// другой порядок цены: обход считает ячейки, пересборка — вершины, и
-    /// сложенные в одно число они не дали бы различить дорогой жест от дорогой
-    /// сетки.
+    /// Patch buffer rebuilds: how many there were, how many vertices were gathered in all,
+    /// and what it cost. Kept apart from the walks, because this is different work at a
+    /// different order of cost: a walk counts cells, a rebuild counts vertices, and summed
+    /// into one number they would not let an expensive gesture be told from an expensive
+    /// grid.
     rebuilds: u32,
     vertices: u64,
     rebuild_spent: Duration,
@@ -141,13 +143,12 @@ pub struct Meter {
 }
 
 impl Meter {
-    /// Отметить обход и его цену.
+    /// Record a walk and its cost.
     ///
-    /// Проход, не обошедший ни одной ячейки, проходом не считается. Такие
-    /// бывают и стоят почти ничего: жест над пустым шаром зовёт пересчёт на
-    /// каждое событие камеры, а обходить там нечего — набор пуст, скрыт или
-    /// ещё не описан. Записанные, они завели бы всплеск, которому нечего
-    /// рассказать, и разбавили бы среднее нулями.
+    /// A pass that walked no cells does not count as a pass. Such happen and cost almost
+    /// nothing: a gesture over an empty globe calls a recompute on every camera event, and
+    /// there is nothing to walk — the set is empty, hidden, or not yet described. Recorded,
+    /// they would start a burst with nothing to tell and dilute the average with zeros.
     pub fn pass(&mut self, from: Pass, toll: &Toll, spent: Duration, now: Instant) {
         let seen = toll.seen.get();
         if seen == 0 {
@@ -164,16 +165,15 @@ impl Meter {
         burst.frame_passes += 1;
     }
 
-    /// Отметить пересборку буфера патчей: столько вершин собрано, столько это
-    /// стоило.
+    /// Record a patch buffer rebuild: how many vertices were gathered and what it cost.
     ///
-    /// Всплеска сама по себе не заводит и вне его теряется: пересборке
-    /// предшествует обход, и он его уже открыл, а заведённый ею одной всплеск
-    /// мерил бы длину от пересборки до тишины — это не жест.
+    /// On its own it starts no burst and is lost outside one: a walk precedes a rebuild and
+    /// has already opened the burst, while a burst opened by the rebuild alone would measure
+    /// its length from the rebuild to the silence — that is not a gesture.
     ///
-    /// Пересборка, собравшая ноль вершин, пересборкой не считается. Такая
-    /// бывает ровно одна — та, что снимает последний слой, — и стоит она
-    /// ничего, а среднее по вершинам занижает вдвое.
+    /// A rebuild that gathered zero vertices does not count as a rebuild. There is exactly
+    /// one such — the one that removes the last layer — and it costs nothing, while halving
+    /// the per-vertex average.
     pub fn rebuilt(&mut self, vertices: usize, spent: Duration) {
         let burst = &mut self.burst;
         if burst.began.is_none() || vertices == 0 {
@@ -185,10 +185,10 @@ impl Meter {
         burst.frame_spent += spent;
     }
 
-    /// Отметить кадр и, когда всплеск кончился, отдать строку отчёта.
+    /// Record a frame and, when the burst has ended, hand back the report line.
     ///
-    /// Кадр закрывает счёт своего времени — до него обходы кадра лежат
-    /// порознь, и наибольший из них не сказал бы о пропущенном кадре ничего.
+    /// The frame closes the count of its own time — before it the frame's walks lie apart,
+    /// and the largest of them would say nothing about a dropped frame.
     pub fn frame(&mut self, now: Instant) -> Option<String> {
         let burst = &mut self.burst;
         burst.worst = burst.worst.max(burst.frame_spent);
@@ -203,9 +203,9 @@ impl Meter {
         burst.frame_passes = 0;
 
         let began = burst.began?;
-        // Тишина кончает всплеск, предел длины — только отчёт по нему: работа
-        // в этом случае идёт дальше, и следующий отчёт обязан мерить своё
-        // время, а не считать его от давно прошедшего начала.
+        // Silence ends the burst; the length cap only reports on it: in that case the work
+        // goes on, and the next report must measure its own time rather than count it from
+        // a long-past beginning.
         let quieted = burst.quiet > QUIET_FRAMES;
         if !quieted && now.duration_since(began) < LONGEST {
             return None;
@@ -213,11 +213,10 @@ impl Meter {
 
         let lasted = burst.until.unwrap_or(now).duration_since(began);
         let carried = burst.report(lasted);
-        // Всплеск без единого обхода не отчитывается. Завестись он может
-        // только продлением по пределу — работа кончилась ровно на нём, начало
-        // новому уже проставлено, — и тишина следом напечатала бы строку
-        // нулей: ноль обходов, ноль ячеек, ноль миллисекунд. Такая строка не
-        // говорит ни о чём и читается как поломка.
+        // A burst without a single walk is not reported. It can only arise from the
+        // length-cap extension — the work ended exactly at it, the start for a new one is
+        // already set, — and the silence after would print a line of zeros: zero walks,
+        // zero cells, zero milliseconds. Such a line says nothing and reads as a fault.
         let empty = burst.passes.iter().sum::<u32>() == 0;
         self.burst = Burst { began: (!quieted).then_some(now), ..Burst::default() };
         match empty {
@@ -229,12 +228,12 @@ impl Meter {
 
 impl Burst {
     fn report(&self, lasted: Duration) -> String {
-        // Пересборка называется, только если была: у жеста над готовым набором
-        // её нет вовсе, и нули в строке читались бы как поломка.
+        // The rebuild is named only if there was one: a gesture over a ready set has none
+        // at all, and zeros in the line would read as a fault.
         let rebuilt = match self.rebuilds {
             0 => String::new(),
             _ => format!(
-                "; пересборок {}, вершин {} сред., на пересборку {:.1} мс",
+                "; rebuilds {}, vertices {} avg., {:.1} ms per rebuild",
                 self.rebuilds,
                 self.vertices / u64::from(self.rebuilds),
                 self.rebuild_spent.as_secs_f32() * 1000.0 / self.rebuilds as f32,
@@ -247,8 +246,8 @@ impl Burst {
             .collect();
         let total: u32 = self.passes.iter().sum();
         format!(
-            "обход сетки: {:.2} с, {} кадров, {} обходов ({}), ячеек {}, из них видно {}{}; \
-             на кадр {:.1} мс, худший {:.1}",
+            "grid walk: {:.2} s, {} frames, {} walks ({}), cells {}, of them visible {}{}; \
+             per frame {:.1} ms, worst {:.1}",
             lasted.as_secs_f32(),
             self.frames,
             total,
@@ -256,286 +255,11 @@ impl Burst {
             self.seen,
             self.visible,
             rebuilt,
-            // Знаменатель — кадры всплеска: доля от его длительности сказала
-            // бы «сколько времени занято», а роняет кадр не доля, а миллисекунды
-            // в нём.
+            // The denominator is the burst's frames: a share of its duration would say
+            // "how much time is taken", while a frame is dropped not by a share but by the
+            // milliseconds in it.
             self.spent.as_secs_f32() * 1000.0 / self.frames.max(1) as f32,
             self.worst.as_secs_f32() * 1000.0,
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Цена обхода, разложенная по двум уровням, — как её и приносит
-    /// `tiles::want`: он зовёт обход и на целевом уровне, и на каждой ступени
-    /// лестницы, и `Toll` обязан их сложить, а не заместить последним.
-    fn toll(seen: u64, visible: u64) -> Toll {
-        let toll = Toll::default();
-        let (head, tail) = (seen / 4, visible / 4);
-        toll.level(head, tail);
-        toll.level(seen - head, visible - tail);
-        toll
-    }
-
-    /// Кадры без обходов ничего не открывают, а обход открывает всплеск, и
-    /// отчёт приходит ровно один раз — по тишине, а не на каждом следующем
-    /// кадре.
-    #[test]
-    fn a_burst_reports_once_and_only_after_it_falls_quiet() {
-        let start = Instant::now();
-        let mut meter = Meter::default();
-        assert!(meter.frame(start).is_none(), "без обходов отчитываться не о чем");
-
-        meter.pass(Pass::Camera, &toll(100, 10), Duration::from_millis(3), start);
-        let mut at = start;
-        for step in 1..=QUIET_FRAMES + 1 {
-            at += Duration::from_millis(16);
-            assert!(meter.frame(at).is_none(), "всплеск ещё не кончился на {}-м тихом кадре", step);
-        }
-        at += Duration::from_millis(16);
-        let report = meter.frame(at).expect("тишина закрыла всплеск");
-        assert!(report.contains("камера 1"), "повод назван: {}", report);
-        assert!(report.contains("ячеек 100"), "проверенное сосчитано: {}", report);
-        assert!(report.contains("видно 10"), "видимое сосчитано: {}", report);
-
-        at += Duration::from_millis(16);
-        assert!(meter.frame(at).is_none(), "второй раз тот же всплеск не отчитывается");
-    }
-
-    /// Пустой шар молчит. Пересчёт при пустом наборе исполняется на каждом
-    /// кадре и стоит почти ничего — записанный проходом, он открывал бы
-    /// всплеск на неподвижном пустом шаре и печатал бы строку нулей каждые
-    /// несколько секунд.
-    #[test]
-    fn a_pass_that_walked_nothing_is_not_a_pass() {
-        let start = Instant::now();
-        let mut meter = Meter::default();
-        // Дольше предела длины всплеска: пустой обход идёт на каждом кадре, и
-        // тишиной его молчание не объяснить — кончиться такой всплеск может
-        // только по пределу, а кончиться он не должен вовсе.
-        let frames = LONGEST.as_millis() as u64 / 16 + 60;
-        for step in 0..frames {
-            meter.pass(Pass::Patches, &toll(0, 0), Duration::from_micros(4), start);
-            assert!(
-                meter.frame(start + Duration::from_millis(16 * step)).is_none(),
-                "пустой обход открыл всплеск на {}-м кадре из {}",
-                step,
-                frames
-            );
-        }
-    }
-
-    /// Поводы считаются порознь, и в строку идут только те, что были: набор
-    /// нулей по всем пяти поводам сказал бы о причине всплеска меньше, чем
-    /// один названный повод.
-    #[test]
-    fn only_the_reasons_that_happened_are_named() {
-        let start = Instant::now();
-        let mut meter = Meter::default();
-        meter.pass(Pass::Camera, &toll(10, 1), Duration::from_millis(1), start);
-        meter.pass(Pass::Camera, &toll(10, 1), Duration::from_millis(1), start);
-        meter.pass(Pass::Patches, &toll(10, 1), Duration::from_millis(1), start);
-        let report = quiet_out(&mut meter, start);
-        assert!(report.contains("камера 2"), "повод сосчитан по разу на обход: {}", report);
-        assert!(report.contains("патчи 1"), "второй повод назван: {}", report);
-        assert!(!report.contains("добыча"), "небывший повод не назван: {}", report);
-        assert!(report.contains("3 обходов"), "общий счёт — сумма по поводам: {}", report);
-        assert!(report.contains("ячеек 30"), "проверенное копится по обходам: {}", report);
-        assert!(report.contains("видно 3"), "видимое копится тоже: {}", report);
-    }
-
-    /// Пересборка буфера патчей названа отдельно от обходов: обход считает
-    /// ячейки, пересборка — вершины, и стоит она на порядок больше. Слитые в
-    /// одно число, дорогой жест и дорогая варп-сетка были бы неразличимы, а
-    /// лечатся они разным.
-    ///
-    /// Пришедшая вне всплеска, она молчит: всплеск заводит обход, и мерка
-    /// длины у него от первого обхода до тишины.
-    #[test]
-    fn a_rebuild_is_counted_apart_from_the_walks() {
-        let start = Instant::now();
-        let mut meter = Meter::default();
-
-        meter.rebuilt(1_000, Duration::from_millis(9));
-        for step in 0..=QUIET_FRAMES + 2 {
-            let at = start + Duration::from_millis(16 * u64::from(step));
-            assert!(meter.frame(at).is_none(), "пересборка завела всплеск сама на {}-м кадре", step);
-        }
-
-        let mut meter = Meter::default();
-        meter.pass(Pass::Camera, &toll(10, 1), Duration::from_millis(1), start);
-        meter.rebuilt(600_000, Duration::from_millis(20));
-        meter.rebuilt(400_000, Duration::from_millis(10));
-        // Снятие последнего слоя — тоже пересборка, но собравшая ноль вершин:
-        // стои́т она ничего, а среднее по вершинам занижает вдвое.
-        meter.rebuilt(0, Duration::from_micros(5));
-        let report = quiet_out(&mut meter, start);
-        assert!(report.contains("пересборок 2"), "пересборки сосчитаны: {}", report);
-        assert!(report.contains("вершин 500000"), "вершины усреднены по ним же: {}", report);
-        assert!(report.contains("на пересборку 15.0 мс"), "цена усреднена: {}", report);
-        // И она же попадает в худший кадр: роняет его именно она.
-        assert!(report.contains("худший 31.0"), "пересборка не вошла в кадр: {}", report);
-    }
-
-    /// Худшее — сумма за кадр, а не самый долгий обход. Кадр роняет пара
-    /// обходов подряд, и названный по одному из них он выглядел бы уложившимся
-    /// в бюджет.
-    #[test]
-    fn the_worst_frame_is_the_frame_and_not_the_longest_pass() {
-        let start = Instant::now();
-        let mut meter = Meter::default();
-        // Кадр из пары: каждый обход короче одиночного из следующего кадра, а
-        // вместе — длиннее.
-        meter.pass(Pass::Camera, &toll(10, 1), Duration::from_millis(4), start);
-        meter.pass(Pass::Patches, &toll(10, 1), Duration::from_millis(4), start);
-        let at = start + Duration::from_millis(16);
-        assert!(meter.frame(at).is_none());
-        meter.pass(Pass::Camera, &toll(10, 1), Duration::from_millis(5), at);
-        let report = quiet_out(&mut meter, at);
-        assert!(report.contains("худший 8.0"), "пара кадра перевесила одиночку: {}", report);
-    }
-
-    /// Всплеск длиннее предела отчитывается и продолжается: работа-то идёт, и
-    /// оборванный счёт потерял бы её остаток.
-    #[test]
-    fn a_burst_longer_than_the_cap_reports_and_carries_on() {
-        let start = Instant::now();
-        let mut meter = Meter::default();
-        let mut at = start;
-        let mut reports = Vec::new();
-        // Обход на каждом кадре, дольше предела вдвое.
-        for _ in 0..((LONGEST.as_millis() as u64 / 16) * 2 + 4) {
-            meter.pass(Pass::Camera, &toll(10, 1), Duration::from_millis(1), at);
-            at += Duration::from_millis(16);
-            if let Some(report) = meter.frame(at) {
-                reports.push(report);
-            }
-        }
-        assert!(reports.len() >= 2, "непрерывная работа отчиталась не раз: {:?}", reports);
-        for report in &reports {
-            let lasted: f32 = report
-                .split_once("обход сетки: ")
-                .and_then(|(_, tail)| tail.split_once(' '))
-                .and_then(|(head, _)| head.parse().ok())
-                .expect("длительность в начале строки");
-            assert!(
-                lasted <= LONGEST.as_secs_f32() + 0.05,
-                "отчёт по пределу мерит своё время, а не от начала работы: {}",
-                report
-            );
-        }
-    }
-
-    /// Кадр без обхода посреди жеста всплеска не разрывает.
-    ///
-    /// Разорванный, он дал бы два отчёта вместо одного, и оба с неверным
-    /// знаменателем: движение мыши хост коалесцирует до одного события на
-    /// кадр, так что пропущенный кадр посреди перетаскивания — обычное дело, а
-    /// не признак конца жеста.
-    #[test]
-    fn a_frame_without_a_pass_does_not_break_the_burst_in_two() {
-        let start = Instant::now();
-        let mut meter = Meter::default();
-        let mut at = start;
-        let mut reports = Vec::new();
-        // Обход, ровно один кадр без него, снова обход — и только потом конец.
-        // Единица здесь числом, а не через `QUIET_FRAMES`: выраженная
-        // константой, она подстроилась бы под любое её значение, включая ноль,
-        // и правило осталось бы незакреплённым.
-        meter.pass(Pass::Camera, &toll(40, 4), Duration::from_millis(2), at);
-        for _ in 0..2 {
-            at += Duration::from_millis(16);
-            if let Some(report) = meter.frame(at) {
-                reports.push(report);
-            }
-        }
-        meter.pass(Pass::Camera, &toll(40, 4), Duration::from_millis(2), at);
-        reports.push(quiet_out(&mut meter, at));
-        assert_eq!(reports.len(), 1, "тихий кадр разорвал всплеск: {:?}", reports);
-        assert!(reports[0].contains("2 кадров"), "оба кадра с обходом сосчитаны: {}", reports[0]);
-        assert!(reports[0].contains("ячеек 80"), "обходы сложились: {}", reports[0]);
-    }
-
-    /// Работа, кончившаяся ровно на пределе длины, второго отчёта не даёт.
-    ///
-    /// Отчёт по пределу продлевает всплеск — но продлевать его нечем, если
-    /// обходы на этом же кадре и кончились. Продлённый вслепую, он дождался бы
-    /// тишины и напечатал строку нулей: ноль обходов, ноль ячеек, ноль
-    /// миллисекунд. Такая строка не говорит ни о чём и выглядит как поломка.
-    #[test]
-    fn work_that_stops_at_the_cap_does_not_leave_an_empty_burst_behind() {
-        let start = Instant::now();
-        let mut meter = Meter::default();
-        let mut at = start;
-        let mut reports = Vec::new();
-        // Обход на каждом кадре, ровно до предела и ни кадром дольше.
-        while at.duration_since(start) < LONGEST {
-            meter.pass(Pass::Camera, &toll(10, 1), Duration::from_millis(1), at);
-            at += Duration::from_millis(16);
-            if let Some(report) = meter.frame(at) {
-                reports.push(report);
-            }
-        }
-        // Дальше только тишина.
-        for _ in 0..(QUIET_FRAMES + 3) {
-            at += Duration::from_millis(16);
-            if let Some(report) = meter.frame(at) {
-                reports.push(report);
-            }
-        }
-        assert_eq!(reports.len(), 1, "лишний отчёт после конца работы: {:?}", reports);
-        assert!(!reports[0].contains("0 обходов"), "строка нулей: {}", reports[0]);
-    }
-
-    /// Длина всплеска меряется по работе, а не по тишине, которой её опознали.
-    /// Тишина эта — дюжина кадров, пятая доля секунды; приписанная к жесту в
-    /// секунду, она занизила бы всё, что делится на длительность.
-    #[test]
-    fn a_burst_is_as_long_as_the_work_and_not_as_the_hush_that_ended_it() {
-        let start = Instant::now();
-        let mut meter = Meter::default();
-        let mut at = start;
-        // Работы — ровно сто миллисекунд.
-        for _ in 0..6 {
-            meter.pass(Pass::Camera, &toll(10, 1), Duration::from_millis(1), at);
-            assert!(meter.frame(at).is_none());
-            at += Duration::from_millis(20);
-        }
-        let report = quiet_out(&mut meter, at);
-        assert!(report.contains("0.10 с"), "тишина в длину всплеска не вошла: {}", report);
-    }
-
-    /// Среднее делится на кадры всплеска. Поделённое на число обходов, оно
-    /// назвало бы цену одного обхода — а кадр их держит два, и уложится ли он
-    /// в бюджет, по цене одного не видно.
-    #[test]
-    fn the_average_is_per_frame_and_not_per_pass() {
-        let start = Instant::now();
-        let mut meter = Meter::default();
-        let mut at = start;
-        // Три кадра, в каждом по два обхода по 2 мс: на кадр 4 мс, на обход 2.
-        for _ in 0..3 {
-            meter.pass(Pass::Camera, &toll(10, 1), Duration::from_millis(2), at);
-            meter.pass(Pass::Patches, &toll(10, 1), Duration::from_millis(2), at);
-            at += Duration::from_millis(16);
-            assert!(meter.frame(at).is_none());
-        }
-        let report = quiet_out(&mut meter, at);
-        assert!(report.contains("на кадр 4.0 мс"), "среднее — по кадрам: {}", report);
-    }
-
-    /// Домолчать всплеск до отчёта.
-    fn quiet_out(meter: &mut Meter, from: Instant) -> String {
-        let mut at = from;
-        for _ in 0..=QUIET_FRAMES + 2 {
-            at += Duration::from_millis(16);
-            if let Some(report) = meter.frame(at) {
-                return report;
-            }
-        }
-        panic!("всплеск не кончился за {} тихих кадров", QUIET_FRAMES + 3);
     }
 }

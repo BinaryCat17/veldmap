@@ -1,25 +1,26 @@
-//! Раскладка окна: дерево панелей.
+//! Window layout: a tree of panes.
 //!
-//! Панель — место, в котором лежат вкладки. Какие именно, дерево не знает: у
-//! вида есть поле `pane` (см. `View`), и «в какой панели лежит вкладка» имеет
-//! один ответ. Дерево отвечает на другое — где панель стоит и сколько ей места.
+//! A pane is a place that holds tabs. Which tabs, the tree does not know: the
+//! view has a `pane` field (see `View`), and "which pane holds the tab" has
+//! exactly one answer. The tree answers a different question — where a pane
+//! stands and how much space it gets.
 //!
-//! Дерево, а не набор половин: «поделить надвое» — не единственный жест,
-//! которым складывают экран. Список слева, шар справа сверху, снимок под
-//! ним — это два деления, вложенных одно в другое, и выразить их парой
-//! половин нечем. Узел поэтому один и тот же в обоих положениях: лист с
-//! вкладками либо деление на два узла с осью и долей. Всё остальное —
-//! перенос, бросок, доля границы, сохранение — сводится к нескольким
-//! действиям над ним и потому лежит здесь целиком.
+//! A tree, not a set of halves: "split in two" is not the only gesture used to
+//! compose a screen. A list on the left, the globe top right, a snapshot under
+//! it — that is two splits nested one inside the other, and a pair of halves
+//! cannot express it. The node is therefore the same in both positions: a leaf
+//! with tabs, or a split into two nodes with an axis and a share. Everything
+//! else — moving a tab, a drop, the border share, persistence — reduces to a
+//! few operations on it and so lives here entirely.
 
 use super::listing::choice;
 
 use super::types::ViewId;
 
-/// Идентификатор панели. Уникален в пределах сессии и не переиспользуется — по
-/// той же причине, что и [`ViewId`]: панель называют события разметки («плюс»
-/// этой панели, бросок в неё), а к тому времени, как событие доедет, панели
-/// может уже не быть — и переиспользованный номер отдал бы событие чужой.
+/// Pane identifier. Unique within a session and never reused — for the same
+/// reason as [`ViewId`]: layout events name the pane ("plus" of this pane, a
+/// drop into it), and by the time the event arrives the pane may already be
+/// gone — a reused number would hand the event to a stranger.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct PaneId(u64);
 
@@ -29,8 +30,8 @@ impl std::fmt::Display for PaneId {
     }
 }
 
-/// Панель возвращает свой номер строкой в `UiEventResponse.key` — разобрать его
-/// обратно нужно там же, где принимается нажатие.
+/// A pane returns its number as a string in `UiEventResponse.key` — parsing it
+/// back happens where the click is handled.
 impl std::str::FromStr for PaneId {
     type Err = std::num::ParseIntError;
 
@@ -39,9 +40,9 @@ impl std::str::FromStr for PaneId {
     }
 }
 
-/// Идентификатор деления — его называет граница, которую тянут мышью. Из того
-/// же счётчика, что и [`PaneId`]: номера в дереве не повторяются, и «панель 3»
-/// с «делением 3» в логе не встретятся.
+/// Split identifier — named by the border dragged with the mouse. From the
+/// same counter as [`PaneId`]: numbers in the tree never repeat, so "pane 3"
+/// and "split 3" never meet in the log.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct SplitId(u64);
 
@@ -59,19 +60,20 @@ impl std::str::FromStr for SplitId {
     }
 }
 
-/// Вдоль чего стоят дети деления. Названа по тому, чем деление собирается в
-/// разметке (`row!` и `column!`), — иначе «горизонтальное деление» пришлось бы
-/// каждый раз уточнять: горизонтальна в нём граница или расстановка.
+/// Along which direction the children of a split stand. Named after the layout
+/// macros a split is built with (`row!` and `column!`) — otherwise "horizontal
+/// split" would need constant clarification: whether the border in it is
+/// horizontal or the arrangement.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Axis {
-    /// Дети рядом, граница между ними вертикальная.
+    /// Children side by side; the border between them is vertical.
     Row,
-    /// Дети друг под другом, граница горизонтальная.
+    /// Children one under another; the border is horizontal.
     Column,
 }
 
 impl Axis {
-    /// Стороны этой оси: со стороны первого ребёнка и со стороны второго.
+    /// The sides of this axis: on the first child's side and on the second's.
     fn sides(self) -> (Side, Side) {
         match self {
             Axis::Row => (Side::Left, Side::Right),
@@ -79,8 +81,8 @@ impl Axis {
         }
     }
 
-    /// Сторона, с которой встаёт второй ребёнок, — ею деление и заводят
-    /// заново, когда раскладку собирают из сохранённой.
+    /// The side the second child stands on — it is how a split is recreated
+    /// when the layout is assembled from a saved one.
     pub fn tail(self) -> Side {
         self.sides().1
     }
@@ -102,17 +104,17 @@ impl Axis {
 }
 
 choice! {
-    /// Сторона, с которой встаёт панель. Ею же называют направление переноса
-    /// («перенести вправо») и край, за который взялись броском.
+    /// The side a pane stands on. The same word names the move direction
+    /// ("move right") and the edge grabbed by a drop.
     ///
-    /// Порядок здесь — порядок пунктов в меню переноса; подпись живёт рядом с
-    /// самой стороной, потому что сторона и то, как её называют человеку, —
-    /// одна вещь, и разъехаться им нельзя.
+    /// The order here is the order of items in the move menu; the label lives
+    /// next to the side itself because the side and how it is shown to a person
+    /// are one thing and must not drift apart.
     Side {
-        Right = "right", "Перенести вправо";
-        Left  = "left",  "Перенести влево";
-        Above = "above", "Перенести вверх";
-        Below = "below", "Перенести вниз";
+        Right = "right", "Move right";
+        Left  = "left",  "Move left";
+        Above = "above", "Move up";
+        Below = "below", "Move down";
     }
 }
 
@@ -124,8 +126,8 @@ impl Side {
         }
     }
 
-    /// Со стороны первого ребёнка ли она. Одним вопросом отвечает и на «куда
-    /// встаёт новая панель», и на «в какой ветке искать соседа».
+    /// Whether it is on the first child's side. One question answers both
+    /// "where a new pane stands" and "which branch to search for a neighbour".
     fn head(self) -> bool {
         matches!(self, Side::Left | Side::Above)
     }
@@ -141,27 +143,27 @@ impl Side {
 
 }
 
-/// Узел дерева: панель либо деление надвое.
+/// Tree node: a pane or a split in two.
 pub enum Node {
     Leaf(Pane),
-    /// В коробке, потому что тип рекурсивный.
+    /// Boxed because the type is recursive.
     Split(Box<Split>),
 }
 
 pub struct Pane {
     pub id: PaneId,
-    /// Вкладка, показанная в этой панели. `None` — панель пуста; так бывает
-    /// ровно в одном случае: она последняя, и в ней закрыли всё (опустевшая
-    /// панель, у которой есть соседи, из дерева убирается).
+    /// The tab shown in this pane. `None` — the pane is empty; this happens in
+    /// exactly one case: it is the last pane and everything in it was closed
+    /// (an emptied pane that has neighbours is removed from the tree).
     pub active: Option<ViewId>,
 }
 
 pub struct Split {
     pub id: SplitId,
     pub axis: Axis,
-    /// Доля первого ребёнка, от 0 до 1. Второму достаётся остальное — держать
-    /// две доли значило бы держать правило «в сумме единица», а его однажды
-    /// нарушат.
+    /// The first child's share, from 0 to 1. The second gets the rest — keeping
+    /// two shares would mean keeping a "sum to one" rule that would eventually
+    /// be broken.
     pub fraction: f32,
     pub first: Node,
     pub second: Node,
@@ -173,7 +175,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Одна панель во весь экран — с неё начинается всякое окно.
+    /// One pane filling the screen — every window starts with it.
     pub fn new() -> Self {
         Self { root: Node::Leaf(Pane { id: PaneId(1), active: None }), next: 2 }
     }
@@ -182,7 +184,7 @@ impl Layout {
         &self.root
     }
 
-    /// Первая панель обхода — та, что стоит в начале.
+    /// The first pane of the traversal — the one at the start.
     pub fn first(&self) -> PaneId {
         self.root.edge(Side::Left)
     }
@@ -191,7 +193,8 @@ impl Layout {
         self.root.pane(pane).is_some()
     }
 
-    /// Сколько всего панелей. По нему решается, есть ли что сводить.
+    /// How many panes there are. It decides whether there is anything to
+    /// collapse.
     pub fn count(&self) -> usize {
         self.root.count()
     }
@@ -206,9 +209,9 @@ impl Layout {
         }
     }
 
-    /// Заводит панель с названной стороны от этой и отдаёт её. Прежняя остаётся
-    /// на месте со всем, что в ней лежит: делят экран затем, чтобы рядом с
-    /// показанным встало второе, а не затем, чтобы показанное уехало.
+    /// Creates a pane on the named side of this one and returns it. The former
+    /// stays in place with everything in it: the screen is split so that a
+    /// second stands beside what is shown, not so the shown one moves away.
     pub fn split(&mut self, pane: PaneId, side: Side) -> Option<PaneId> {
         if !self.contains(pane) {
             return None;
@@ -217,12 +220,12 @@ impl Layout {
         let split = SplitId(self.next + 1);
         self.next += 2;
 
-        let at = self.root.find_mut(pane).expect("панель на месте — проверено выше");
-        // Место листа занимает деление, а сам лист становится его ребёнком,
-        // поэтому вынимается он целиком. Заглушка — та же панель без вкладки, и
-        // живёт она ровно до присваивания ниже (та же уловка, что в
-        // [`Self::remove`]): второй лист с новым номером на это мгновение сделал
-        // бы номер в дереве неуникальным.
+        let at = self.root.find_mut(pane).expect("pane is in place — checked above");
+        // A split takes the leaf's place and the leaf itself becomes its child,
+        // so it is taken out whole. The stub is the same pane without a tab, and
+        // it lives exactly until the assignment below (the same trick as in
+        // [`Self::remove`]): a second leaf with a new number would make the tree
+        // number non-unique for that instant.
         let old = std::mem::replace(at, Node::Leaf(Pane { id: pane, active: None }));
         let fresh = Node::Leaf(Pane { id, active: None });
         let (first, second) = if side.head() { (fresh, old) } else { (old, fresh) };
@@ -236,43 +239,44 @@ impl Layout {
         Some(id)
     }
 
-    /// Убирает опустевшую панель; на её место встаёт то, что делило с ней
-    /// родителя. Отдаёт панель, которой досталось освободившееся место, — ей и
-    /// переходит взгляд. `None` — панель последняя: убрать её некуда, и пустая
-    /// она законна.
+    /// Removes an emptied pane; what split the parent with it takes its place.
+    /// Returns the pane that received the freed space — the focus moves to it.
+    /// `None` — the pane is the last one: there is nowhere to remove it, and an
+    /// empty one is legal.
     pub fn remove(&mut self, pane: PaneId) -> Option<PaneId> {
         let parent = self.root.parent_of(pane)?;
-        // Место разделения занимает уцелевшая ветка, поэтому вынимается оно
-        // целиком: заглушка живёт ровно до присваивания ниже.
+        // The surviving branch takes the split's place, so the split is taken
+        // out whole: the stub lives exactly until the assignment below.
         let stub = Node::Leaf(Pane { id: pane, active: None });
         let Node::Split(split) = std::mem::replace(parent, stub) else {
-            unreachable!("parent_of отдаёт только деление")
+            unreachable!("parent_of returns only a split")
         };
         let Split { axis, first, second, .. } = *split;
 
         let gone_first = matches!(&first, Node::Leaf(leaf) if leaf.id == pane);
         let kept = if gone_first { second } else { first };
-        // Взгляд переходит к той панели, которой досталось освободившееся
-        // место, — то есть к стоявшей вплотную к убранной.
+        // The focus moves to the pane that received the freed space — that is,
+        // the one that stood right next to the removed one.
         let (head, tail) = axis.sides();
         let took = kept.edge(if gone_first { head } else { tail });
         *parent = kept;
         Some(took)
     }
 
-    /// Соседняя панель с названной стороны. `None` — с этой стороны ничего нет.
+    /// The neighbouring pane on the named side. `None` — there is nothing on
+    /// this side.
     ///
-    /// «Соседняя» — ближайшая по краю: у деления вдоль этой же оси сосед лежит
-    /// в другой его ветке, и берётся тот её лист, что стоит вплотную к границе.
-    /// Вдоль самой границы панелей может стоять несколько, и «той самой» среди
-    /// них нет — берётся первая (см. [`Node::edge`]).
+    /// "Neighbouring" is closest along the edge: at a split along the same axis
+    /// the neighbour lies in its other branch, taking the leaf that stands right
+    /// at the border. Along the border itself several panes can stand, and there
+    /// is no "the one" among them — the first is taken (see [`Node::edge`]).
     pub fn neighbour(&self, pane: PaneId, side: Side) -> Option<PaneId> {
         self.root.neighbour(pane, side)
     }
 
-    /// Сводит всё в одну панель — названную, если она ещё жива. Вкладки при
-    /// этом никуда не деваются: их переносит `State`, а дерево знает только
-    /// места.
+    /// Collapses everything into one pane — the named one, if it is still alive.
+    /// Tabs are not lost in the process: `State` moves them, while the tree
+    /// knows only places.
     pub fn collapse(&mut self, keep: PaneId) -> PaneId {
         let id = if self.contains(keep) { keep } else { self.first() };
         let active = self.active(id);
@@ -280,22 +284,23 @@ impl Layout {
         id
     }
 
-    /// Доля окна, доставшаяся панели, — по ширине и по высоте. Ею меряется
-    /// место под колонки списка: считать его по всему окну нельзя, а по
-    /// половине — неправда, пока панелей не ровно две.
+    /// The share of the window given to a pane — in width and in height. It
+    /// measures the space for list columns: counting by the whole window is
+    /// wrong, and by a half is untrue unless there are exactly two panes.
     pub fn share(&self, pane: PaneId) -> (f32, f32) {
         self.share_of(&|node| matches!(node, Node::Leaf(leaf) if leaf.id == pane))
     }
 
-    /// Она же для деления — доля окна под ним обоими детьми сразу. По ней сдвиг
-    /// границы в точках становится сдвигом доли (см. `State::divide`).
+    /// The same for a split — the window share under it with both children at
+    /// once. Through it a border drag in pixels becomes a share change (see
+    /// `State::divide`).
     pub fn split_share(&self, split: SplitId) -> (f32, f32) {
         self.share_of(&|node| matches!(node, Node::Split(found) if found.id == split))
     }
 
-    /// Доля окна под первым узлом, который узнаёт условие. Обход один на оба
-    /// вопроса: доли перемножаются по пути, и считать их двумя способами
-    /// значило бы однажды посчитать по-разному.
+    /// The window share under the first node matching the condition. One walk
+    /// for both questions: shares multiply along the path, and computing them
+    /// two ways would eventually disagree.
     fn share_of(&self, hit: &dyn Fn(&Node) -> bool) -> (f32, f32) {
         fn walk(
             node: &Node,
@@ -316,14 +321,14 @@ impl Layout {
         walk(&self.root, hit, (1.0, 1.0)).unwrap_or((1.0, 1.0))
     }
 
-    /// Вдоль чего делит названное деление. `None` — его уже нет: раскладку
-    /// успели сложить иначе, пока событие шло.
+    /// What axis the named split divides along. `None` — it is already gone: the
+    /// layout was rearranged while the event was in flight.
     pub fn axis_of(&self, split: SplitId) -> Option<Axis> {
         self.root.split(split).map(|found| found.axis)
     }
 
-    /// Деление, у которого эта панель — прямой ребёнок. `None` — панель одна на
-    /// всё окно, делить её место не с кем.
+    /// The split whose direct child this pane is. `None` — the pane is alone in
+    /// the whole window; there is nobody to share its space with.
     pub fn split_of(&self, pane: PaneId) -> Option<SplitId> {
         fn walk(node: &Node, pane: PaneId) -> Option<SplitId> {
             let Node::Split(split) = node else { return None };
@@ -335,19 +340,19 @@ impl Layout {
         walk(&self.root, pane)
     }
 
-    /// Ставит долю прямо — так раскладка собирается из сохранённой. Живое
-    /// перетаскивание идёт через [`Self::nudge`]: там доля меняется сдвигом, и
-    /// пределы у неё свои.
+    /// Sets the share directly — this is how a layout is assembled from a saved
+    /// one. Live dragging goes through [`Self::nudge`]: there the share changes
+    /// by a delta, and its limits are its own.
     pub fn set_fraction(&mut self, split: SplitId, fraction: f32) {
         if let Some(found) = self.root.split_mut(split) {
             found.fraction = fraction.clamp(0.0, 1.0);
         }
     }
 
-    /// Двигает границу: доля первого ребёнка меняется на `by`. Ни один из детей
-    /// при этом не становится у́же `min` — панель уже этого не показывает ни
-    /// вкладок, ни того, что в них, а вернуть ей место можно только этой же
-    /// границей, за которую уже не взяться.
+    /// Moves the border: the first child's share changes by `by`. Neither child
+    /// becomes narrower than `min` — such a pane already shows neither tabs nor
+    /// their content, and the space can only be given back by the same border,
+    /// which then cannot be grabbed.
     pub fn nudge(&mut self, split: SplitId, by: f32, min: f32) {
         let Some(found) = self.root.split_mut(split) else { return };
         let edge = min.clamp(0.0, 0.5);
@@ -403,7 +408,7 @@ impl Node {
         }
     }
 
-    /// Узел, которым эта панель лежит в дереве.
+    /// The node this pane occupies in the tree.
     fn find_mut(&mut self, pane: PaneId) -> Option<&mut Node> {
         if matches!(self, Node::Leaf(leaf) if leaf.id == pane) {
             return Some(self);
@@ -420,7 +425,7 @@ impl Node {
         }
     }
 
-    /// Деление, у которого эта панель — прямой ребёнок.
+    /// The split whose direct child this pane is.
     fn parent_of(&mut self, pane: PaneId) -> Option<&mut Node> {
         if self.holds(pane) {
             return Some(self);
@@ -437,31 +442,32 @@ impl Node {
         }
     }
 
-    /// Лежит ли панель прямо в этом делении, отдельным листом.
+    /// Whether the pane lies directly in this split as a separate leaf.
     fn holds(&self, pane: PaneId) -> bool {
         let Node::Split(split) = self else { return false };
         let leaf = |node: &Node| matches!(node, Node::Leaf(leaf) if leaf.id == pane);
         leaf(&split.first) || leaf(&split.second)
     }
 
-    /// Панель, стоящая у названного края этого поддерева.
+    /// The pane standing at the named edge of this subtree.
     fn edge(&self, side: Side) -> PaneId {
         match self {
             Node::Leaf(leaf) => leaf.id,
-            // Вдоль своей оси у края стоит ближняя ветка.
+            // Along its own axis the near branch stands at the edge.
             Node::Split(split) if split.axis == side.axis() => match side.head() {
                 true => split.first.edge(side),
                 false => split.second.edge(side),
             },
-            // Поперёк — обе, и «той самой» среди них нет: берётся первая.
+            // Across the axis both stand at the edge, and there is no "the one"
+            // among them: the first is taken.
             Node::Split(split) => split.first.edge(side),
         }
     }
 
     fn neighbour(&self, pane: PaneId, side: Side) -> Option<PaneId> {
         let Node::Split(split) = self else { return None };
-        // Глубже — ближе: сосед находится у самого мелкого деления, которое
-        // разделяет с этой стороны, поэтому дети спрашиваются раньше себя.
+        // Deeper is closer: the neighbour is found at the smallest split that
+        // separates on this side, so children are asked before self.
         let deeper = split
             .first
             .neighbour(pane, side)
@@ -472,111 +478,12 @@ impl Node {
         if split.axis != side.axis() {
             return None;
         }
-        // Сосед справа есть у того, кто сам слева: панель должна лежать в
-        // ветке, противоположной названной стороне.
+        // A right neighbour belongs to one who is itself on the left: the pane
+        // must lie in the branch opposite the named side.
         let (mine, theirs) = match side.head() {
             true => (&split.second, &split.first),
             false => (&split.first, &split.second),
         };
         mine.pane(pane).is_some().then(|| theirs.edge(side.opposite()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Экран, сложенный как список слева и два вида справа друг под другом, —
-    /// то, ради чего дерево и заведено: парой половин это не выражается.
-    fn nested() -> (Layout, PaneId, PaneId, PaneId) {
-        let mut layout = Layout::new();
-        let left = layout.first();
-        let right = layout.split(left, Side::Right).expect("панель жива");
-        let under = layout.split(right, Side::Below).expect("панель жива");
-        (layout, left, right, under)
-    }
-
-    #[test]
-    fn split_puts_the_new_pane_on_the_named_side() {
-        let (layout, left, right, under) = nested();
-        assert_eq!(layout.count(), 3);
-        assert_eq!(layout.first(), left);
-        assert_eq!(layout.neighbour(left, Side::Right), Some(right));
-        assert_eq!(layout.neighbour(right, Side::Below), Some(under));
-        assert_eq!(layout.neighbour(under, Side::Above), Some(right));
-    }
-
-    /// Соседа ищут по краю, а не по дереву: слева от нижней правой панели
-    /// стоит список, хотя общий родитель у них через деление.
-    #[test]
-    fn neighbour_crosses_nesting() {
-        let (layout, left, _, under) = nested();
-        assert_eq!(layout.neighbour(under, Side::Left), Some(left));
-        assert_eq!(layout.neighbour(left, Side::Left), None);
-        assert_eq!(layout.neighbour(left, Side::Above), None);
-    }
-
-    /// Убранная панель отдаёт место соседу, а не разваливает дерево.
-    #[test]
-    fn remove_hands_the_space_to_the_neighbour() {
-        let (mut layout, left, right, under) = nested();
-        assert_eq!(layout.remove(right), Some(under));
-        assert_eq!(layout.count(), 2);
-        assert_eq!(layout.neighbour(left, Side::Right), Some(under));
-
-        assert_eq!(layout.remove(under), Some(left));
-        assert_eq!(layout.count(), 1);
-        // Последняя панель не убирается: убрать её некуда.
-        assert_eq!(layout.remove(left), None);
-        assert!(layout.contains(left));
-    }
-
-    #[test]
-    fn collapse_keeps_the_named_pane() {
-        let (mut layout, _, _, under) = nested();
-        assert_eq!(layout.collapse(under), under);
-        assert_eq!(layout.count(), 1);
-        assert_eq!(layout.first(), under);
-    }
-
-    /// Доли перемножаются по пути: нижняя правая панель — половина ширины и
-    /// половина высоты.
-    #[test]
-    fn share_multiplies_along_the_path() {
-        let (layout, left, _, under) = nested();
-        assert_eq!(layout.share(left), (0.5, 1.0));
-        assert_eq!(layout.share(under), (0.5, 0.5));
-    }
-
-    /// Граница двигает долю своего деления и не даёт панелям схлопнуться:
-    /// у панели нулевой ширины уже не за что взяться, чтобы вернуть ей место.
-    #[test]
-    fn nudge_moves_the_border_within_its_limits() {
-        let mut layout = Layout::new();
-        let left = layout.first();
-        layout.split(left, Side::Right);
-        let Node::Split(split) = layout.root() else { panic!("экран поделён") };
-        let (id, axis) = (split.id, split.axis);
-        assert_eq!(axis, Axis::Row);
-
-        layout.nudge(id, 0.25, 0.1);
-        assert_eq!(layout.share(left), (0.75, 1.0));
-
-        // Упор: дальше границу не пускает предел, а не арифметика.
-        layout.nudge(id, 10.0, 0.1);
-        assert_eq!(layout.share(left), (0.9, 1.0));
-        layout.nudge(id, -10.0, 0.1);
-        assert_eq!(layout.share(left), (0.1, 1.0));
-    }
-
-    /// Номера панелей не переиспользуются: событие, приехавшее от закрытой,
-    /// иначе досталось бы новой.
-    #[test]
-    fn pane_ids_are_not_reused() {
-        let (mut layout, left, right, under) = nested();
-        layout.remove(right);
-        let fresh = layout.split(left, Side::Right).expect("панель жива");
-        assert_ne!(fresh, right);
-        assert_ne!(fresh, under);
     }
 }

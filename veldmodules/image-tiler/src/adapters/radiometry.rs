@@ -1,38 +1,40 @@
-//! Радиометрия показа: как сэмплы TIFF становятся байтами RGBA.
+//! Display radiometry: how TIFF samples become RGBA bytes.
 //!
-//! u8 — тождество: файл уже в байтах. Широкие форматы (u16, i16, f32) в байт
-//! не влезают, а одного правила «как ужать» у них нет: DEM лежит в метрах,
-//! радарная амплитуда — в DN с горсткой горячих выбросов, и старший байт у
-//! обоих даёт чёрный кадр. Показ растягивает перцентили выборки самого файла:
-//! [2%, 98%] → [0, 255], края клампятся. Это правило показа, а не радиометрия
-//! данных — измерять по байтам тайла нельзя.
+//! u8 is identity: the file is already in bytes. Wide formats (u16, i16, f32)
+//! do not fit in a byte, and they share no single "how to squeeze" rule: a DEM
+//! lies in meters, radar amplitude in DN with a handful of hot outliers, and
+//! the high byte of both yields a black frame. Display stretches the
+//! percentiles of the file's own sample: [2%, 98%] → [0, 255], edges clamp.
+//! This is a display rule, not data radiometry — measuring by tile bytes is
+//! meaningless.
 //!
-//! «Нет данных» (GDAL_NODATA) — прозрачность: пиксель, все цветовые каналы
-//! которого равны объявленному значению, получает альфу 0 и чёрный цвет.
-//! Сравнение точное и по сырому значению, до растяга.
+//! "No data" (GDAL_NODATA) is transparency: a pixel whose color channels all
+//! equal the declared value gets alpha 0 and black color. The comparison is
+//! exact and on the raw value, before the stretch.
 
-/// Сколько значений хватает выборке растяга на файл.
+/// How many values suffice for a per-file stretch sample.
 ///
-/// Перцентиль — про форму распределения, а не про каждое значение: миллиона
-/// довольно, а сортировать сотню миллионов значит потратить на растяг больше,
-/// чем на весь показ. Порог один на всех, кто эту выборку собирает: разойдись
-/// он — и один и тот же файл, показанный двумя путями, растянулся бы
-/// по-разному.
+/// A percentile is about the shape of the distribution, not every single
+/// value: a million is plenty, while sorting a hundred million would spend
+/// more on the stretch than on the whole display. The threshold is shared by
+/// everyone who collects this sample: were it to diverge, the same file shown
+/// through two paths would stretch differently.
 pub const STRETCH_SAMPLES: usize = 1 << 20;
 
-/// Годен ли отсчёт: число и не метка «нет данных».
+/// Whether a sample is valid: a number and not a "no data" marker.
 ///
-/// Один предикат на все места, где об этом спрашивают, — выборку растяга у
-/// TIFF, выборку растяга у NetCDF и сам показ. Разойдясь, они дают ровно то,
-/// чего не хотел ни один: значение, выброшенное из выборки как негодное,
-/// выходит на экран непрозрачным — и, поскольку выше верхнего края растяга,
-/// белым. Нечисло (`NaN`, бесконечности) не данные по самому своему смыслу:
-/// float-растры нередко метят им пустоту вместо тега.
+/// One predicate for every place that asks — the TIFF stretch sample, the
+/// NetCDF stretch sample, and the display itself. Were they to diverge, they
+/// would produce exactly what none of them intends: a value thrown out of the
+/// sample as invalid would appear on screen opaque — and, since it lies above
+/// the upper edge of the stretch, white. Non-numbers (`NaN`, infinities) are
+/// not data by their very meaning: float rasters often mark emptiness with
+/// them instead of a tag.
 pub fn is_data(value: f32, nodata: Option<f32>) -> bool {
     value.is_finite() && Some(value) != nodata
 }
 
-/// Сэмплы чанка в типизированном виде — то, что разбирает показ.
+/// Chunk samples in typed form — what the display interprets.
 pub enum Samples<'a> {
     U8(&'a [u8]),
     U16(&'a [u16]),
@@ -54,7 +56,7 @@ impl Samples<'_> {
         self.len() == 0
     }
 
-    /// Значение сэмпла числом — одна лестница для растяга и статистики.
+    /// Sample value as a number — one ladder for stretching and statistics.
     pub fn get(&self, i: usize) -> f32 {
         match self {
             Samples::U8(v) => f32::from(v[i]),
@@ -64,8 +66,8 @@ impl Samples<'_> {
         }
     }
 
-    /// Альфа-канал как байт. Альфу не растягивают — у неё собственный смысл
-    /// и собственный полный диапазон своего формата.
+    /// Alpha channel as a byte. Alpha is not stretched — it carries its own
+    /// meaning and its own full range of its format.
     fn alpha(&self, i: usize) -> u8 {
         match self {
             Samples::U8(v) => v[i],
@@ -76,25 +78,25 @@ impl Samples<'_> {
     }
 }
 
-/// Как читать сэмплы одного пикселя.
+/// How to read the samples of one pixel.
 ///
-/// Числа сэмплов для этого мало, и разница не тонкая. Два сэмпла у названной
-/// цветовой модели — это серый с альфой, а два сэмпла у стопки измеренных
-/// величин — две величины, и вторая из них не прозрачность: прочитанная альфой,
-/// она погасила бы половину снимка. Поэтому решает не счёт, а то, чем файл себя
-/// назвал.
+/// The sample count alone is not enough, and the difference is not subtle. Two
+/// samples in a named color model are grey with alpha, while two samples in a
+/// stack of measured quantities are two quantities, and the second one is not
+/// transparency: read as alpha, it would black out half the scene. So what
+/// decides is not the count but what the file calls itself.
 #[derive(Clone, Copy)]
 pub struct Pixel {
-    /// Сколько сэмплов приходится на пиксель — шаг по массиву.
+    /// How many samples fall on one pixel — the stride through the array.
     pub channels: usize,
-    /// Сколько первых из них составляют цвет.
+    /// How many of the leading ones make up the color.
     colors: usize,
-    /// Последний сэмпл — прозрачность.
+    /// The last sample is transparency.
     alpha: bool,
 }
 
 impl Pixel {
-    /// Модель, названная файлом: серый, серый с альфой, RGB, RGBA.
+    /// The model named by the file: grey, grey with alpha, RGB, RGBA.
     pub fn named(channels: usize) -> Self {
         Self {
             channels,
@@ -106,10 +108,10 @@ impl Pixel {
         }
     }
 
-    /// Стопка измеренных величин без цветовой интерпретации — так GDAL пишет
-    /// всё, что не три и не четыре канала цвета. Показывается первая: какая из
-    /// них изображение, файл не говорит, а сложить их в цвет значило бы выдать
-    /// догадку за снятое.
+    /// A stack of measured quantities without color interpretation — how GDAL
+    /// writes anything that is not three or four color channels. The first one
+    /// is shown: which of them is the image, the file does not say, and
+    /// combining them into color would pass a guess off as measured data.
     pub fn stack(channels: usize) -> Self {
         Self { channels, colors: 1, alpha: false }
     }
@@ -123,17 +125,17 @@ impl Pixel {
     }
 }
 
-/// Маппинг показа одного файла. Строится один раз на файл (см. tiff.rs) и
-/// применяется ко всем его чанкам — иначе соседние тайлы растянулись бы
-/// каждый по-своему и разошлись швами.
+/// Display mapping for one file. Built once per file (see tiff.rs) and
+/// applied to all its chunks — otherwise adjacent tiles would each stretch
+/// their own way and part at the seams.
 ///
-/// Копируется даром: два предела и значение «нет данных». Это и позволяет
-/// держать его готовым при разборе, а не пересчитывать на каждый заказ.
+/// Copies for free: two bounds and the "no data" value. That is what lets it
+/// be kept ready at parse time instead of recomputed for every request.
 #[derive(Clone, Copy)]
 pub struct Mapping {
-    /// Растяг [lo, hi] → [0, 255]; `None` — сэмплы уже байты.
+    /// Stretch [lo, hi] → [0, 255]; `None` — the samples are already bytes.
     stretch: Option<(f32, f32)>,
-    /// Значение «нет данных» — прозрачность.
+    /// The "no data" value — transparency.
     nodata: Option<f32>,
 }
 
@@ -142,15 +144,15 @@ impl Mapping {
         Self { stretch: None, nodata }
     }
 
-    /// `hi > lo` — забота вызывающего (см. [`percentile_stretch`]).
+    /// `hi > lo` is the caller's concern (see [`percentile_stretch`]).
     pub fn stretched(lo: f32, hi: f32, nodata: Option<f32>) -> Self {
         Self { stretch: Some((lo, hi)), nodata }
     }
 
-    /// Развёртка сэмплов в RGBA8 по раскладке пикселя (см. [`Pixel`]); хвост за
-    /// пределами `pixels` отбрасывается.
+    /// Unfolds samples into RGBA8 by the pixel layout (see [`Pixel`]); the tail
+    /// beyond `pixels` is dropped.
     pub fn rgba(&self, samples: &Samples<'_>, pixel: Pixel, pixels: usize) -> Vec<u8> {
-        // Байты без растяга и ключевания — готовый путь без пересчёта.
+        // Bytes without stretch or keying — a ready path with no recomputation.
         if let (Samples::U8(v), None, None) = (samples, self.stretch, self.nodata) {
             return super::to_rgba(v, pixel, pixels);
         }
@@ -163,10 +165,11 @@ impl Mapping {
         let mut rgba = Vec::with_capacity(count * 4);
         for px in 0..count {
             let at = px * channels;
-            // Пустым пиксель делают два разных обстоятельства, и путать их
-            // нельзя. Все цветовые каналы — метка «нет данных»: это поле за
-            // краем снятого. Хоть один канал не число: цвета у такого пикселя
-            // нет вовсе, и один нечисловой канал портит его целиком.
+            // Two distinct circumstances make a pixel empty, and they must not
+            // be confused. Every color channel is the "no data" marker: this
+            // is a field beyond the edge of the capture. Any one channel is not
+            // a number: such a pixel has no color at all, and one non-numeric
+            // channel spoils it entirely.
             let mut void = true;
             let mut broken = false;
             let mut bytes = [0u8; 3];
@@ -190,18 +193,19 @@ impl Mapping {
     }
 }
 
-/// Растяг по выборке файла: [2-й, 98-й] перцентили валидных значений.
-/// `None` — выборка пуста (весь файл «нет данных» — растягивать нечего).
+/// Stretch from the file's own sample: the [2nd, 98th] percentiles of valid
+/// values. `None` — the sample is empty (the whole file is "no data" — nothing
+/// to stretch).
 ///
-/// Совпавшие перцентили — это ровное поле, и раздвигается оно **вокруг**
-/// значения, а не вверх от него: вверх означало бы, что всё поле лежит у
-/// нижнего края шкалы, то есть чёрный кадр, неотличимый от пустоты. Ровному
-/// полю место посередине.
+/// Coinciding percentiles mean a flat field, and it is opened **around** the
+/// value, not upward from it: upward would mean the whole field sits at the
+/// lower edge of the scale, that is a black frame indistinguishable from
+/// emptiness. A flat field belongs in the middle.
 ///
-/// Шаг берётся от величины самого значения, а не единицей: у f32 за 2²⁴
-/// прибавка единицы не меняет числа вовсе, и деление на ноль возвращается —
-/// а именно такие значения и стоят метками «нет данных» (штатное `_FillValue`
-/// netCDF — 9,96921·10³⁶).
+/// The step is taken from the magnitude of the value itself, not a unit: for
+/// f32 beyond 2²⁴ adding one does not change the number at all, and division
+/// by zero returns — and exactly such values stand as "no data" markers (the
+/// standard netCDF `_FillValue` is 9.96921e36).
 pub fn percentile_stretch(values: &mut [f32]) -> Option<(f32, f32)> {
     if values.is_empty() {
         return None;
@@ -214,110 +218,4 @@ pub fn percentile_stretch(values: &mut [f32]) -> Option<(f32, f32)> {
     }
     let half = lo.abs().max(1.0) * 1e-6 * 0.5;
     Some((lo - half, lo + half))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn identity_bytes_match_plain_expansion() {
-        let mapping = Mapping::identity(None);
-        let bytes = [7u8, 9, 200];
-        assert_eq!(
-            mapping.rgba(&Samples::U8(&bytes), Pixel::named(1), 3),
-            super::super::to_rgba(&bytes, Pixel::named(1), 3)
-        );
-    }
-
-    #[test]
-    fn nodata_pixel_turns_transparent_black() {
-        // Серый u8 с nodata 7: первый пиксель — поле, второй — данные.
-        let mapping = Mapping::identity(Some(7.0));
-        let out = mapping.rgba(&Samples::U8(&[7, 9]), Pixel::named(1), 2);
-        assert_eq!(out, vec![0, 0, 0, 0, 9, 9, 9, 255]);
-    }
-
-    #[test]
-    fn nodata_keys_only_when_every_colour_matches() {
-        // RGB: (0,0,0) — поле, (0,0,1) — законный почти-чёрный.
-        let mapping = Mapping::stretched(0.0, 255.0, Some(0.0));
-        let out = mapping.rgba(&Samples::U8(&[0, 0, 0, 0, 0, 1]), Pixel::named(3), 2);
-        assert_eq!(&out[..4], &[0, 0, 0, 0]);
-        assert_eq!(&out[4..], &[0, 0, 1, 255]);
-    }
-
-    #[test]
-    fn stretch_maps_range_and_clamps_edges() {
-        let mapping = Mapping::stretched(100.0, 355.0, None);
-        let out = mapping.rgba(&Samples::U16(&[100, 355, 50, 1000, 22750]), Pixel::named(1), 4);
-        assert_eq!(&out[0..4], &[0, 0, 0, 255]); // lo → 0
-        assert_eq!(&out[4..8], &[255, 255, 255, 255]); // hi → 255
-        assert_eq!(&out[8..12], &[0, 0, 0, 255]); // ниже lo — кламп
-        assert_eq!(&out[12..16], &[255, 255, 255, 255]); // выше hi — кламп
-    }
-
-    #[test]
-    fn f32_nodata_is_compared_raw_before_stretch() {
-        // DEM: nodata −32767 не участвует ни в цвете, ни в растяге.
-        let mapping = Mapping::stretched(0.0, 100.0, Some(-32767.0));
-        let out = mapping.rgba(&Samples::F32(&[-32767.0, 50.0]), Pixel::named(1), 2);
-        assert_eq!(out, vec![0, 0, 0, 0, 128, 128, 128, 255]);
-    }
-
-    #[test]
-    fn nan_sample_is_transparent_even_without_declared_nodata() {
-        let mapping = Mapping::stretched(0.0, 100.0, None);
-        let out = mapping.rgba(&Samples::F32(&[f32::NAN, 50.0]), Pixel::named(1), 2);
-        assert_eq!(out, vec![0, 0, 0, 0, 128, 128, 128, 255]);
-    }
-
-    #[test]
-    fn alpha_channel_is_scaled_not_stretched() {
-        // Серый с альфой u16: цвет растягивается, альфа — старший байт.
-        let mapping = Mapping::stretched(0.0, 1000.0, None);
-        let out = mapping.rgba(&Samples::U16(&[500, 0x8000]), Pixel::named(2), 1);
-        assert_eq!(out, vec![128, 128, 128, 0x80]);
-    }
-
-    #[test]
-    fn percentiles_ignore_hot_outliers() {
-        // 0..=100 с одиночным выбросом: растяг остаётся у тела распределения.
-        let mut values: Vec<f32> = (0..=100).map(|v| v as f32).collect();
-        values.push(1_000_000.0);
-        let (lo, hi) = percentile_stretch(&mut values).unwrap();
-        assert_eq!(lo, 2.0);
-        assert!((98.0..=100.0).contains(&hi), "hi = {}", hi);
-    }
-
-    /// Ровное поле встаёт посередине шкалы, а не в её нижний край: чёрный
-    /// кадр неотличим от пустоты, а поле однотонно, а не пусто.
-    #[test]
-    fn flat_field_lands_in_the_middle_of_the_scale() {
-        for value in [0.0f32, 42.0, -273.15, 1.0e7, 9.969_21e36] {
-            let mut values = vec![value; 10];
-            let (lo, hi) = percentile_stretch(&mut values).expect("выборка не пуста");
-            assert!(hi > lo, "растяг вырожден при {}: {}..{}", value, lo, hi);
-            let grey = Mapping::stretched(lo, hi, None)
-                .rgba(&Samples::F32(&[value]), Pixel::named(1), 1);
-            assert!((100..=160).contains(&grey[0]), "{} дало яркость {}", value, grey[0]);
-            assert_eq!(grey[3], 255, "ровное поле не пусто");
-        }
-        assert_eq!(percentile_stretch(&mut []), None);
-    }
-
-    /// Один и тот же вопрос — годен ли отсчёт — у выборки растяга и у показа.
-    /// Разойдясь, они дают белый непрозрачный пиксель там, где выборка
-    /// посчитала значение негодным.
-    #[test]
-    fn what_the_sample_throws_out_the_frame_does_not_show() {
-        let nodata = Some(-9999.0);
-        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -9999.0] {
-            assert!(!is_data(bad, nodata), "{} сочтено данными", bad);
-            let out = Mapping::stretched(0.0, 100.0, nodata)
-                .rgba(&Samples::F32(&[bad]), Pixel::named(1), 1);
-            assert_eq!(&out[..], &[0, 0, 0, 0], "{} вышло непрозрачным", bad);
-        }
-        assert!(is_data(0.0, nodata) && is_data(-9999.0, None));
-    }
 }

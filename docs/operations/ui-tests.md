@@ -146,7 +146,7 @@ Two are found in `host.log`, because no step could name them: they do not
 touch the markup, and the scenario has no elements to notice them by. The
 third is found in the host's stderr, which the runner keeps in
 `runtime/logs/host.stderr` and, beside a scenario that did not hold, as
-`<name>.stderr`: a **host panic** (`ПАНИКА ХОСТА`, with the line after
+`<name>.stderr`: a **host panic** (`HOST PANIC`, with the line after
 `panicked at` as its reason; the backtrace is in the file, the runner sets
 `RUST_BACKTRACE`). The host is built with `panic = "abort"`, so its panic on
 any thread ends the process by `SIGABRT` before the log hears of it, and
@@ -157,19 +157,19 @@ but the host survives it as a trap — so the panic is the host's only when the
 host died by `SIGABRT`. The stderr reaches the runner through the launcher,
 which leaves the host's streams its own (`run-native.py`): merged into stdout
 they would go where the runner sends stdout — nowhere. A host killed by a
-signal is named by it in the verdict (`НЕ СОШЁЛСЯ (SIGABRT)`): the launcher
+signal is named by it in the verdict (`NOT CONVERGED (SIGABRT)`): the launcher
 returns such a death as the shell would, 128+N (`run-native.py::exit_code`),
 and the name is what tells a panic (`SIGABRT`) from a crash (`SIGSEGV`) or a
 kill from outside when stderr is empty; a launcher killed from outside, with
 the host still alive, is named as such too.
 
-The first is a **GPU refusal** (`ОТКАЗ ВИДЕОКАРТЫ`). A shader that did not compile, or a vertex
+The first is a **GPU refusal** (`GPU REFUSAL`). A shader that did not compile, or a vertex
 layout that drifted from it, does not crash the application: the window lives,
 the markup answers, tabs switch — and an empty place is drawn. The globe and
 the canvas have no names, so the refusal is visible only as a `wgpu:` line in
 the log (`run-uitests.py::gpu_refused`).
 
-The second is a **module trap** (`ТРАП МОДУЛЯ`). The host rebuilds a trapped module, and that
+The second is a **module trap** (`MODULE TRAP`). The host rebuilds a trapped module, and that
 costs it all its state: the instance is built from scratch and passes init,
 and only what reached the disk survives. The application keeps answering; the
 module starts from a clean slate, and how visible that is depends on whose it
@@ -177,11 +177,11 @@ is — a module drawing the screen loses its whole markup, a background one
 loses nothing visible. Exchanges the module had started are settled by the
 host with a terminal reply; requests still queued survive the fall and are
 answered by the raised instance. The trap is looked for by the line
-`поймал трап`, not by
+`caught a trap`, not by
 an instance coming up in general: a module killed mid-handler is raised the
 same way, and that is normal work (`run-uitests.py::module_trapped`).
 
-The third is a **broken delivery promise** (`ДОСТАВЛЕНО N% ПРИ ОБЕЩАННЫХ M%`),
+The third is a **broken delivery promise** (`DELIVERED N% OF PROMISED M%`),
 looked for only in a scenario that made one with `delivered`. What went over
 the wire is not in the markup either: the network module counts it and writes
 it to `trace.log` as a running total per resource, so the last line of a
@@ -197,9 +197,9 @@ the module's state, and with it whatever `wait` is waiting for leaves the
 scene — so a fall fails a scenario at least as often as it goes unnoticed.
 Called merely "did not hold", it would send you to look for the cause in the
 scenario, where it is not. So what is found in the log complements the verdict
-rather than replacing it: a scenario that held is `сошёлся`, and
-`НЕ СОШЁЛСЯ + ТРАП МОДУЛЯ` is two facts, both needed. The same goes for
-`ЗАВИС`, where the log matters most: steps are
+rather than replacing it: a scenario that held is `CONVERGED`, and
+`NOT CONVERGED + MODULE TRAP` is two facts, both needed. The same goes for
+`HUNG`, where the log matters most: steps are
 replayed per frame, so a stalled frame loop also holds the scenario clock —
 its own wait limit never fires, and the run hits the global one. That global
 limit is `LIMIT_SECONDS` of the runner plus the longest `timeout` the scenario
