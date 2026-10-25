@@ -12,7 +12,7 @@ Each chat session executes one task from Section 5 and treats this file as the m
    - Do not restore `veldcore/platform/host`, `veldsdk`, `buildgen/`, `schema.yaml`, legacy host configs, `generated/` directories, or the `ui-service` process/ABI.
    - Use Rust 2024, workspace dependency inheritance, workspace lints, and modern module paths (`src/foo.rs` plus `src/foo/bar.rs`, not `src/foo/mod.rs`). There is no Rust 2026 edition; do not use the compiler's `future` edition.
    - Compile all seven debug services and the composed release to `wasm32-wasip3`. Use the runtime and WASI configuration from Section 1.3. Native binaries are permitted for tests and development tools, never for delivered services or applications.
-   - Add only the minimum essential tests for externally observable behavior and non-obvious invariants. Do not test getters, trivial arithmetic or wiring, or dependency behavior, and do not duplicate integration coverage with unit tests. Geodesy, projection, codecs, cache eviction, resumable downloads, event replay, and stream cancellation require correctness tests; compilation alone is not migration verification.
+   - Add only the minimum essential tests for externally observable behavior and non-obvious invariants. Do not test getters, trivial arithmetic or wiring, or dependency behavior, and do not duplicate integration coverage with unit tests. Geodesy, projection, codecs, cache eviction, resumable downloads, snapshot invalidation/coalescing, and stream cancellation require correctness tests; compilation alone is not migration verification.
    - Keep README at 35 lines or fewer and documents under `docs/` at 80 lines or fewer. Reference protobuf contracts instead of duplicating their field definitions.
 4. A replacement may coexist with its predecessor only while being verified. After the replacement passes its complete behavioral and real runtime scenario, remove superseded source, dependencies, feature flags, compatibility shims, configuration, documentation, and unused lockfile entries in the same task. Update all call sites and rerun verification. Do not retain an unused compatibility layer or second implementation "just in case".
 5. Run the complete verification for the current task, including its runtime scenario.
@@ -96,7 +96,7 @@ Service ports in the debug configuration:
 
 - Use Rust 1.100 with `rust-version = "1.100"`, Rust 2024, a pinned `rust-toolchain.toml`, and a committed `Cargo.lock`. Until stable 1.100 is available, pin `1.100.0-beta.7`; move to stable 1.100.x as soon as the same workspace verification passes.
 - Target WASI 0.3 through `wasm32-wasip3` now. Do not maintain a second WASI target or a long-term dual-target compatibility policy.
-- Pin direct dependencies exactly and lock the complete transitive graph. The verified starting set is Tokio 1.54.1, ConnectRPC 0.9.1 with a compatible exactly pinned `connectrpc-build`, Buffa/`buffa-types`/`buffa-codegen` 0.9.2, and ULID 3.0. Upgrade a dependency only with its compatible consumers, never by independently selecting the newest package.
+- Pin direct dependencies exactly and lock the complete transitive graph. The verified starting set is Tokio 1.54.1, ConnectRPC 0.9.1 with a compatible exactly pinned `connectrpc-build`, and Buffa/`buffa-types`/`buffa-codegen` 0.9.2. Upgrade a dependency only with its compatible consumers, never by independently selecting the newest package.
 - Configure WASI Tokio support explicitly in `.cargo/config.toml`:
 
 ```toml
@@ -142,14 +142,14 @@ Both renderer services retain pure-Rust software fallbacks for headless verifica
 
 The crate uses `connectrpc::include_generated!()` and exports the versioned packages. Generated code is rebuilt by Cargo; there is no legacy codegen directory.
 
-Buffa views borrow request storage and must not be stored in event tables, download state, or other long-lived structures. Convert them to owned messages at the service boundary. `Bytes` provides cheap ownership, cloning, and slicing; it does not guarantee zero network copies or page alignment.
+Buffa views borrow request storage and must not be stored in domain state or other long-lived structures. Convert them to owned messages at the service boundary. `Bytes` provides cheap ownership, cloning, and slicing; it does not guarantee zero network copies or page alignment.
 
 ### 2.2 Error Semantics
 
 There are two deliberately different error channels:
 
 1. **Recoverable item failure:** remaining items are still meaningful. Return `common.ItemError` inside the response's `oneof`. A batch mutation returns `common.ItemResult` containing either `ItemSuccess` or `ItemError`. A finite data stream uses its service-specific result envelope. `ProduceEvent` has a dedicated error variant for a failed tile. These failures do not terminate the stream.
-2. **RPC or stream failure:** return `ConnectError` and terminate the RPC. Use this for malformed requests, authentication failure, unavailable upstream services, expired replay cursors, source-wide failures, cancellation, deadlines, and failures after which later items cannot be trusted.
+2. **RPC or stream failure:** return `ConnectError` and terminate the RPC. Use this for malformed requests, authentication failure, unavailable upstream services, source-wide failures, cancellation, deadlines, and failures after which later items cannot be trusted.
 
 Finite streams end normally after their last item. Infinite subscriptions end on client cancellation, service shutdown, or a fatal RPC error. No contract claims that a stream can never terminate.
 
@@ -159,19 +159,27 @@ Domain state such as an unviewable product or failed background download remains
 
 ### 2.3 `veldmap-rpc`
 
-Keep this crate small and explicit:
+Keep this crate small, explicit, and independent of authoritative domain state:
 
 - ConnectRPC server/client construction for loopback, route-specific message limits, and standard health checks. Static readiness requires `Health.Check`; `Health.Watch` may return `UNIMPLEMENTED` until a consumer requires it.
 - Deadlines for finite calls and deliberately bounded operations. Intentional infinite subscriptions rely on explicit cancellation and shutdown rather than an arbitrary finite-request timeout.
 - Bounded finite-stream helpers over `tokio::sync::mpsc`. Producers check cancellation between tiles, files, and frames. Ordinary work queues remain bounded and never silently drop tiles or mutations.
-- `EventTable<V>` with owned live values, bounded mutation history, monotonic ULID cursors, timestamps, and atomic snapshot-plus-subscribe behavior. A snapshot/live transition must not lose or duplicate a mutation.
-- Explicit replay behavior: an unknown or evicted `after_event_id` returns `OUT_OF_RANGE`; time filters and `max_events` are applied consistently; deletion events omit data.
-- Conversion between domain `thiserror` errors, recoverable `ItemError` values, and terminal `ConnectError` codes.
+- Conversion between domain `thiserror` errors, recoverable `ItemError` values, and terminal `ConnectError` codes. Domain stores return domain errors; RPC adapters perform the conversion.
 - Transport and stream helpers independent of images and other resource types. Resource validation belongs in shared domain libraries; extract only generic mechanisms with actual consumers.
+- No domain values, mutation history, replay cursors, or authoritative subscription state in the RPC crate.
 
 Configure 128 MiB only for routes that carry frames or large tile payloads. Keep smaller limits for catalogue, mutation, and control routes. Enable `TCP_NODELAY` on loopback sockets where the selected transport exposes it.
 
-### 2.4 Frames, Tiles, and Backpressure
+### 2.4 Snapshots and Invalidation
+
+- `Library.WatchDownloads`, `Viewer.WatchViews`, and `Globe.WatchOverlays` stream complete snapshots of their current collections. Each stream sends an initial snapshot and later snapshots after domain invalidations; each snapshot replaces the preceding collection. There is no mutation-history view, replay cursor, or guarantee that intermediate states are delivered.
+- Each service owns its current domain state and query behavior. Subscribe to invalidations before the initial snapshot. After a successful mutation, publish a latest-value invalidation; a change during snapshot construction or sending must trigger another refresh. Coalesce bursts so skipped intermediate invalidations are harmless.
+- Notifications are transient wakeup hints, not authoritative data or durable events. Reconnects and missed subscriptions recover with a fresh snapshot. Outbound snapshots remain bounded; slow consumers may skip intermediate snapshots but not block unbounded production.
+- Prefer stream-owned producers whose futures are dropped on cancellation. A spawned producer must also wait on outbound-channel closure so an idle subscription cannot leak a task.
+- Keep high-frequency telemetry in ephemeral domain state and rate-limit its invalidations. Do not persist every download chunk or renderer progress tick. Lifecycle transitions and resume metadata retain the durability provided by the service's existing persistent representation.
+- Implement the loop in the first real service and extract a shared helper only when later consumers prove duplication. Do not introduce a generic store, `Observed<T>`, SQLite, or an event-outbox framework preemptively.
+
+### 2.5 Frames, Tiles, and Backpressure
 
 - Live viewport frames use `PIXEL_FORMAT_RGBA8_SRGB`, `row_stride = width * 4`, and checked `pixels.len() == row_stride * height`. Implement shared validation in `veldmap-core` for both renderer services; do not add an aligned-`BytesMut` API without a real allocation mechanism and benchmark.
 - Decoded pyramid tiles use `PIXEL_FORMAT_RGBA8_UNORM`; disk cache payloads use `PIXEL_FORMAT_QOI`.
@@ -188,17 +196,16 @@ Configure 128 MiB only for routes that carry frames or large tile payloads. Keep
 The files in `proto/` are the sole source of truth for schemas. Do not copy message or service definitions into this plan, documentation, or handwritten Rust. `crates/veldmap-proto` generates the only Rust contract API.
 
 - Preserve proto3, versioned packages, declared idempotency, typed non-terminal item results, and the service boundaries represented by the eight schema files.
-- `ReadOptions` defaults to a snapshot. `live = true` continues into live events after the selected snapshot/history. `max_events = 0` means no application-level event limit; a positive value ends the stream normally after that many events.
-- Preserve the error, replay, frame, tile, and cancellation semantics in Section 2. A schema edit does not authorize changing those semantics silently.
-- Evolve existing packages with wire-compatible additive changes. Never renumber or reuse tags; reserve removed field numbers and names. Treat changes to existing types, defaults, `oneof` membership, or JSON behavior as compatibility-sensitive.
-- For every contract change, verify generated binary and JSON round trips plus old/new compatibility fixtures for all allowed reads. A deliberate breaking change requires a new versioned package or explicitly versioned service and coordinated client migration.
-- Keep descriptors and generated JSON support consistent with runtime features. Generated source remains in `OUT_DIR`, not the repository.
+- Task 4a is a one-time coordinated pre-release revision of the v1 snapshot contracts before any service or client implementation consumes them. Remove `ReadOptions`, `EventMeta`, `Op`, replay options, and consumerless subscription filters; reserve every removed field number and name. This revision supersedes the earlier event/replay design and does not require preserving unused compatibility fixtures or creating parallel v2 packages.
+- After Task 4a, evolve existing packages with wire-compatible additive changes. Never renumber or reuse tags; reserve removed field numbers and names. Treat changes to existing types, defaults, `oneof` membership, or JSON behavior as compatibility-sensitive. A later deliberate breaking change requires a new versioned package or explicitly versioned service and coordinated client migration.
+- Preserve the error, snapshot-invalidation, frame, tile, and cancellation semantics in Section 2. A schema edit does not authorize changing those semantics silently.
+- For every contract change, verify generated binary and JSON round trips plus old/new compatibility fixtures for all allowed additive reads. Keep descriptors and generated JSON support consistent with runtime features. Generated source remains in `OUT_DIR`, not the repository.
 
 ---
 
 ## 4. `data-browser` and Composed Release
 
-The browser uses iced widgets for panes, tabs, tables, forms, selectors, progress, and viewport interaction. It subscribes to `Library.ListDownloads`, `Viewer.ListViews`, `Viewer.WatchFrames`, `Globe.ListOverlays`, and `Globe.WatchFrames`. Latest frame messages update GPU resources; input updates camera RPCs and local pane state.
+The browser uses iced widgets for panes, tabs, tables, forms, selectors, progress, and viewport interaction. It subscribes to `Library.WatchDownloads`, `Viewer.WatchViews`, `Viewer.WatchFrames`, `Globe.WatchOverlays`, and `Globe.WatchFrames`. Each collection snapshot replaces the preceding collection while stable item IDs preserve selection, expansion, and scroll state. Latest frame messages update GPU resources; input updates camera RPCs and local pane state.
 
 Task 5 proves the WASI 0.3 runtime, real RPC client, surface, text, host input, resize/HiDPI, and animated external image before full UI migration. Task 13 preserves the recursive pane layout and state persistence without restoring the UI proto DSL.
 
@@ -239,9 +246,17 @@ Task 15 builds one WASI 0.3 component from service libraries. Start with direct 
     3. Add small example Cache client/server components and a host-driven integration test. Return a recoverable item error followed by a valid item, then cancel an active stream and observe producer termination.
   - **Verification:** `cargo test -p veldmap-rpc`, native/WASI clippy with `-D warnings`, both example components build for `wasm32-wasip3`, and the two-component Wasmtime 50 integration test passes its stream and cancellation assertions.
 
+- [ ] **Task 4a: Replace Event Replay with Snapshot Watches**
+  - **Action:**
+    1. Remove `EventTable`, its replay tests, and newly unused crate/workspace/lockfile dependencies, including `ulid` and `buffa-types` from `veldmap-rpc`. Keep the transport, bounded-stream, health, deadline, cancellation, and error-mapping behavior that still has consumers.
+    2. Replace `ListDownloads`, `ListViews`, and `ListOverlays` with the complete-snapshot watch contracts in Sections 2.4 and 3. Remove `ReadOptions`, `EventMeta`, `Op`, replay options, and subscription filters without a current consumer; reserve all removed protobuf field numbers and names.
+    3. Add focused generated-contract binary/JSON round-trip checks for the revised snapshots. Preserve the existing recoverable/terminal error tests and Cache stream/cancellation scenario; do not invent a service implementation merely to test future watch behavior.
+    4. Do not add SQLite, a generic store, `Observed<T>`, a snapshot-watch helper, or an event-outbox framework in this task. The first real service will implement the Section 2.4 loop before any extraction is considered.
+  - **Verification:** `cargo fmt --all -- --check`, `cargo test --workspace`, native clippy with `-D warnings`, and the existing WASI Cache integration pass on the pre-Task-5 baseline; the revised generated contracts pass their binary/JSON checks; and no nonhistorical source references to `EventTable` or replay contracts remain.
+
 - [ ] **Task 5: Adopt the New Baseline and Prove the `wasi-gfx` Presentation Shell**
   - **Action:**
-    1. Upgrade the existing workspace, toolchain, target configuration, and dependencies to Sections 1.3–1.4. Reprove the Task 4 Cache stream/cancellation scenario on WASI 0.3, then remove the old target configuration and superseded dependency entries under Section 0.
+    1. Upgrade the existing workspace, toolchain, target configuration, and dependencies to Sections 1.3–1.4. Reprove the Task 4 Cache stream/cancellation scenario on WASI 0.3, explicitly including its Tokio timer path, then remove the old target configuration and superseded dependency entries under Section 0.
     2. Pin the exact graphics host/guest/WIT set and create minimal `services/data-browser` without migrating the legacy UI. Export `shell` and `frame` through `src/lib.rs`; keep `src/main.rs` as a thin WASI entry point.
     3. Implement the required native-async executor and wgpu/WASI integration. Render text and basic iced widgets through wgpu 30, present through `wasi-gfx`, and composite an animated external RGBA image without per-frame atlas churn.
     4. Handle real host pointer buttons/motion, wheel, keyboard text input, resize, scale factor, and clean shutdown. Add deterministic diagnostics triggered by observed host events; do not claim self-injected events as host integration verification.
@@ -275,10 +290,10 @@ Task 15 builds one WASI 0.3 component from service libraries. Start with direct 
 - [ ] **Task 9: Migrate `services/data-library`**
   - **Action:**
     1. Move the library to `services/data-library`, serve `Library` on `127.0.0.1:50052`, and delete `veldmodules/data-library` after verification.
-    2. Implement `.part` resumable HTTP downloads, `.origin` sidecars, pause/remove behavior, and scene counts under `/runtime/data/dem/source`.
-    3. Use generated Provider clients for signing/root resolution and publish owned `DownloadItem` values through `EventTable`.
-    4. Test interrupted ranges, resume validation, pause/cancel, replay gaps, and per-item failures against a local HTTP fixture and mock Provider.
-  - **Verification:** native tests, native/WASI clippy with `-D warnings`, `cargo build -p veldmap-data-library --target wasm32-wasip3 --release`, a WASI download/event-stream smoke scenario, and `! test -d veldmodules/data-library` succeed.
+    2. Implement `.part` resumable HTTP downloads, `.origin` sidecars, pause/remove behavior, and scene counts under `/runtime/data/dem/source`. Keep these files as the only persistent authorities; do not add SQLite or a duplicate metadata store without a new requirement and plan revision.
+    3. Use generated Provider clients for signing/root resolution. Implement `WatchDownloads` directly over authoritative domain state with complete owned snapshots, post-mutation invalidation, coalesced ephemeral progress, and cancellation according to Section 2.4.
+    4. Test interrupted ranges, resume validation, pause/cancel, initial/reconnect snapshots, invalidation during snapshot delivery, progress coalescing, and per-item failures against a local HTTP fixture and mock Provider.
+  - **Verification:** native tests, native/WASI clippy with `-D warnings`, `cargo build -p veldmap-data-library --target wasm32-wasip3 --release`, a WASI download/snapshot-stream smoke scenario, and `! test -d veldmodules/data-library` succeed.
 
 - [ ] **Task 10: Migrate `services/image-tiler`**
   - **Action:**
@@ -292,25 +307,25 @@ Task 15 builds one WASI 0.3 component from service libraries. Start with direct 
   - **Action:**
     1. Move the viewer to `services/image-view`, serve `Viewer` on `127.0.0.1:50055`, and delete `veldmodules/image-view` after verification.
     2. Use Tiler and Cache clients plus `veldmap_core::tiles` for the pyramid ladder.
-    3. Render wgpu or software RGBA frames, validate dimensions/stride, broadcast latest frames per view, and publish `ViewStatus` through `EventTable`.
-    4. Test fit/zoom/pan, resize, variable selection, frame sequencing, cancellation, and a real `WatchFrames` stream.
+    3. Render wgpu or software RGBA frames, validate dimensions/stride, and broadcast latest frames per view. Implement `WatchViews` with complete owned `ViewStatus` snapshots, post-mutation invalidation, progress coalescing, and cancellation according to Section 2.4.
+    4. Test fit/zoom/pan, resize, variable selection, frame sequencing, snapshot refresh/reconnect, cancellation, and real `WatchViews` and `WatchFrames` streams.
   - **Verification:** native tests, native/WASI clippy with `-D warnings`, `cargo build -p veldmap-image-view --target wasm32-wasip3 --release`, a headless WASI frame/status smoke scenario, and `! test -d veldmodules/image-view` succeed.
 
 - [ ] **Task 12: Migrate `services/globe`**
   - **Action:**
     1. Move the globe to `services/globe`, serve `Globe` on `127.0.0.1:50056`, and delete `veldmodules/globe` after verification.
     2. Preserve WGS84 geometry, `SURFACE_LIFT_M`, warp subdivision, culling, georeference ranks, Transverse Mercator/Pulkovo math, outlines/hatching, and quaternion flights.
-    3. Render wgpu or software frames and publish overlay status/latest frames with bounded queues and cancellation.
-    4. Add golden math/culling tests and a headless WASI scenario covering overlays, camera control, surface probing, and frames.
+    3. Render wgpu or software frames and broadcast latest frames with bounded queues and cancellation. Implement `WatchOverlays` with complete owned overlay-status snapshots, post-mutation invalidation, and progress coalescing according to Section 2.4.
+    4. Add golden math/culling tests and a headless WASI scenario covering overlay snapshots/reconnects, camera control, surface probing, frames, and cancellation.
   - **Verification:** native tests, native/WASI clippy with `-D warnings`, `cargo build -p veldmap-globe --target wasm32-wasip3 --release`, the headless WASI smoke scenario, and `! test -d veldmodules/globe` succeed.
 
 - [ ] **Task 13: Complete `services/data-browser`**
   - **Action:**
     1. Extend the Task 5 shell with the legacy browser behavior and delete `veldmodules/` completely after verification.
-    2. Preserve panes/tabs, layout persistence, catalogue/search/download tables, row states, batch actions, NetCDF selectors, and camera interaction.
-    3. Connect to all six backend/renderer services with generated ConnectRPC clients and iced subscriptions; composite latest viewer/globe frames through wgpu.
+    2. Preserve panes/tabs, layout persistence, catalogue/search/download tables, row states, batch actions, NetCDF selectors, and camera interaction. Replace collections on each snapshot while using stable item IDs to preserve selection, expansion, and scroll state.
+    3. Connect to all six backend/renderer services with generated ConnectRPC clients and iced subscriptions; composite latest viewer/globe frames through wgpu. Reconnect collection watches with fresh snapshots rather than replay cursors.
     4. Coalesce camera input with bounded pending state and at most one in-flight `ControlCamera` RPC per view or globe. Accumulate pan/orbit deltas, preserve zoom anchoring and discrete-action ordering, collapse resize to latest dimensions, and do not emit one RPC per raw pointer event.
-    5. Exercise a complete user flow against local fixtures, including recoverable item errors, reconnects, live view resizing, runtime-supported clipboard/focus/IME behavior, and clean stream cancellation.
+    5. Exercise a complete user flow against local fixtures, including recoverable item errors, snapshot replacement/reconnects, live view resizing, runtime-supported clipboard/focus/IME behavior, and clean stream cancellation.
   - **Verification:** native tests where applicable, native/WASI clippy with `-D warnings`, `cargo build -p veldmap-data-browser --target wasm32-wasip3 --release`, the real end-to-end window scenario, and `! test -d veldmodules` succeed.
 
 - [ ] **Task 14: Orchestrate and Document the Debug System**
@@ -319,13 +334,13 @@ Task 15 builds one WASI 0.3 component from service libraries. Start with direct 
     2. Use standard Connect health checks for backend readiness and keep service logs under `runtime/logs/`.
     3. Update the 35-line README and create concise `docs/overview.md`, `services.md`, `imagery-and-globe.md`, and `operations.md` (each at most 80 lines).
     4. Document exact pinned prerequisites, debug launch, deterministic fixture run, and optional live CDSE run without exposing secrets.
-    5. Measure and record representative debug `WatchFrames` throughput and memory at the configured window size before choosing resolution or rate limits.
+    5. Measure and record representative debug `WatchFrames` throughput and memory at the configured window size, plus snapshot-refresh cost under representative progress updates, before choosing resolution or rate limits.
   - **Verification:** `cargo fmt --all -- --check`, `cargo test --workspace`, native/WASI workspace clippy with `-D warnings`, `cargo build --workspace --target wasm32-wasip3 --release`, and a complete `process-compose` user-flow smoke scenario all pass.
 
 - [ ] **Task 15: Build and Measure the Composed Release**
   - **Action:**
     1. Create `apps/veldmap` from existing domain libraries and produce one optimized WASI 0.3 component while keeping the Task 14 debug configuration available.
-    2. Replace process boundaries first with direct domain calls or a standard ConnectRPC `ClientTransport` implementation, preserving validation, errors, cancellation, and event ordering.
-    3. Benchmark startup, catalogue operations, tile production, 4K frame delivery, memory, and CPU against the debug baseline. Add GPU handle sharing or binary/socket rewriting only after a separate measured design review.
+    2. Replace process boundaries first with direct domain calls or a standard ConnectRPC `ClientTransport` implementation, preserving validation, errors, cancellation, snapshot ordering, and invalidation coalescing.
+    3. Benchmark startup, catalogue operations, tile production, 4K frame delivery, snapshot refresh, memory, and CPU against the debug baseline. Add GPU handle sharing or binary/socket rewriting only after a separate measured design review.
     4. Run semantic parity tests and the complete user flow on the composed component under its WASI runtime. Document measurements and optimizations not adopted; remove abandoned experimental implementations under Section 0.
   - **Verification:** the composed `wasm32-wasip3` release build, native/workspace tests, semantic parity checks, and complete release user-flow smoke scenario pass; benchmark results are recorded without claiming unmeasured zero-copy behavior.
