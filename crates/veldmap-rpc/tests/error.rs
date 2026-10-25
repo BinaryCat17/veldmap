@@ -14,9 +14,12 @@ fn recoverable_items_and_terminal_errors_remain_distinct() {
     assert_eq!(item.message, "upstream unavailable");
     assert!(item.retryable);
 
-    let terminal = DomainError::new(ErrorCode::OutOfRange, "cursor evicted")
+    let terminal = DomainError::new(ErrorCode::OutOfRange, "source range unavailable")
         .into_item_error("download-1")
         .unwrap_err();
     assert_eq!(terminal.code, ErrorCode::OutOfRange);
-    assert_eq!(terminal.message.as_deref(), Some("cursor evicted"));
+    assert_eq!(
+        terminal.message.as_deref(),
+        Some("source range unavailable")
+    );
 }

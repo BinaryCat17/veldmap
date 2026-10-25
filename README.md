@@ -19,9 +19,9 @@ and talk over ConnectRPC on localhost sockets:
 | `data-browser` | — | `iced` UI client of all services (`wasi-gfx`) |
 
 - `proto/` — ConnectRPC contracts: stateless services stream finite lists,
-  stateful ones stream event logs and live frames.
+  stateful ones stream collection snapshots and live frames.
 - `crates/veldmap-proto` — Buffa messages, views and ConnectRPC stubs; `Bytes` payloads.
-- `crates/veldmap-rpc` — stream, event-table, error and transport helpers.
+- `crates/veldmap-rpc` — stream, health, error and transport helpers.
 - `crates/veldmap-core` — pyramid tiles, geodesy, ranged readers, GPU fallback.
 
 ## Target build and run (after Task 14)

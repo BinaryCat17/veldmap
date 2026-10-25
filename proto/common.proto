@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package veldmap.common.v1;
 
-import "google/protobuf/timestamp.proto";
-
 enum ItemResultCode {
   ITEM_RESULT_CODE_UNSPECIFIED = 0;
   ITEM_RESULT_CODE_DONE        = 1;
@@ -75,45 +73,8 @@ message RemoveRequest {
   RemoveOptions options = 2;
 }
 
-message ReadOptions {
-  enum View {
-    VIEW_UNSPECIFIED = 0;
-    VIEW_SNAPSHOT    = 1;
-    VIEW_EVENTS      = 2;
-  }
-  View view = 1;
-
-  oneof start {
-    string after_event_id = 2;
-    google.protobuf.Timestamp after_time = 3;
-  }
-
-  oneof end {
-    string before_event_id = 4;
-    google.protobuf.Timestamp before_time = 5;
-    bool live = 6;
-  }
-
-  uint32 max_events = 7;
-}
-
 message Ids {
   repeated string ids = 1;
-}
-
-enum Op {
-  OP_UNSPECIFIED = 0;
-  OP_SNAPSHOT    = 1;
-  OP_CREATED     = 2;
-  OP_UPDATED     = 3;
-  OP_DELETED     = 4;
-}
-
-message EventMeta {
-  string event_id = 1;
-  string id = 2;
-  google.protobuf.Timestamp time = 3;
-  Op op = 4;
 }
 
 message GeoPoint {

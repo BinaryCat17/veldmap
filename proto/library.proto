@@ -21,7 +21,7 @@ service Library {
     option idempotency_level = IDEMPOTENT;
   }
 
-  rpc ListDownloads (ListDownloadsRequest) returns (stream DownloadEvent) {
+  rpc WatchDownloads (WatchDownloadsRequest) returns (stream DownloadSnapshot) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 }
@@ -66,12 +66,13 @@ message DownloadItem {
   optional string status_message = 9;
 }
 
-message ListDownloadsRequest {
-  veldmap.common.v1.ReadOptions options = 1;
-  optional veldmap.common.v1.Ids filter_to_products = 2;
+message WatchDownloadsRequest {
+  reserved 1, 2;
+  reserved "options", "filter_to_products";
 }
 
-message DownloadEvent {
-  veldmap.common.v1.EventMeta meta = 1;
-  optional DownloadItem data = 2;
+message DownloadSnapshot {
+  reserved 1, 2;
+  reserved "meta", "data";
+  repeated DownloadItem items = 3;
 }

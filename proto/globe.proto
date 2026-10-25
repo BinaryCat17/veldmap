@@ -28,7 +28,7 @@ service Globe {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
-  rpc ListOverlays (ListOverlaysRequest) returns (stream OverlayEvent) {
+  rpc WatchOverlays (WatchOverlaysRequest) returns (stream OverlaySnapshot) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
@@ -143,14 +143,15 @@ message OverlayStatus {
   repeated veldmap.tiler.v1.RasterVariable detailed_candidates = 15;
 }
 
-message ListOverlaysRequest {
-  veldmap.common.v1.ReadOptions options = 1;
-  optional veldmap.common.v1.Ids filter_to_overlays = 2;
+message WatchOverlaysRequest {
+  reserved 1, 2;
+  reserved "options", "filter_to_overlays";
 }
 
-message OverlayEvent {
-  veldmap.common.v1.EventMeta meta = 1;
-  optional OverlayStatus data = 2;
+message OverlaySnapshot {
+  reserved 1, 2;
+  reserved "meta", "data";
+  repeated OverlayStatus items = 3;
 }
 
 message WatchGlobeFramesRequest {}

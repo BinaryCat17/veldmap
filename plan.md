@@ -96,7 +96,7 @@ Service ports in the debug configuration:
 
 - Use Rust 1.100 with `rust-version = "1.100"`, Rust 2024, a pinned `rust-toolchain.toml`, and a committed `Cargo.lock`. Until stable 1.100 is available, pin `1.100.0-beta.7`; move to stable 1.100.x as soon as the same workspace verification passes.
 - Target WASI 0.3 through `wasm32-wasip3` now. Do not maintain a second WASI target or a long-term dual-target compatibility policy.
-- Pin direct dependencies exactly and lock the complete transitive graph. The verified starting set is Tokio 1.54.1, ConnectRPC 0.9.1 with a compatible exactly pinned `connectrpc-build`, and Buffa/`buffa-types`/`buffa-codegen` 0.9.2. Upgrade a dependency only with its compatible consumers, never by independently selecting the newest package.
+- Pin direct dependencies exactly and lock the complete transitive graph. The verified starting set is Tokio 1.54.1, ConnectRPC 0.9.1 with a compatible exactly pinned `connectrpc-build`, and Buffa/`buffa-codegen` 0.9.2. Upgrade a dependency only with its compatible consumers, never by independently selecting the newest package.
 - Configure WASI Tokio support explicitly in `.cargo/config.toml`:
 
 ```toml
@@ -172,8 +172,9 @@ Configure 128 MiB only for routes that carry frames or large tile payloads. Keep
 
 ### 2.4 Snapshots and Invalidation
 
-- `Library.WatchDownloads`, `Viewer.WatchViews`, and `Globe.WatchOverlays` stream complete snapshots of their current collections. Each stream sends an initial snapshot and later snapshots after domain invalidations; each snapshot replaces the preceding collection. There is no mutation-history view, replay cursor, or guarantee that intermediate states are delivered.
+- `Library.WatchDownloads`, `Viewer.WatchViews`, and `Globe.WatchOverlays` stream complete snapshots of their current collections. Each stream sends an initial snapshot and later snapshots after domain invalidations; each snapshot replaces the preceding collection. Items have deterministic ordering by stable ID unless a service defines another explicit stable order. There is no mutation-history view, replay cursor, or guarantee that intermediate states are delivered.
 - Each service owns its current domain state and query behavior. Subscribe to invalidations before the initial snapshot. After a successful mutation, publish a latest-value invalidation; a change during snapshot construction or sending must trigger another refresh. Coalesce bursts so skipped intermediate invalidations are harmless.
+- Use `tokio::sync::watch` for collection invalidation. Publishers call `send_modify` only after a successful mutation. Each subscriber calls `subscribe()` followed by `mark_changed()`, then waits with `changed().await`. Changes occurring during snapshot construction or sending must remain unseen and trigger another iteration. Do not replace this with bare `Notify` without proving equivalent race-free behavior.
 - Notifications are transient wakeup hints, not authoritative data or durable events. Reconnects and missed subscriptions recover with a fresh snapshot. Outbound snapshots remain bounded; slow consumers may skip intermediate snapshots but not block unbounded production.
 - Prefer stream-owned producers whose futures are dropped on cancellation. A spawned producer must also wait on outbound-channel closure so an idle subscription cannot leak a task.
 - Keep high-frequency telemetry in ephemeral domain state and rate-limit its invalidations. Do not persist every download chunk or renderer progress tick. Lifecycle transitions and resume metadata retain the durability provided by the service's existing persistent representation.
@@ -246,7 +247,7 @@ Task 15 builds one WASI 0.3 component from service libraries. Start with direct 
     3. Add small example Cache client/server components and a host-driven integration test. Return a recoverable item error followed by a valid item, then cancel an active stream and observe producer termination.
   - **Verification:** `cargo test -p veldmap-rpc`, native/WASI clippy with `-D warnings`, both example components build for `wasm32-wasip3`, and the two-component Wasmtime 50 integration test passes its stream and cancellation assertions.
 
-- [ ] **Task 4a: Replace Event Replay with Snapshot Watches**
+- [x] **Task 4a: Replace Event Replay with Snapshot Watches**
   - **Action:**
     1. Remove `EventTable`, its replay tests, and newly unused crate/workspace/lockfile dependencies, including `ulid` and `buffa-types` from `veldmap-rpc`. Keep the transport, bounded-stream, health, deadline, cancellation, and error-mapping behavior that still has consumers.
     2. Replace `ListDownloads`, `ListViews`, and `ListOverlays` with the complete-snapshot watch contracts in Sections 2.4 and 3. Remove `ReadOptions`, `EventMeta`, `Op`, replay options, and subscription filters without a current consumer; reserve all removed protobuf field numbers and names.

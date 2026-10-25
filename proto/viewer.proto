@@ -16,7 +16,7 @@ service Viewer {
 
   rpc ControlCamera (CameraControlRequest) returns (veldmap.common.v1.ItemResult);
 
-  rpc ListViews (ListViewsRequest) returns (stream ViewEvent) {
+  rpc WatchViews (WatchViewsRequest) returns (stream ViewSnapshot) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
@@ -76,14 +76,15 @@ message ViewStatus {
   repeated veldmap.tiler.v1.RasterVariable candidate_variables = 14;
 }
 
-message ListViewsRequest {
-  veldmap.common.v1.ReadOptions options = 1;
-  optional veldmap.common.v1.Ids filter_to_views = 2;
+message WatchViewsRequest {
+  reserved 1, 2;
+  reserved "options", "filter_to_views";
 }
 
-message ViewEvent {
-  veldmap.common.v1.EventMeta meta = 1;
-  optional ViewStatus data = 2;
+message ViewSnapshot {
+  reserved 1, 2;
+  reserved "meta", "data";
+  repeated ViewStatus items = 3;
 }
 
 message WatchFramesRequest {
