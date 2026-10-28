@@ -13,5 +13,15 @@ tokio.workspace = true
 tokio-stream.workspace = true
 veldmap-proto = { path = "../veldmap-proto" }
 
+[target.'cfg(target_env = "p3")'.dev-dependencies]
+wasip3.workspace = true
+
+[features]
+http-example = []
+
+[[example]]
+name = "http-client"
+required-features = ["http-example"]
+
 [lints]
 workspace = true

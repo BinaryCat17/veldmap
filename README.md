@@ -1,35 +1,35 @@
 # VeldMap
 
-Geospatial imagery workspace over Copernicus Data Space: catalogue search,
-local download library, 2D raster canvas and 3D WGS84 globe.
+Geospatial imagery over Copernicus Data Space: catalogue search, local downloads,
+2D raster views and a 3D WGS84 globe.
 
-## Target architecture
+## WASI 0.3 roadmap
 
-Seven Rust microservices will compile to WASI 0.2 components (`wasm32-wasip2`)
-and talk over ConnectRPC on localhost sockets:
+The workspace targets `wasm32-wasip3` with generated ConnectRPC contracts.
+`host/veldmap-host` is the native Wasmtime embedder with per-component socket
+and HTTP egress policies. Reference services remain separate components with
+independent rendering state; the later composed profile may optimize measured
+GPU and transport costs without changing service behavior.
 
-| Service | Port | Contract |
-|---|---|---|
-| `data-provider` | 50051 | `provider.Provider` — stateless Copernicus CDSE adapter |
-| `data-library` | 50052 | `library.Library` — download manager and disk register |
-| `image-tiler` | 50053 | `tiler.Tiler` — raster describe and pyramid tiles |
-| `tile-cache` | 50054 | `cache.Cache` — QOI tile disk cache |
-| `image-view` | 50055 | `viewer.Viewer` — 2D raster canvas |
-| `globe` | 50056 | `globe.Globe` — 3D WGS84 ellipsoid |
-| `data-browser` | — | `iced` UI client of all services (`wasi-gfx`) |
+- `proto/` — authoritative protobuf and streaming contracts.
+- `crates/veldmap-proto` — Buffa messages, JSON, and ConnectRPC stubs.
+- `crates/veldmap-rpc` — shared transport, stream, health, and error helpers.
+- `host/veldmap-host` — native WASI 0.3 command-component runner.
+- `scripts/check_component_imports.py` — artifact interface inspection.
 
-- `proto/` — ConnectRPC contracts: stateless services stream finite lists,
-  stateful ones stream collection snapshots and live frames.
-- `crates/veldmap-proto` — Buffa messages, views and ConnectRPC stubs; `Bytes` payloads.
-- `crates/veldmap-rpc` — stream, health, error and transport helpers.
-- `crates/veldmap-core` — pyramid tiles, geodesy, ranged readers, GPU fallback.
-
-## Target build and run (after Task 14)
+## Build and verify
 
 ```bash
-cargo build --workspace --target wasm32-wasip2 --release
-process-compose up
+cargo test --workspace --locked
+cargo build -p veldmap-rpc --target wasm32-wasip3 --examples --features http-example --locked
+python3 scripts/check_component_imports.py target/wasm32-wasip3/debug/examples/*.wasm
 ```
 
-Runtime state lives under `runtime/`; set `COPERNICUS_ACCESS_KEY` and
-`COPERNICUS_ACCESS_SECRET` in `.env` (see `.env.example`) for downloads.
+Run a component with its configured policy:
+
+```bash
+cargo run -p veldmap-host --locked -- target/wasm32-wasip3/debug/examples/cache-server.wasm
+```
+
+See `docs/operations.md` for exact tool pins, HTTP verification, and launch details.
+Runtime state lives under `runtime/`; see `.env.example` for future CDSE downloads.

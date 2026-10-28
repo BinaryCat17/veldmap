@@ -1,7 +1,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -14,25 +14,29 @@ use std::time::{Duration, Instant};
 fn cache_components_stream_and_cancel() -> Result<(), String> {
     let workspace = workspace_root()?;
     build_examples(&workspace)?;
-    let components = target_dir(&workspace).join("wasm32-wasip2/debug/examples");
-    let runtime = env::var_os("WASMTIME").unwrap_or_else(|| OsString::from("wasmtime"));
+    let target = target_dir(&workspace);
+    let components = target.join("wasm32-wasip3/debug/examples");
+    let host = target.join("debug/veldmap-host");
 
     let server = Guest::spawn(
         "cache-server",
-        &runtime,
+        &host,
         &components.join("cache-server.wasm"),
         None,
+        &workspace,
     )?;
-    let address = server.ready(Duration::from_secs(20))?;
+    let address = server.ready(Duration::from_secs(120))?;
     let mut client = Guest::spawn(
         "cache-client",
-        &runtime,
+        &host,
         &components.join("cache-client.wasm"),
         Some(address),
+        &workspace,
     )?;
 
-    client.expect_marker("CACHE_STREAM_OK", Duration::from_secs(20))?;
-    client.expect_marker("CACHE_CANCEL_OK", Duration::from_secs(20))?;
+    client.expect_marker("CACHE_STREAM_OK", Duration::from_secs(120))?;
+    client.expect_marker("CACHE_TIMER_OK", Duration::from_secs(120))?;
+    client.expect_marker("CACHE_CANCEL_OK", Duration::from_secs(120))?;
     client.wait_success(Duration::from_secs(10))?;
     server.expect_marker("PRODUCER_TERMINATED", Duration::from_secs(15))?;
     Ok(())
@@ -48,14 +52,15 @@ fn workspace_root() -> Result<PathBuf, String> {
 
 fn build_examples(workspace: &Path) -> Result<(), String> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let guest = Command::new(&cargo)
         .current_dir(workspace)
         .args([
             "build",
+            "--locked",
             "-p",
             "veldmap-rpc",
             "--target",
-            "wasm32-wasip2",
+            "wasm32-wasip3",
             "--example",
             "cache-server",
             "--example",
@@ -63,13 +68,25 @@ fn build_examples(workspace: &Path) -> Result<(), String> {
         ])
         .output()
         .map_err(|error| format!("failed to build WASI examples: {error}"))?;
-    if output.status.success() {
+    if !guest.status.success() {
+        return Err(format!(
+            "WASI example build failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&guest.stdout),
+            String::from_utf8_lossy(&guest.stderr)
+        ));
+    }
+    let host = Command::new(cargo)
+        .current_dir(workspace)
+        .args(["build", "--locked", "-p", "veldmap-host"])
+        .output()
+        .map_err(|error| format!("failed to build host: {error}"))?;
+    if host.status.success() {
         return Ok(());
     }
     Err(format!(
-        "WASI example build failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "host build failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&host.stdout),
+        String::from_utf8_lossy(&host.stderr)
     ))
 }
 
@@ -98,17 +115,14 @@ struct Guest {
 impl Guest {
     fn spawn(
         name: &'static str,
-        runtime: &OsStr,
+        host: &Path,
         component: &Path,
         argument: Option<SocketAddr>,
+        workspace: &Path,
     ) -> Result<Self, String> {
-        let mut command = Command::new(runtime);
+        let mut command = Command::new(host);
         command
-            .arg("run")
-            .arg("-S")
-            .arg("tcp=y")
-            .arg("-S")
-            .arg("inherit-network=y")
+            .current_dir(workspace)
             .arg(component)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

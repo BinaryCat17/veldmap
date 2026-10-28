@@ -75,24 +75,34 @@ message DataProductResult {
 }
 
 message ListStoragePathRequest {
+  reserved 2;
+  reserved "page_token";
+
   string path = 1;
-  string page_token = 2;
   bool recursive = 3;
+  uint32 limit = 4;
 }
 
 message StorageEntry {
+  reserved 6;
+  reserved "next_page_token";
+
   string key = 1;
   uint64 size_bytes = 2;
   int64 modified_at_unix_ms = 3;
   string product_id = 4;
   optional string unviewable_reason = 5;
-  optional string next_page_token = 6;
+}
+
+message StorageListingMetadata {
+  bool truncated = 1;
 }
 
 message StorageEntryResult {
   oneof outcome {
     StorageEntry value = 1;
     veldmap.common.v1.ItemError error = 2;
+    StorageListingMetadata metadata = 3;
   }
 }
 

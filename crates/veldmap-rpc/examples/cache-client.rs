@@ -105,6 +105,8 @@ async fn main() -> ExampleResult<()> {
         .ok_or("long stream ended before its first item")?
         .to_owned_message();
     assert!(matches!(first.outcome, Some(Outcome::Value(_))));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    marker("CACHE_TIMER_OK")?;
     drop(active);
     marker("CACHE_CANCEL_OK")?;
     Ok(())

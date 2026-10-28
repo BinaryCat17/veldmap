@@ -59,7 +59,8 @@ veldmap/
 ├── crates/
 │   ├── veldmap-proto/
 │   ├── veldmap-rpc/
-│   ├── veldmap-core/
+│   └── veldmap-core/
+├── host/
 │   └── veldmap-host/
 ├── services/
 │   ├── data-provider/
@@ -265,7 +266,7 @@ Execute tasks in their listed order. Tasks 5b and 5c intentionally appear at the
     4. Do not add SQLite, a generic store, `Observed<T>`, a snapshot-watch helper, or an event-outbox framework in this task. The first real service will implement the Section 2.4 loop before any extraction is considered.
   - **Verification:** `cargo fmt --all -- --check`, `cargo test --workspace`, native clippy with `-D warnings`, and the existing WASI Cache integration pass on the pre-Task-5a baseline; the revised generated contracts pass their binary/JSON checks; and no nonhistorical source references to `EventTable` or replay contracts remain.
 
-- [ ] **Task 5a: Adopt the WASI 0.3 Baseline and Finalize Pre-Service Contracts**
+- [x] **Task 5a: Adopt the WASI 0.3 Baseline and Finalize Pre-Service Contracts**
   - **Action:**
     1. Upgrade the existing workspace, Rust 1.100 beta/stable toolchain under the Section 1.3 fallback, target configuration, exact dependency pins, and committed locks. Reprove the Task 4 Cache stream/cancellation scenario on WASI 0.3, explicitly including its Tokio timer path, then remove the old target configuration and superseded dependency entries under Section 0.
     2. Create the shared native `veldmap-host` embedder with its headless path, per-component allowlist in `runtime/config/component-imports.toml`, `scripts/check_component_imports.py`, and pinned Buf configuration. Update the README within its 35-line limit to describe the actual WASI 0.3 roadmap state.

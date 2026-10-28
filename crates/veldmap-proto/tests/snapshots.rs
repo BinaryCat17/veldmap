@@ -5,6 +5,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use veldmap_proto::veldmap::globe::v1::{OverlaySnapshot, OverlayStatus};
 use veldmap_proto::veldmap::library::v1::{DownloadItem, DownloadSnapshot, DownloadStatus};
+use veldmap_proto::veldmap::provider::v1::{
+    ListStoragePathRequest, StorageEntry, StorageEntryResult, StorageListingMetadata,
+};
 use veldmap_proto::veldmap::tiler::v1::RasterVariable;
 use veldmap_proto::veldmap::viewer::v1::{ViewSnapshot, ViewStatus};
 
@@ -72,6 +75,59 @@ fn overlay_snapshot_round_trips_binary_and_json() {
             detailed_candidates: vec![variable("B08", "NIR"), variable("B04", "Red")],
             ..Default::default()
         }],
+        ..Default::default()
+    });
+}
+
+#[test]
+fn empty_listing_metadata_round_trips_binary_and_json() {
+    assert_round_trip(StorageEntryResult {
+        outcome: StorageListingMetadata {
+            truncated: false,
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    });
+}
+
+#[test]
+fn complete_listing_round_trips_binary_and_json() {
+    assert_round_trip(ListStoragePathRequest {
+        path: "product-1".into(),
+        recursive: true,
+        limit: 100,
+        ..Default::default()
+    });
+    assert_round_trip(StorageEntryResult {
+        outcome: StorageEntry {
+            key: "product-1/manifest.xml".into(),
+            size_bytes: 4096,
+            modified_at_unix_ms: 1_761_000_123_456,
+            product_id: "product-1".into(),
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    });
+    assert_round_trip(StorageEntryResult {
+        outcome: StorageListingMetadata {
+            truncated: false,
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    });
+}
+
+#[test]
+fn truncated_listing_metadata_round_trips_binary_and_json() {
+    assert_round_trip(StorageEntryResult {
+        outcome: StorageListingMetadata {
+            truncated: true,
+            ..Default::default()
+        }
+        .into(),
         ..Default::default()
     });
 }
