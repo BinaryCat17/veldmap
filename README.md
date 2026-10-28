@@ -25,6 +25,6 @@ cargo build -p veldmap -p veldmap-core -p veldmap-render -p veldmap-storage --ta
 cargo run -p veldmap --locked
 ```
 
-The workspace uses stable Rust `1.99.1`, Rust 2024, and a committed lockfile.
-See `docs/operations.md` for exact pins and verification commands. Runtime state
+See `docs/operations.md` for toolchain pins and verification commands. `plan.md`
+contains the temporary migration contract and clean-artifact limits. Runtime state
 lives under `runtime/`; see `.env.example` for CDSE downloads.

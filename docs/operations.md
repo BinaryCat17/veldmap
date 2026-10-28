@@ -5,8 +5,9 @@
 - Rust `1.99.1`, Rust 2024, MSRV 1.99; browser target is `wasm32-unknown-unknown`.
 - Workspace packages are `veldmap`, `veldmap-core`, `veldmap-render`, and `veldmap-storage`.
 - `veldmodules/` is retained outside the workspace as migration input.
-- Iced's candidate is `cd04b74ca7073766f654535d6e72c452ef749d07`; wgpu is `30.0.1` and wasm-bindgen is `0.2.129`.
-- Direct dependencies use exact pins in `Cargo.toml`; the complete candidate baseline is in `plan.md`.
+- Iced uses `cd04b74ca7073766f654535d6e72c452ef749d07` (`0.15.0-dev`) with
+  unified wgpu `30.0.1`; wasm-bindgen is `0.2.129`.
+- Selected direct dependencies use exact pins in `Cargo.toml`.
 
 All Cargo verification uses the committed lockfile and `--locked`.
 
