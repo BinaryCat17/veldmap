@@ -1,2 +1,0 @@
-[target.wasm32-wasip3]
-rustflags = ["--cfg", "tokio_unstable"]

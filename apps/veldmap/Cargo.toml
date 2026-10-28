@@ -1,0 +1,24 @@
+[package]
+name = "veldmap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "veldmap-native"
+path = "src/main.rs"
+
+[dependencies]
+veldmap-core = { path = "../../crates/veldmap-core" }
+veldmap-render = { path = "../../crates/veldmap-render" }
+veldmap-storage = { path = "../../crates/veldmap-storage" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+
+[lints]
+workspace = true

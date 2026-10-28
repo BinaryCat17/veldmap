@@ -3,33 +3,28 @@
 Geospatial imagery over Copernicus Data Space: catalogue search, local downloads,
 2D raster views and a 3D WGS84 globe.
 
-## WASI 0.3 roadmap
+## Transitional architecture
 
-The workspace targets `wasm32-wasip3` with generated ConnectRPC contracts.
-`host/veldmap-host` is the native Wasmtime embedder with per-component socket
-and HTTP egress policies. Reference services remain separate components with
-independent rendering state; the later composed profile may optimize measured
-GPU and transport costs without changing service behavior.
+The new modular application uses ordinary typed Rust calls:
 
-- `proto/` — authoritative protobuf and streaming contracts.
-- `crates/veldmap-proto` — Buffa messages, JSON, and ConnectRPC stubs.
-- `crates/veldmap-rpc` — shared transport, stream, health, and error helpers.
-- `host/veldmap-host` — native WASI 0.3 command-component runner.
-- `scripts/check_component_imports.py` — artifact interface inspection.
+- `apps/veldmap` — native and browser entry points and composition.
+- `crates/veldmap-core` — domain and application logic.
+- `crates/veldmap-render` — rendering and GPU resources.
+- `crates/veldmap-storage` — persistence adapters.
+
+`veldmodules/` remains temporarily as migration input, outside the Cargo workspace.
+The legacy host, protobuf, RPC, WASI, and Wasmtime scaffolding has been removed.
+The current entry points are minimal; product flows migrate in later tasks.
 
 ## Build and verify
 
 ```bash
 cargo test --workspace --locked
-cargo build -p veldmap-rpc --target wasm32-wasip3 --examples --features http-example --locked
-python3 scripts/check_component_imports.py target/wasm32-wasip3/debug/examples/*.wasm
+cargo build -p veldmap -p veldmap-core -p veldmap-render -p veldmap-storage --locked
+cargo build -p veldmap -p veldmap-core -p veldmap-render -p veldmap-storage --target wasm32-unknown-unknown --locked
+cargo run -p veldmap --locked
 ```
 
-Run a component with its configured policy:
-
-```bash
-cargo run -p veldmap-host --locked -- target/wasm32-wasip3/debug/examples/cache-server.wasm
-```
-
-See `docs/operations.md` for exact tool pins, HTTP verification, and launch details.
-Runtime state lives under `runtime/`; see `.env.example` for future CDSE downloads.
+The workspace uses stable Rust `1.99.1`, Rust 2024, and a committed lockfile.
+See `docs/operations.md` for exact pins and verification commands. Runtime state
+lives under `runtime/`; see `.env.example` for CDSE downloads.
