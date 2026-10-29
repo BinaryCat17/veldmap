@@ -104,8 +104,8 @@ apps/veldmap → veldmap-storage → veldmap-core
 - `veldmap-core` owns domain types, application behavior, consumer-defined ports, pure raster transformations, tile planning, and persistent-cache policy. Provider, library, tiler, cache, viewer state, and globe state are modules, not separate crates.
 - `veldmap-render` owns wgpu pipelines, GPU resources, the bounded GPU tile cache, and viewer/globe draw behavior. Camera math and tile selection remain in core.
 - `veldmap-storage` owns SQL migrations, synchronous repositories, the database owner, and native/browser SQLite drivers.
-- `apps/veldmap` owns Iced presentation, subscriptions, native/web HTTP and blob adapters, native codec FFI, browser codec workers, runtime selection, and composition. Only the composition root knows every concrete implementation.
-- Core does not depend on Iced, wgpu, winit, rusqlite, Tokio, wasm-bindgen, browser JavaScript APIs, or native codec FFI. Once FFI is outside core, forbid unsafe code in core.
+- `apps/veldmap` owns eframe presentation, repaint scheduling, native/web HTTP and blob adapters, native codec FFI, browser codec workers, runtime selection, and composition. Only the composition root knows every concrete implementation.
+- Core does not depend on eframe, wgpu, winit, rusqlite, Tokio, wasm-bindgen, browser JavaScript APIs, or native codec FFI. Once FFI is outside core, forbid unsafe code in core.
 
 Do not create separate `ports`, `app`, `ui`, `platform-native`, or `platform-web` crates preemptively. Extract an imagery/codec crate when native/browser dependency sets, unsafe isolation, packaging, or compile boundaries justify it. Portable pure-Rust codecs may remain in core; platform-specific implementations belong at the platform edge.
 
@@ -159,9 +159,11 @@ The starting candidates are:
 
 | Component | Initial pin or policy |
 |---|---|
-| iced | Git revision `cd04b74ca7073766f654535d6e72c452ef749d07` (`0.15.0-dev`); newer revisions or releases may replace it after the same runtime gates pass |
-| wgpu | `=30.0.1`, unified with Iced; advance only with verified Iced/wgpu compatibility |
-| winit | No independent crates.io pin; use Iced's integration or its exact winit Git revision if direct types are necessary |
+| eframe | `=0.37.0` |
+| egui | `=0.37.0`, direct only where its types are needed |
+| egui-wgpu | `=0.37.0` |
+| wgpu | `=30.0.1`, unified with eframe; advance only with verified eframe/wgpu compatibility |
+| winit | No independent crates.io pin; use eframe's integration or its exact resolved winit version if direct types are necessary |
 | rusqlite | `=0.41.0`, `bundled`, native only |
 | sqlite-wasm-rs | `=0.6.2`, `wasm-bindgen`, browser spike candidate |
 | sqlite-wasm-vfs | `=0.3.0`, initial `sahpool` candidate subject to the multi-tab decision |
@@ -175,7 +177,9 @@ The starting candidates are:
 | thiserror | `=2.0.21` |
 | anyhow | `=1.0.104`, entry points and composition only |
 
-The pinned Iced development revision uses wgpu 30 and its own winit Git revision. A crates.io winit package with the same version number is not necessarily the same crate instance and must not be mixed into Iced window/event types.
+eframe 0.37 uses wgpu 30 and crates.io winit. Do not mix an independently pinned winit package into eframe window/event types.
+
+The former Iced candidate was rejected after its unmodified counter example panicked in `iced_wgpu::quad::Layer::update` during browser WebGPU staging-buffer mapping. An isolated eframe 0.37/wgpu 30 spike rendered custom paint content natively and in Windows Chrome/WebGPU; complete Task 2 verification is still required.
 
 Target-specific dependencies belong in the relevant app, render, storage, or justified codec crate. Do not put native and browser driver dependencies indiscriminately in the root manifest.
 
@@ -194,16 +198,16 @@ OpenJPEG retains its native implementation initially. Its browser Emscripten bui
 - No WASI target, Wasmtime host, ConnectRPC, Buffa, or internal protobuf.
 - No ORM or generic database framework.
 - No PGlite or parallel browser storage architecture.
-- No second UI toolkit. Egui is not introduced during this migration.
-- No custom rendering shell while Iced's shader-primitive integration satisfies the requirements.
+- Use exactly one UI toolkit, egui/eframe; do not reintroduce Iced or add another toolkit.
+- No custom rendering shell while eframe's `egui_wgpu::CallbackTrait` integration satisfies the requirements.
 
 ---
 
 ## 3. Rendering, Storage, and Data Ownership
 
-### 3.1 Iced and Shared GPU Resources
+### 3.1 eframe and Shared GPU Resources
 
-Iced owns the application window/canvas and its wgpu device, queue, encoder, and submission. Viewer and globe integrate through Iced shader widgets and custom primitives. Their pipelines receive Iced's device and queue and share GPU textures through application-owned resource state.
+eframe owns the application window/canvas and its wgpu device, queue, encoder, and submission. Viewer and globe integrate through egui paint callbacks and `egui_wgpu::CallbackTrait`. Their pipelines receive eframe's device and queue and share GPU textures through application-owned callback resources.
 
 Do not create an independent `RenderContext` in `App::new`, a second surface, or a parallel command-submission shell unless a measured limitation is demonstrated and this plan is revised.
 
@@ -259,7 +263,7 @@ Every real runtime scenario requires a positive readiness or expected applicatio
 The following are architecture gates, not optional cleanup:
 
 1. Tasks 2–4 record the supported native OS/GPU and browser matrix, native/browser format scope, WebGPU or WebGL policy, representative raster/download sizes, CPU/GPU and queue budgets, cancellation deadlines, and UI-responsiveness thresholds. Values come from measured scenarios rather than arbitrary defaults.
-2. One Iced-owned wgpu device/queue serves UI, viewer, and globe without per-frame CPU pixel transport.
+2. One eframe-owned wgpu device/queue serves UI, viewer, and globe without per-frame CPU pixel transport.
 3. Real CDSE/S3 requests pass native and browser signing, CORS where applicable, redirect, cancellation, and streaming Range scenarios.
 4. Representative Sentinel JP2 imagery decodes and displays in a browser worker with bounded memory and responsive cancellation.
 5. Native and browser application scenarios cover repository startup, migrations, restart persistence, corruption handling, and the chosen multi-tab policy.
@@ -280,15 +284,15 @@ The following are architecture gates, not optional cleanup:
   4. Update README and operations documentation to describe the transitional architecture and actual commands.
 - **Verification:** `cargo fmt --all -- --check`, workspace tests, native clippy with `-D warnings`, and native plus `wasm32-unknown-unknown` builds of the new packages succeed with `--locked`; legacy-reference scans confirm that only `veldmodules/` and migration documentation mention superseded transport architecture.
 
-### Task 2: Prove Shared Iced/wgpu Rendering on Native and Browser
+### Task 2: Prove Shared eframe/wgpu Rendering on Native and Browser
 
 - [ ] **Action:**
-  1. Pin Iced `0.15.0-dev` at the selected Git revision and integrate its unified wgpu 30/winit sources. Record the exact revisions and `cargo tree` evidence; later upgrades remain deliberate and require the same runtime gates.
-  2. Build a minimal Iced application with custom shader primitives, two viewport types, and one shared GPU tile representation. Use Iced's device/queue rather than an external rendering shell.
-  3. Render the same uploaded tile in viewer-like and globe-like geometry while ordinary Iced widgets remain interactive. Exercise input, clipping, resize, scale factor, and surface recreation where supported, then build the same path for a browser canvas.
-  4. Establish the reusable application smoke runner with explicit readiness, expected-outcome, and complete-log checks. Add CI and dependency checks from Section 2.1.
-  5. Create `docs/verification.md` within its 80-line limit. Record the initial native/browser and rendering support matrix, smoke commands, expected outcomes, and measured tile-upload, CPU-traffic, frame-memory, bounded-cache, and responsiveness budgets. Keep diagnostic readback out of production.
-- **Verification:** real native-window and supported-browser applications start, render, accept input, resize, share the texture, remain within measured budgets, and shut down with clean logs; native/wasm builds and clippy pass; no per-frame CPU pixel transport or second GPU device exists. Failure blocks further rendering migration and requires plan revision.
+  1. Pin eframe/egui/egui-wgpu `=0.37.0` and unified wgpu `=30.0.1`, using eframe's winit integration. Record exact versions and `cargo tree` evidence; later upgrades remain deliberate and require the same runtime gates.
+  2. Build a minimal eframe application with `egui_wgpu::CallbackTrait` paint callbacks, two viewport types, and one shared `Arc<GpuTile>`. Upload one deterministic RGBA fixture once through eframe's device/queue, retain no duplicate CPU pixel payload, and do not create an external rendering shell.
+  3. Render that tile in viewer-like and globe-like geometry while ordinary egui widgets remain interactive. Exercise input, clipping, resize, scale factor, and the surface reconfiguration/recreation paths exposed on each target, then build the same path for a browser canvas. Only browsers exercised with WebGPU enter the initial support matrix; do not describe resize testing as device-loss recovery.
+  4. Establish one reusable application smoke runner with explicit readiness, expected-outcome, and complete-log checks on native and browser. Use tile identity/upload counters and diagnostic screenshots to prove resource sharing and visible output; keep readback out of normal rendering. Prove that idle draw counters remain unchanged without input after initial readiness. Add CI and dependency checks from Section 2.1.
+  5. Create `docs/verification.md` within its 80-line limit. Record the exercised native/browser rendering matrix, smoke commands, expected outcomes, and measured tile-upload, non-pixel CPU-traffic, application-owned tile-memory, one-entry cache, responsiveness, shutdown, and idle-repaint bounds. Identify these as one-tile spike measurements rather than total GPU-memory or future production-cache budgets.
+- **Verification:** real native-window and each declared browser application start, render both geometries, accept widget and pointer input, clip, resize, observe scale factor where supported, share one uploaded texture, remain within the recorded spike bounds, perform no periodic redraw while idle, and shut down with clean logs; native/wasm builds and clippy pass; no per-frame CPU pixel transport or second GPU device exists. Failure blocks further rendering migration and requires plan revision.
 
 ### Task 3: Prove External HTTP and Browser OpenJPEG
 
@@ -317,13 +321,13 @@ The following are architecture gates, not optional cleanup:
   3. Select and pin an established content hash. Detect same-length mid-file local edits and preserve verified immutable remote version identities where hashing is unnecessary.
   4. Implement bounded range-block pooling/readahead and explicit operation-owner cancellation without tying domain code to Tokio or browser APIs. Forbid unsafe code and platform-specific dependencies in core.
   5. Collect representative legacy configurations and deterministic fixtures for subsequent application runtime scenarios; do not build parallel mathematical or application-logic test harnesses.
-- **Verification:** native application startup and real local/HTTP range and source-change scenarios complete with expected application outcomes and clean logs; native/wasm clippy and builds pass; dependency scans confirm that new core has no Iced/wgpu/rusqlite/Tokio/wasm-bindgen/native-FFI dependency and no unsafe code.
+- **Verification:** native application startup and real local/HTTP range and source-change scenarios complete with expected application outcomes and clean logs; native/wasm clippy and builds pass; dependency scans confirm that new core has no eframe/wgpu/rusqlite/Tokio/wasm-bindgen/native-FFI dependency and no unsafe code.
 
 ### Task 6: Build the Thin Native Raster Vertical Slice
 
 - [ ] **Action:**
   1. Implement only the portable TIFF or JP2 path needed to open one representative local fixture. Reuse the Task 3 decoder work and keep native codec FFI at the platform edge.
-  2. Produce validated `DecodedTile` values and display them through a minimal viewer using Task 2's Iced integration and production composition root. Implement only the camera control needed to inspect the fixture.
+  2. Produce validated `DecodedTile` values and display them through a minimal viewer using Task 2's eframe integration and production composition root. Implement only the camera control needed to inspect the fixture.
   3. Connect source identity, bounded tile production, upload, display, resize, cancellation, and clean shutdown without adding the full provider, persistent cache, or remaining codecs.
   4. Retain the fixture and application smoke scenario for later migration tasks. Do not create an alternative demo architecture that will be discarded.
 - **Verification:** the real native application starts, opens and displays the representative raster, supports the included navigation/resize flow, cancels an in-flight open, and closes with the expected outcome and clean logs; native/wasm builds and clippy pass.
@@ -366,8 +370,8 @@ The following are architecture gates, not optional cleanup:
 
 - [ ] **Action:**
   1. Complete viewer camera control, fit/zoom/pan, resize, variable selection, tile ladder, and typed tile production in core.
-  2. Complete the viewer pipeline and bounded `Arc<GpuTile>` cache in render using Task 2's Iced primitive integration. Share device/queue with the UI and upload each decoded tile without a duplicate retained pixel payload.
-  3. Build the complete Iced catalogue/search/download/open workflow and download subscriptions. Coalesce pointer input and preserve view state across snapshot replacement.
+  2. Complete the viewer pipeline and bounded `Arc<GpuTile>` cache in render using Task 2's `egui_wgpu` paint-callback integration. Share device/queue with the UI and upload each decoded tile without a duplicate retained pixel payload.
+  3. Build the complete eframe catalogue/search/download/open workflow and download subscriptions. Coalesce pointer input and preserve view state across snapshot replacement.
   4. Remove superseded image-view and tile-cache RPC paths after equivalent application scenarios pass.
 - **Verification:** the complete native application flow searches a fixture catalogue, downloads/opens a raster, changes variables, navigates/resizes, cancels work, and survives restart with expected visible/persisted outcomes and clean logs; profiling shows no per-frame CPU pixel transport and CPU/GPU memory remains within budget.
 
@@ -376,7 +380,7 @@ The following are architecture gates, not optional cleanup:
 - [ ] **Action:**
   1. Compose provider, library, tiler, viewer, storage, and rendering with browser Fetch, OPFS/blob, database-owner, and decoder-worker adapters.
   2. Implement browser-specific path, quota, permission, reload, eviction recovery, cancellation, and second-tab behavior without leaking platform types into core.
-  3. Reuse the native Iced workflow and verify responsive UI during network, database, and decode work. Keep worker payloads bounded and ownership transfers explicit.
+  3. Reuse the native eframe workflow and verify responsive UI during network, database, and decode work. Keep worker payloads bounded and ownership transfers explicit.
   4. Update `docs/operations.md` with required headers, worker startup, and log commands. Update `docs/verification.md` with browser/format support, persistence/eviction behavior, live-CDSE limitations, expected outcomes, and measured budgets.
 - **Verification:** the complete supported browser flow passes against deterministic fixtures in each supported browser, including reload persistence, non-destructive recovery, and the chosen multi-tab scenario, with expected outcomes and clean logs; live CDSE/S3 CORS smoke passes or the browser scope/plan is revised; no UI-thread blocking or per-frame CPU pixel transport occurs.
 
@@ -384,7 +388,7 @@ The following are architecture gates, not optional cleanup:
 
 - [ ] **Action:**
   1. Migrate WGS84 geometry, surface lifting, warp subdivision, culling, georeference ranks, Transverse Mercator/Pulkovo math, outlines/hatching, overlays, and quaternion flights into small inspectable core modules.
-  2. Implement globe rendering through Iced primitives with the same GPU resources and `Arc<GpuTile>` values used by the viewer. Publish overlay snapshots rather than frames or event history.
+  2. Implement globe rendering through `egui_wgpu` paint callbacks with the same GPU resources and `Arc<GpuTile>` values used by the viewer. Publish overlay snapshots rather than frames or event history.
   3. Implement overlay ordering, opacity, visibility, variable selection, surface probing, camera flights, and coalesced orbit/zoom/resize input in the shared UI.
   4. Remove legacy globe RPC/GPU resource code after native and browser application parity scenarios pass.
 - **Verification:** real native/browser globe scenarios exercise overlay snapshots/reconnects, camera control, probing, resize, cancellation, shared-tile reuse, and bounded memory with expected visible outcomes and clean logs; no RGBA frame stream or production readback exists.
@@ -392,7 +396,7 @@ The following are architecture gates, not optional cleanup:
 ### Task 14: Complete Presentation and Remove Superseded Architecture
 
 - [ ] **Action:**
-  1. Complete panes/tabs, layout persistence, catalogue/search/download tables, row states, batch actions, NetCDF selectors, settings, and viewer/globe interactions using Iced and current-state storage.
+  1. Complete panes/tabs, layout persistence, catalogue/search/download tables, row states, batch actions, NetCDF selectors, settings, and viewer/globe interactions using eframe and current-state storage.
   2. Preserve English plural/decimal formatting, accessible error presentation, stable selection across snapshots, bounded input coalescing, and clean cancellation/shutdown. Do not claim OS accessibility or mobile support without separate verification.
   3. Remove `veldmodules/` and any remaining migration-only references or unused lockfile entries after all replacement application scenarios pass.
   4. Create `docs/architecture.md` from the delivered implementation, not by copying this plan. Update `README.md`, `docs/operations.md`, and `docs/verification.md` to their assigned responsibilities and line limits; remove duplicated or historical material.
@@ -404,7 +408,7 @@ The following are architecture gates, not optional cleanup:
 ## 6. Deferred Decisions
 
 - Android/iOS lifecycle, surface recreation, IME, safe areas, accessibility, and storage paths require explicit product requirements and separate tasks.
-- A custom rendering shell requires evidence that Iced primitives cannot meet a measured rendering requirement.
+- A custom rendering shell requires evidence that `egui_wgpu` paint callbacks cannot meet a measured rendering requirement.
 - Additional crates require demonstrated packaging, dependency-isolation, or reuse benefits.
 - Durable event history, replay, synchronization, and audit storage are excluded until a concrete requirement exists.
 - Mobile, multi-tab coordination, and live-service support must never be inferred from successful compilation alone.
