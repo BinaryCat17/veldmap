@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>VeldMap</title>
+    <link rel="icon" href="data:,">
+    <style>
+        html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #202124; }
+        #veldmap-canvas { display: block; width: 100%; height: 100%; }
+        #smoke-status { display: none; }
+    </style>
+</head>
+<body>
+    <canvas id="veldmap-canvas"></canvas>
+    <output id="smoke-status"></output>
+    <script type="module">
+        import init, { shutdown } from './veldmap.js';
+        window.veldmapShutdown = shutdown;
+        init().catch((error) => console.error('VeldMap initialization failed', error));
+    </script>
+</body>
+</html>

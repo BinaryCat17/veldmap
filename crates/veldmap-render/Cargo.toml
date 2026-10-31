@@ -6,7 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-veldmap-core = { path = "../veldmap-core" }
+egui.workspace = true
+egui-wgpu.workspace = true
+veldmap-core = { path = "../veldmap-core", version = "0.1.0" }
+wgpu.workspace = true
 
 [lints]
 workspace = true

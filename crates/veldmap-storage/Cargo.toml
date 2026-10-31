@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-veldmap-core = { path = "../veldmap-core" }
+veldmap-core = { path = "../veldmap-core", version = "0.1.0" }
 
 [lints]
 workspace = true

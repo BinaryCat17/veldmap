@@ -286,7 +286,7 @@ The following are architecture gates, not optional cleanup:
 
 ### Task 2: Prove Shared eframe/wgpu Rendering on Native and Browser
 
-- [ ] **Action:**
+- [x] **Action:**
   1. Pin eframe/egui/egui-wgpu `=0.37.0` and unified wgpu `=30.0.1`, using eframe's winit integration. Record exact versions and `cargo tree` evidence; later upgrades remain deliberate and require the same runtime gates.
   2. Build a minimal eframe application with `egui_wgpu::CallbackTrait` paint callbacks, two viewport types, and one shared `Arc<GpuTile>`. Upload one deterministic RGBA fixture once through eframe's device/queue, retain no duplicate CPU pixel payload, and do not create an external rendering shell.
   3. Render that tile in viewer-like and globe-like geometry while ordinary egui widgets remain interactive. Exercise input, clipping, resize, scale factor, and the surface reconfiguration/recreation paths exposed on each target, then build the same path for a browser canvas. Only browsers exercised with WebGPU enter the initial support matrix; do not describe resize testing as device-loss recovery.

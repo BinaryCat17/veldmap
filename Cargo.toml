@@ -14,7 +14,14 @@ rust-version = "1.99"
 license = "MIT"
 
 [workspace.dependencies]
+eframe = { version = "=0.37.0", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+egui = "=0.37.0"
+egui-wgpu = "=0.37.0"
+thiserror = "=2.0.21"
 wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "=0.4.79"
+web-sys = "=0.3.106"
+wgpu = "=30.0.1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

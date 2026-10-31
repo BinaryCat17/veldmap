@@ -14,7 +14,8 @@ The new modular application uses ordinary typed Rust calls:
 
 `veldmodules/` remains temporarily as migration input, outside the Cargo workspace.
 The legacy host, protobuf, RPC, WASI, and Wasmtime scaffolding has been removed.
-The current entry points are minimal; product flows migrate in later tasks.
+The current application proves shared eframe/wgpu rendering on native and browser;
+product flows migrate in later tasks.
 
 ## Build and verify
 
